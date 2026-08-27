@@ -32,14 +32,32 @@ import {
   shippingDashboardRouter,
 } from "./routes/shippingDashboard.routes.js";
 
+import {
+  shopifyWebhookRouter,
+} from "./routes/shopifyWebhook.routes.js";
+
 const app = express();
 
+/*
+ * Shopify Webhooks müssen den unveränderten
+ * Request Body für die HMAC-Prüfung erhalten.
+ */
 app.use(
-  shippingDashboardRouter
+  "/webhooks/shopify",
+  express.raw({
+    type: "application/json",
+  })
+);
+
+app.use(
+  shopifyWebhookRouter
 );
 
 app.use(express.json());
 
+app.use(
+  shippingDashboardRouter
+);
 
 // ============================================================
 // ROOT
