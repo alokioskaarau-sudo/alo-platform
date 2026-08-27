@@ -1,4 +1,5 @@
 import { Router } from "express";
+
 import {
   createHmac,
   timingSafeEqual,
@@ -8,23 +9,34 @@ import {
   processPaidShopifyOrder,
 } from "../modules/shipping/paidOrderPipeline.service.js";
 
-const router = Router();
+import {
+  createWebhookEvent,
+  markWebhookProcessing,
+  markWebhookCompleted,
+  markWebhookFailed,
+} from "../database/shopifyWebhookEvents.js";
+
+const router =
+  Router();
 
 
 // ============================================================
-// SHOPIFY HMAC VERIFIZIEREN
+// SHOPIFY HMAC
 // ============================================================
 
 function verifyShopifyWebhook(
   rawBody: Buffer,
-  hmacHeader: string | undefined
+  hmacHeader:
+    | string
+    | undefined
 ): boolean {
   if (!hmacHeader) {
     return false;
   }
 
   const secret =
-    process.env.SHOPIFY_CLIENT_SECRET;
+    process.env
+      .SHOPIFY_CLIENT_SECRET;
 
   if (!secret) {
     throw new Error(
@@ -32,27 +44,20 @@ function verifyShopifyWebhook(
     );
   }
 
-  const calculatedHmac =
+  const calculated =
     createHmac(
       "sha256",
       secret
     )
       .update(rawBody)
-      .digest("base64");
+      .digest();
 
-  let receivedBuffer: Buffer;
-  let calculatedBuffer: Buffer;
+  let received: Buffer;
 
   try {
-    receivedBuffer =
+    received =
       Buffer.from(
         hmacHeader,
-        "base64"
-      );
-
-    calculatedBuffer =
-      Buffer.from(
-        calculatedHmac,
         "base64"
       );
   } catch {
@@ -60,75 +65,135 @@ function verifyShopifyWebhook(
   }
 
   if (
-    receivedBuffer.length !==
-    calculatedBuffer.length
+    received.length !==
+    calculated.length
   ) {
     return false;
   }
 
   return timingSafeEqual(
-    receivedBuffer,
-    calculatedBuffer
+    received,
+    calculated
   );
 }
 
 
 // ============================================================
-// SHOPIFY ORDERS PAID WEBHOOK
+// PAID ORDER VERARBEITEN
+// ============================================================
+
+async function processStoredWebhook(
+  eventId: string,
+  orderId: string
+) {
+  try {
+    await markWebhookProcessing(
+      eventId
+    );
+
+    const result =
+      await processPaidShopifyOrder(
+        orderId
+      );
+
+    await markWebhookCompleted(
+      eventId
+    );
+
+    console.log(
+      "Shopify Webhook vollständig verarbeitet:",
+      {
+        eventId,
+        orderId,
+        orderName:
+          result?.orderName ??
+          null,
+        skipped:
+          result?.skipped ??
+          false,
+      }
+    );
+
+  } catch (error: any) {
+    const message =
+      error?.message ??
+      String(error);
+
+    await markWebhookFailed(
+      eventId,
+      message
+    );
+
+    console.error(
+      "Shopify Webhook Verarbeitung fehlgeschlagen:",
+      {
+        eventId,
+        orderId,
+        error: message,
+      }
+    );
+  }
+}
+
+
+// ============================================================
+// ORDERS / PAID
 // ============================================================
 
 router.post(
   "/webhooks/shopify/orders-paid",
+
   async (req, res) => {
     try {
       const rawBody =
         req.body as Buffer;
 
       if (
-        !Buffer.isBuffer(rawBody)
+        !Buffer.isBuffer(
+          rawBody
+        )
       ) {
-        console.error(
-          "Shopify Webhook ohne Raw Body."
-        );
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Webhook Raw Body fehlt.",
-        });
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Webhook Raw Body fehlt.",
+          });
       }
 
 
       // ------------------------------------------------------
-      // HMAC prüfen
+      // HMAC
       // ------------------------------------------------------
 
-      const hmacHeader =
+      const hmac =
         req.get(
           "X-Shopify-Hmac-Sha256"
         );
 
-      const valid =
-        verifyShopifyWebhook(
+      if (
+        !verifyShopifyWebhook(
           rawBody,
-          hmacHeader
-        );
-
-      if (!valid) {
+          hmac
+        )
+      ) {
         console.warn(
-          "Shopify Webhook mit ungültiger HMAC abgelehnt."
+          "Ungültiger Shopify Webhook abgelehnt."
         );
 
-        return res.status(401).json({
-          ok: false,
-          error:
-            "Invalid Shopify HMAC",
-        });
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Invalid Shopify HMAC",
+          });
       }
 
 
       // ------------------------------------------------------
-      // Shopify Header
+      // HEADER
       // ------------------------------------------------------
 
       const topic =
@@ -148,28 +213,39 @@ router.post(
 
 
       // ------------------------------------------------------
-      // Topic prüfen
+      // NUR ORDERS_PAID
       // ------------------------------------------------------
 
       if (
-        topic &&
         topic !== "orders/paid"
       ) {
-        console.warn(
-          "Unerwarteter Shopify Webhook Topic:",
-          topic
-        );
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Unexpected webhook topic",
-        });
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Unexpected webhook topic",
+          });
       }
 
 
       // ------------------------------------------------------
-      // JSON parsen
+      // WEBHOOK-ID IST FÜR IDEMPOTENZ PFLICHT
+      // ------------------------------------------------------
+
+      if (!webhookId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Webhook ID fehlt.",
+          });
+      }
+
+
+      // ------------------------------------------------------
+      // PAYLOAD
       // ------------------------------------------------------
 
       let payload: any;
@@ -182,20 +258,18 @@ router.post(
             )
           );
       } catch {
-        console.error(
-          "Shopify Webhook enthält ungültiges JSON."
-        );
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Invalid JSON payload",
-        });
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Invalid JSON payload",
+          });
       }
 
 
       // ------------------------------------------------------
-      // Order ID ermitteln
+      // ORDER ID
       // ------------------------------------------------------
 
       const rawOrderId =
@@ -204,108 +278,110 @@ router.post(
         payload?.id;
 
       if (!rawOrderId) {
-        console.error(
-          "Shopify orders/paid Webhook ohne Order-ID."
-        );
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Order ID fehlt.",
-        });
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Order ID fehlt.",
+          });
       }
 
       const orderId =
-        String(rawOrderId);
+        String(
+          rawOrderId
+        );
+
+      const orderName =
+        payload?.name
+          ? String(
+              payload.name
+            )
+          : null;
 
 
       // ------------------------------------------------------
-      // Nur sichere Metadaten loggen
-      // Keine Kundenadresse / E-Mail loggen
+      // WEBHOOK ZUERST IN POSTGRES SPEICHERN
       // ------------------------------------------------------
 
-      console.log(
-        "Shopify Webhook empfangen:",
-        {
-          topic:
-            topic ?? null,
+      const stored =
+        await createWebhookEvent({
+          webhookId,
 
-          shop:
+          topic,
+
+          shopDomain:
             shop ?? null,
-
-          webhookId:
-            webhookId ?? null,
 
           orderId,
 
-          orderName:
-            payload?.name ??
-            null,
+          orderName,
+        });
+
+
+      // ------------------------------------------------------
+      // DUPLIKAT
+      // ------------------------------------------------------
+
+      if (!stored.created) {
+        console.log(
+          "Shopify Webhook bereits bekannt:",
+          {
+            webhookId,
+            orderId,
+            status:
+              stored.event.status,
+          }
+        );
+
+        return res
+          .status(200)
+          .json({
+            ok: true,
+            received: true,
+            duplicate: true,
+          });
+      }
+
+
+      console.log(
+        "Shopify Webhook dauerhaft gespeichert:",
+        {
+          eventId:
+            stored.event.id,
+
+          webhookId,
+
+          orderId,
+
+          orderName,
         }
       );
 
 
       // ------------------------------------------------------
-      // Shopify sofort bestätigen
-      // ------------------------------------------------------
-
-      res.status(200).json({
-        ok: true,
-        received: true,
-      });
-
-
-      // ------------------------------------------------------
-      // Versand-Pipeline im Hintergrund starten
+      // JETZT DARF SHOPIFY 200 BEKOMMEN
       //
-      // AKTUELL:
-      // Shopify PAID
-      // -> Bestellung laden
-      // -> Adresse validieren
-      // -> Gewicht berechnen
-      // -> SPECIMEN Swiss Post Label
-      // -> PostgreSQL
-      // -> Print Queue
-      //
-      // Noch KEINE LIVE Frankierung.
-      // Noch KEIN Fulfillment vor erfolgreichem Druck.
+      // Der Event existiert bereits dauerhaft in PostgreSQL.
       // ------------------------------------------------------
 
-      void processPaidShopifyOrder(
+      res
+        .status(200)
+        .json({
+          ok: true,
+          received: true,
+          persisted: true,
+        });
+
+
+      // ------------------------------------------------------
+      // PIPELINE
+      // ------------------------------------------------------
+
+      void processStoredWebhook(
+        stored.event.id,
         orderId
-      )
-        .then(
-          (result) => {
-            console.log(
-              "Shopify orders/paid erfolgreich verarbeitet:",
-              {
-                orderId,
-
-                skipped:
-                  result?.skipped ??
-                  false,
-
-                orderName:
-                  result?.orderName ??
-                  null,
-              }
-            );
-          }
-        )
-        .catch(
-          (error: any) => {
-            console.error(
-              "Paid Order Pipeline Fehler:",
-              {
-                orderId,
-
-                error:
-                  error?.message ??
-                  String(error),
-              }
-            );
-          }
-        );
+      );
 
       return;
 
@@ -316,12 +392,16 @@ router.post(
           error
       );
 
-      if (!res.headersSent) {
-        return res.status(500).json({
-          ok: false,
-          error:
-            "Webhook processing failed",
-        });
+      if (
+        !res.headersSent
+      ) {
+        return res
+          .status(500)
+          .json({
+            ok: false,
+            error:
+              "Webhook processing failed",
+          });
       }
 
       return;

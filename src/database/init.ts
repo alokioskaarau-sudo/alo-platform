@@ -34,6 +34,7 @@ export async function initializeDatabase() {
 
       print_status TEXT NOT NULL DEFAULT 'NOT_PRINTED',
       print_count INTEGER NOT NULL DEFAULT 0,
+
       printer_name TEXT,
       printed_at TIMESTAMPTZ,
 
@@ -46,7 +47,7 @@ export async function initializeDatabase() {
 
 
   // ==========================================================
-  // MIGRATIONS FÜR BEREITS EXISTIERENDE DATENBANK
+  // SHIPPING LABEL MIGRATIONS
   // ==========================================================
 
   await db.query(`
@@ -145,13 +146,8 @@ export async function initializeDatabase() {
 
 
   // ==========================================================
-  // INDIZES
+  // SHIPPING LABEL INDIZES
   // ==========================================================
-
-  await db.query(`
-    DROP INDEX IF EXISTS
-    shipping_labels_order_mode_unique;
-  `);
 
   await db.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS
@@ -244,7 +240,71 @@ export async function initializeDatabase() {
   `);
 
 
+  // ==========================================================
+  // SHOPIFY WEBHOOK EVENTS
+  //
+  // Jeder Shopify Webhook wird zuerst dauerhaft gespeichert.
+  // webhook_id ist UNIQUE -> derselbe Shopify Event kann nicht
+  // doppelt verarbeitet werden.
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS shopify_webhook_events (
+      id BIGSERIAL PRIMARY KEY,
+
+      webhook_id TEXT NOT NULL UNIQUE,
+
+      topic TEXT NOT NULL,
+
+      shop_domain TEXT,
+
+      shopify_order_id TEXT NOT NULL,
+      shopify_order_name TEXT,
+
+      status TEXT NOT NULL DEFAULT 'PENDING',
+
+      attempts INTEGER NOT NULL DEFAULT 0,
+
+      error_message TEXT,
+
+      received_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW(),
+
+      processing_started_at TIMESTAMPTZ,
+
+      processed_at TIMESTAMPTZ,
+
+      updated_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      shopify_webhook_events_status_idx
+    ON shopify_webhook_events (
+      status
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      shopify_webhook_events_order_idx
+    ON shopify_webhook_events (
+      shopify_order_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      shopify_webhook_events_received_idx
+    ON shopify_webhook_events (
+      received_at
+    );
+  `);
+
+
   console.log(
-    "PostgreSQL: Shipping + Print Queue bereit."
+    "PostgreSQL: Shipping + Print Queue + Shopify Webhooks bereit."
   );
 }

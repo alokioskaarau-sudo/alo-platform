@@ -13,6 +13,10 @@ import { getShopifyAccessToken } from "./integrations/shopify/auth.js";
 import { getLatestShopifyOrders } from "./integrations/shopify/orders.js";
 
 import {
+  recoverPendingShopifyWebhooks,
+} from "./modules/shipping/webhookRecovery.service.js";
+
+import {
   getFulfillmentOrdersForOrder,
 } from "./integrations/shopify/fulfillment.js";
 
@@ -679,6 +683,8 @@ async function startServer() {
     );
 
     await initializeDatabase();
+
+await recoverPendingShopifyWebhooks();
 
     app.listen(
       env.port,
