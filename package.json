@@ -1,0 +1,25 @@
+{
+  "name": "alo-platform",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@shopify/shopify-api": "^14.0.0",
+    "axios": "^1.0.0",
+    "dotenv": "^17.0.0",
+    "express": "^5.0.0",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
