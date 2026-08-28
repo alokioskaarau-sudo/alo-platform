@@ -108,10 +108,11 @@ export const loader = async ({
 export const action = async ({
   request,
 }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
-
   try {
+    await authenticate.admin(request);
+
     const formData = await request.formData();
+
     const intent = String(
       formData.get("intent") ?? "",
     ).trim();
