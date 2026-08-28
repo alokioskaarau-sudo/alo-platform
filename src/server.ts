@@ -704,40 +704,4 @@ await recoverPendingShopifyWebhooks();
   }
 }
 
-app.get(
-  "/debug/print-agent-config",
-  (_req, res) => {
-    return res.json({
-      ok: true,
-      printAgentTokenConfigured:
-        Boolean(
-          process.env.PRINT_AGENT_TOKEN
-        ),
-    });
-  }
-);
-app.get(
-  "/debug/env-keys",
-  (_req, res) => {
-    const matchingKeys =
-      Object.keys(process.env)
-        .filter((key) =>
-          key.includes("PRINT") ||
-          key.includes("RAILWAY") ||
-          key.includes("NODE")
-        )
-        .sort();
-
-    return res.json({
-      ok: true,
-      matchingKeys,
-      hasPrintAgentToken:
-        Object.prototype.hasOwnProperty.call(
-          process.env,
-          "PRINT_AGENT_TOKEN"
-        ),
-    });
-  }
-);
-
 startServer();
