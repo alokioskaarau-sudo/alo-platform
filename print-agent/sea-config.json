@@ -1,0 +1,7 @@
+{
+  "main": "src/index-sea.cjs",
+  "output": "build/alo-print-connector.blob",
+  "disableExperimentalSEAWarning": true,
+  "useSnapshot": false,
+  "useCodeCache": false
+}

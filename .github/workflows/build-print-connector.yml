@@ -1,0 +1,81 @@
+name: Build ALO Print Connector
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "print-agent/**"
+      - ".github/workflows/build-print-connector.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows Connector
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: print-agent
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24.18.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.18.0"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify connector source
+        run: node --check src/index-sea.cjs
+
+      - name: Create build directory
+        shell: powershell
+        run: New-Item -ItemType Directory -Force -Path build | Out-Null
+
+      - name: Create SEA blob
+        run: node --experimental-sea-config sea-config.json
+
+      - name: Copy Node executable
+        shell: powershell
+        run: Copy-Item (Get-Command node).Source build/ALO-Print-Connector.exe
+
+      - name: Inject ALO connector into executable
+        shell: powershell
+        run: >
+          npx postject
+          build/ALO-Print-Connector.exe
+          NODE_SEA_BLOB
+          build/alo-print-connector.blob
+          --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+
+      - name: Verify executable exists
+        shell: powershell
+        run: |
+          if (!(Test-Path "build/ALO-Print-Connector.exe")) {
+            throw "ALO-Print-Connector.exe wurde nicht erstellt."
+          }
+
+          $file = Get-Item "build/ALO-Print-Connector.exe"
+
+          Write-Host "ALO Print Connector erstellt."
+          Write-Host "Groesse: $($file.Length) Bytes"
+
+          if ($file.Length -lt 90000000) {
+            throw "Die erzeugte EXE ist unerwartet klein."
+          }
+
+      - name: Upload Windows connector
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALO-Print-Connector-Windows
+          path: print-agent/build/ALO-Print-Connector.exe
+          if-no-files-found: error
+          retention-days: 30
