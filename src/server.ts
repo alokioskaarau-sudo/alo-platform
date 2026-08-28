@@ -704,5 +704,17 @@ await recoverPendingShopifyWebhooks();
   }
 }
 
+app.get(
+  "/debug/print-agent-config",
+  (_req, res) => {
+    return res.json({
+      ok: true,
+      printAgentTokenConfigured:
+        Boolean(
+          process.env.PRINT_AGENT_TOKEN
+        ),
+    });
+  }
+);
 
 startServer();
