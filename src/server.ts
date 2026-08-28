@@ -61,6 +61,10 @@ import {
   printersRouter,
 } from "./routes/printers.routes.js";
 
+import {
+  printerPairingRouter,
+  initPrinterPairingTables,
+} from "./routes/printerPairing.routes.js";
 
 // ============================================================
 // EXPRESS
@@ -130,6 +134,13 @@ app.use(
   printersRouter
 );
 
+// ============================================================
+// PRINTER PAIRING ROUTER
+// ============================================================
+
+app.use(
+  printerPairingRouter
+);
 
 // ============================================================
 // ROOT
@@ -1232,6 +1243,11 @@ async function startServer() {
       "Datenbank initialisiert."
     );
 
+await initPrinterPairingTables();
+
+console.log(
+  "Printer Pairing Datenbank initialisiert."
+);
 
     // --------------------------------------------------------
     // WEBHOOK RECOVERY
