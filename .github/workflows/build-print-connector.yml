@@ -10,7 +10,7 @@ on:
       - ".github/workflows/build-print-connector.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -79,3 +79,14 @@ jobs:
           path: print-agent/build/ALO-Print-Connector.exe
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish latest Windows connector
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: print-connector-latest
+          name: ALO Print Connector
+          prerelease: true
+          files: print-agent/build/ALO-Print-Connector.exe
+          body: |
+            Aktuelle Windows-Version des ALO Print Connectors.
+            Wird automatisch von GitHub Actions erstellt.
