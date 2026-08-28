@@ -48,7 +48,6 @@ type PairingResponse = {
 
 /* =========================================================
    LOADER
-   Lädt die aktuell bekannten Drucker von Railway.
 ========================================================= */
 
 export const loader = async ({
@@ -98,11 +97,6 @@ export const loader = async ({
 
 /* =========================================================
    ACTION
-   Wird ausschließlich über die authentifizierte
-   Shopify-App aufgerufen.
-
-   Sie erzeugt bei Railway einen einmaligen
-   6-stelligen Pairing-Code.
 ========================================================= */
 
 export const action = async ({
@@ -132,11 +126,23 @@ export const action = async ({
           Accept: "application/json",
           "Content-Type": "application/json",
         },
+        body: JSON.stringify({}),
       },
     );
 
-    const data =
-      (await response.json()) as PairingResponse;
+    let data: PairingResponse;
+
+    try {
+      data =
+        (await response.json()) as PairingResponse;
+    } catch {
+      return {
+        ok: false,
+        error:
+          `Railway hat keine gültige Antwort geliefert ` +
+          `(HTTP ${response.status}).`,
+      } satisfies PairingResponse;
+    }
 
     if (!response.ok || !data.ok) {
       return {
@@ -178,7 +184,7 @@ export const action = async ({
 };
 
 /* =========================================================
-   HELPER
+   HELPERS
 ========================================================= */
 
 function formatDate(
@@ -205,9 +211,7 @@ function printerStatusLabel(
   status: string,
 ) {
   switch (
-    status
-      .trim()
-      .toUpperCase()
+    status.trim().toUpperCase()
   ) {
     case "ONLINE":
       return "Online";
@@ -261,8 +265,22 @@ export default function Printers() {
     singlePrinter ??
     null;
 
+  function createPairingCode() {
+    if (pairingLoading) return;
+
+    pairingFetcher.submit(
+      {
+        intent: "create-pairing-code",
+      },
+      {
+        method: "post",
+      },
+    );
+  }
+
   return (
     <s-page heading="Drucker">
+
       {/* ===================================================
           BACKEND STATUS
       =================================================== */}
@@ -287,7 +305,7 @@ export default function Printers() {
               </s-paragraph>
 
               <s-paragraph>
-                Standarddrucker:{" "}
+                Automatisch ausgewählt:{" "}
                 {effectiveDefaultPrinter?.display_name ||
                   effectiveDefaultPrinter?.name ||
                   "Noch keiner"}
@@ -313,34 +331,24 @@ export default function Printers() {
           gap="base"
         >
           <s-paragraph>
-            Verbinde einen Windows-PC mit
-            der ALO Platform. Dafür wird
-            einmalig ein sechsstelliger
-            Verbindungscode erzeugt.
+            Verbinde einen Computer mit der
+            ALO Platform. Dafür wird einmalig
+            ein sechsstelliger Verbindungscode
+            erzeugt.
           </s-paragraph>
 
           {!pairingCode && (
-            <pairingFetcher.Form
-              method="post"
-            >
-              <input
-                type="hidden"
-                name="intent"
-                value="create-pairing-code"
-              />
-
+            <>
               <s-button
-                type="submit"
                 variant="primary"
-                disabled={
-                  pairingLoading
-                }
+                onClick={createPairingCode}
+                disabled={pairingLoading}
               >
                 {pairingLoading
                   ? "Code wird erstellt..."
                   : "Drucker verbinden"}
               </s-button>
-            </pairingFetcher.Form>
+            </>
           )}
 
           {pairingError && (
@@ -354,33 +362,20 @@ export default function Printers() {
                 gap="base"
               >
                 <s-heading>
-                  Verbindungscode konnte
-                  nicht erstellt werden
+                  Verbindung fehlgeschlagen
                 </s-heading>
 
                 <s-paragraph>
                   {pairingError}
                 </s-paragraph>
 
-                <pairingFetcher.Form
-                  method="post"
+                <s-button
+                  variant="primary"
+                  onClick={createPairingCode}
+                  disabled={pairingLoading}
                 >
-                  <input
-                    type="hidden"
-                    name="intent"
-                    value="create-pairing-code"
-                  />
-
-                  <s-button
-                    type="submit"
-                    variant="primary"
-                    disabled={
-                      pairingLoading
-                    }
-                  >
-                    Erneut versuchen
-                  </s-button>
-                </pairingFetcher.Form>
+                  Erneut versuchen
+                </s-button>
               </s-stack>
             </s-box>
           )}
@@ -408,35 +403,21 @@ export default function Printers() {
                   {pairingData?.expiresInMinutes ??
                     10}{" "}
                   Minuten gültig und kann
-                  nur einmal verwendet
-                  werden.
+                  nur einmal verwendet werden.
                 </s-paragraph>
 
                 <s-paragraph>
                   Öffne jetzt den ALO Print
-                  Connector auf dem
-                  Windows-PC und gib diesen
-                  Code dort ein.
+                  Connector auf dem Computer
+                  und gib diesen Code dort ein.
                 </s-paragraph>
 
-                <pairingFetcher.Form
-                  method="post"
+                <s-button
+                  onClick={createPairingCode}
+                  disabled={pairingLoading}
                 >
-                  <input
-                    type="hidden"
-                    name="intent"
-                    value="create-pairing-code"
-                  />
-
-                  <s-button
-                    type="submit"
-                    disabled={
-                      pairingLoading
-                    }
-                  >
-                    Neuen Code erzeugen
-                  </s-button>
-                </pairingFetcher.Form>
+                  Neuen Code erzeugen
+                </s-button>
               </s-stack>
             </s-box>
           )}
@@ -449,24 +430,23 @@ export default function Printers() {
 
       {data.connected &&
         data.count === 0 && (
-          <s-section heading="Noch kein Drucker verbunden">
+          <s-section
+            heading="Noch kein Drucker verbunden"
+          >
             <s-stack
               direction="block"
               gap="base"
             >
               <s-paragraph>
-                Aktuell ist noch kein
-                Drucker mit der ALO Platform
-                verbunden.
+                Aktuell ist noch kein Drucker
+                mit der ALO Platform verbunden.
               </s-paragraph>
 
               <s-paragraph>
-                Sobald der ALO Print
-                Connector auf dem
-                Windows-PC gekoppelt ist
-                und einen Drucker erkennt,
-                erscheint er automatisch
-                hier.
+                Sobald der ALO Print Connector
+                gekoppelt ist und einen Drucker
+                erkennt, erscheint er
+                automatisch hier.
               </s-paragraph>
             </s-stack>
           </s-section>
@@ -478,7 +458,9 @@ export default function Printers() {
 
       {data.connected &&
         data.count > 0 && (
-          <s-section heading="Verfügbare Drucker">
+          <s-section
+            heading="Verfügbare Drucker"
+          >
             <s-stack
               direction="block"
               gap="base"
@@ -508,7 +490,7 @@ export default function Printers() {
                       </s-paragraph>
 
                       <s-paragraph>
-                        Standard:{" "}
+                        Standarddrucker:{" "}
                         {printer.is_default
                           ? "Ja"
                           : "Nein"}
@@ -567,9 +549,7 @@ export default function Printers() {
                       {printer.last_error && (
                         <s-paragraph>
                           Fehler:{" "}
-                          {
-                            printer.last_error
-                          }
+                          {printer.last_error}
                         </s-paragraph>
                       )}
                     </s-stack>
@@ -584,22 +564,26 @@ export default function Printers() {
           AUTO AUSWAHL
       =================================================== */}
 
-      <s-section heading="Automatische Auswahl">
+      <s-section heading="Automatische Druckerauswahl">
         <s-stack
           direction="block"
           gap="base"
         >
           <s-paragraph>
-            Wenn nur ein aktiver Drucker
-            vorhanden ist, wird dieser
-            automatisch verwendet.
+            Die ALO Platform wählt automatisch
+            einen verfügbaren Drucker.
           </s-paragraph>
 
           <s-paragraph>
-            Bei mehreren Druckern kann
-            später ein bestimmter
-            Standarddrucker ausgewählt
-            werden.
+            Priorität: Online-Standarddrucker,
+            danach der einzige verfügbare
+            Online-Drucker.
+          </s-paragraph>
+
+          <s-paragraph>
+            Ist kein Drucker verfügbar, bleibt
+            der Auftrag in der Warteschlange,
+            bis wieder ein Drucker online ist.
           </s-paragraph>
         </s-stack>
       </s-section>
@@ -618,24 +602,30 @@ export default function Printers() {
         >
           <s-paragraph>
             Der Connector verbindet den
-            Windows-PC sicher mit der ALO
-            Platform.
+            lokalen Computer mit der
+            ALO Platform.
           </s-paragraph>
 
           <s-paragraph>
             Nach der einmaligen Kopplung
-            speichert der Computer seine
-            Geräteanmeldung automatisch.
+            wird der Computer automatisch
+            wiedererkannt.
           </s-paragraph>
 
           <s-paragraph>
-            Der Brother QL-1110NWB wird
-            anschließend auf dem
-            Windows-PC erkannt und mit
-            Railway synchronisiert.
+            Der lokale Drucker wird über den
+            Connector an Railway gemeldet.
+          </s-paragraph>
+
+          <s-paragraph>
+            Das System ist dadurch unabhängig
+            davon, ob die ALO Platform auf
+            einem Mac oder Windows-PC geöffnet
+            wird.
           </s-paragraph>
         </s-stack>
       </s-section>
+
     </s-page>
   );
 }
