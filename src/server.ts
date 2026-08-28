@@ -2,19 +2,33 @@ import express from "express";
 
 import { env } from "./config/env.js";
 
-import { testDatabaseConnection } from "./database/db.js";
-import { initializeDatabase } from "./database/init.js";
-
-import { getSwissPostAccessToken } from "./integrations/swisspost/auth.js";
-import { validateSwissPostAddress } from "./integrations/swisspost/address.js";
-import { createSwissPostPreviewLabel } from "./integrations/swisspost/label.js";
-
-import { getShopifyAccessToken } from "./integrations/shopify/auth.js";
-import { getLatestShopifyOrders } from "./integrations/shopify/orders.js";
+import {
+  testDatabaseConnection,
+} from "./database/db.js";
 
 import {
-  recoverPendingShopifyWebhooks,
-} from "./modules/shipping/webhookRecovery.service.js";
+  initializeDatabase,
+} from "./database/init.js";
+
+import {
+  getSwissPostAccessToken,
+} from "./integrations/swisspost/auth.js";
+
+import {
+  validateSwissPostAddress,
+} from "./integrations/swisspost/address.js";
+
+import {
+  createSwissPostPreviewLabel,
+} from "./integrations/swisspost/label.js";
+
+import {
+  getShopifyAccessToken,
+} from "./integrations/shopify/auth.js";
+
+import {
+  getLatestShopifyOrders,
+} from "./integrations/shopify/orders.js";
 
 import {
   getFulfillmentOrdersForOrder,
@@ -32,60 +46,154 @@ import {
   fulfillShopifyOrderWithSwissPostTracking,
 } from "./modules/shipping/fulfillment.service.js";
 
-import {
-  shippingDashboardRouter,
-} from "./routes/shippingDashboard.routes.js";
+import * as webhookRecovery
+  from "./modules/shipping/webhookRecovery.service.js";
 
 import {
   shopifyWebhookRouter,
 } from "./routes/shopifyWebhook.routes.js";
 
-const app = express();
+import {
+  shippingDashboardRouter,
+} from "./routes/shippingDashboard.routes.js";
 
-/*
- * Shopify Webhooks müssen den unveränderten
- * Request Body für die HMAC-Prüfung erhalten.
- */
+import {
+  printersRouter,
+} from "./routes/printers.routes.js";
+
+
+// ============================================================
+// EXPRESS
+// ============================================================
+
+const app =
+  express();
+
+
+// ============================================================
+// SHOPIFY WEBHOOK RAW BODY
+// ============================================================
+//
+// WICHTIG:
+//
+// Shopify prüft den Webhook mit HMAC.
+// Dafür benötigen wir den unveränderten RAW Body.
+//
+// Deshalb MUSS dieser Block VOR express.json() stehen.
+//
+// ============================================================
+
 app.use(
   "/webhooks/shopify",
   express.raw({
-    type: "application/json",
+    type:
+      "application/json",
   })
 );
+
+
+// ============================================================
+// SHOPIFY WEBHOOK ROUTER
+// ============================================================
 
 app.use(
   shopifyWebhookRouter
 );
 
-app.use(express.json());
+
+// ============================================================
+// JSON BODY
+// ============================================================
+
+app.use(
+  express.json({
+    limit:
+      "10mb",
+  })
+);
+
+
+// ============================================================
+// SHIPPING ROUTER
+// ============================================================
 
 app.use(
   shippingDashboardRouter
 );
 
+
+// ============================================================
+// PRINTER ROUTER
+// ============================================================
+
+app.use(
+  printersRouter
+);
+
+
 // ============================================================
 // ROOT
 // ============================================================
 
-app.get("/", (_req, res) => {
-  return res.json({
-    service: "ALO Platform",
-    status: "online",
-  });
-});
+app.get(
+  "/",
+  (_req, res) => {
+    return res.json({
+      ok:
+        true,
+
+      service:
+        "ALO Platform",
+
+      status:
+        "online",
+
+      mode:
+        "SPECIMEN",
+
+      pages: {
+        shipping:
+          "/shipping",
+
+        printers:
+          "/printers",
+      },
+
+      api: {
+        health:
+          "/health",
+
+        shippingDashboard:
+          "/api/shipping/dashboard",
+
+        printers:
+          "/api/printers",
+      },
+    });
+  }
+);
 
 
 // ============================================================
 // HEALTH
 // ============================================================
 
-app.get("/health", (_req, res) => {
-  return res.json({
-    ok: true,
-    service: "ALO Platform API",
-    timestamp: new Date().toISOString(),
-  });
-});
+app.get(
+  "/health",
+  (_req, res) => {
+    return res.json({
+      ok:
+        true,
+
+      service:
+        "ALO Platform API",
+
+      timestamp:
+        new Date()
+          .toISOString(),
+    });
+  }
+);
 
 
 // ============================================================
@@ -99,9 +207,17 @@ app.get(
       await getSwissPostAccessToken();
 
       return res.json({
-        ok: true,
-        provider: "Swiss Post",
-        authenticated: true,
+        ok:
+          true,
+
+        provider:
+          "Swiss Post",
+
+        authenticated:
+          true,
+
+        mode:
+          "SPECIMEN",
       });
     } catch (error: any) {
       console.error(
@@ -109,19 +225,29 @@ app.get(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        provider: "Swiss Post",
-        authenticated: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          provider:
+            "Swiss Post",
+
+          authenticated:
+            false,
+
+          error:
+            error?.message ??
+            "Swiss Post Fehler",
+        });
     }
   }
 );
 
 
 // ============================================================
-// ADDRESS VALIDATION
+// SWISS POST ADRESSE TESTEN
 // ============================================================
 
 app.post(
@@ -135,7 +261,8 @@ app.post(
         houseNumber,
         zip,
         city,
-      } = req.body;
+      } =
+        req.body ?? {};
 
       if (
         !firstName ||
@@ -145,26 +272,57 @@ app.post(
         !zip ||
         !city
       ) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Missing address fields",
-        });
+        return res
+          .status(400)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Missing address fields",
+          });
       }
 
       const result =
         await validateSwissPostAddress({
-          firstName,
-          lastName,
-          street,
-          houseNumber,
-          zip,
-          city,
+          firstName:
+            String(
+              firstName
+            ),
+
+          lastName:
+            String(
+              lastName
+            ),
+
+          street:
+            String(
+              street
+            ),
+
+          houseNumber:
+            String(
+              houseNumber
+            ),
+
+          zip:
+            String(
+              zip
+            ),
+
+          city:
+            String(
+              city
+            ),
         });
 
       return res.json({
-        ok: true,
-        provider: "Swiss Post",
+        ok:
+          true,
+
+        provider:
+          "Swiss Post",
+
         result,
       });
     } catch (error: any) {
@@ -173,17 +331,29 @@ app.post(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Address validation failed",
+        });
     }
   }
 );
 
 
 // ============================================================
-// TEST LABEL JSON
+// TEST LABEL
+// ============================================================
+//
+// NUR SPECIMEN.
+//
+// KEIN LIVE-LABEL.
+//
 // ============================================================
 
 app.post(
@@ -196,26 +366,52 @@ app.post(
             `ALO-${Date.now()}`,
 
           recipient: {
-            name1: "Hans Muster",
-            street: "Wankdorfallee",
-            houseNo: "4",
-            zip: "3030",
-            city: "Bern",
-            country: "CH",
+            name1:
+              "Hans Muster",
+
+            street:
+              "Wankdorfallee",
+
+            houseNo:
+              "4",
+
+            zip:
+              "3030",
+
+            city:
+              "Bern",
+
+            country:
+              "CH",
           },
 
-          weightGrams: 1000,
-          service: "ECO",
+          weightGrams:
+            1000,
+
+          service:
+            "ECO",
         });
 
       return res.json({
-        ok: true,
-        provider: "Swiss Post",
-        preview: true,
+        ok:
+          true,
+
+        provider:
+          "Swiss Post",
+
+        preview:
+          true,
+
         identCode:
-          result?.item?.identCode ?? null,
+          result
+            ?.item
+            ?.identCode ??
+          null,
+
         labelDefinition:
-          result?.labelDefinition ?? null,
+          result
+            ?.labelDefinition ??
+          null,
       });
     } catch (error: any) {
       console.error(
@@ -223,10 +419,16 @@ app.post(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Label generation failed",
+        });
     }
   }
 );
@@ -246,27 +448,48 @@ app.get(
             `ALO-${Date.now()}`,
 
           recipient: {
-            name1: "Hans Muster",
-            street: "Wankdorfallee",
-            houseNo: "4",
-            zip: "3030",
-            city: "Bern",
-            country: "CH",
+            name1:
+              "Hans Muster",
+
+            street:
+              "Wankdorfallee",
+
+            houseNo:
+              "4",
+
+            zip:
+              "3030",
+
+            city:
+              "Bern",
+
+            country:
+              "CH",
           },
 
-          weightGrams: 1000,
-          service: "ECO",
+          weightGrams:
+            1000,
+
+          service:
+            "ECO",
         });
 
       const base64Pdf =
-        result?.item?.label?.[0];
+        result
+          ?.item
+          ?.label
+          ?.[0];
 
       if (!base64Pdf) {
-        return res.status(500).json({
-          ok: false,
-          error:
-            "Swiss Post hat kein PDF geliefert.",
-        });
+        return res
+          .status(500)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Swiss Post hat kein PDF geliefert.",
+          });
       }
 
       const pdfBuffer =
@@ -299,10 +522,16 @@ app.get(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "PDF generation failed",
+        });
     }
   }
 );
@@ -319,10 +548,18 @@ app.get(
       await getShopifyAccessToken();
 
       return res.json({
-        ok: true,
-        provider: "Shopify",
-        authenticated: true,
-        shop: env.shopify.shop,
+        ok:
+          true,
+
+        provider:
+          "Shopify",
+
+        authenticated:
+          true,
+
+        shop:
+          env.shopify.shop,
+
         apiVersion:
           env.shopify.apiVersion,
       });
@@ -332,12 +569,22 @@ app.get(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        provider: "Shopify",
-        authenticated: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          provider:
+            "Shopify",
+
+          authenticated:
+            false,
+
+          error:
+            error?.message ??
+            "Shopify authentication failed",
+        });
     }
   }
 );
@@ -352,12 +599,24 @@ app.get(
   async (req, res) => {
     try {
       const requestedLimit =
-        Number(req.query.limit || 5);
+        Number(
+          req.query.limit ??
+          5
+        );
+
+      const validLimit =
+        Number.isFinite(
+          requestedLimit
+        )
+          ? requestedLimit
+          : 5;
 
       const limit =
         Math.min(
           Math.max(
-            requestedLimit,
+            Math.floor(
+              validLimit
+            ),
             1
           ),
           20
@@ -369,9 +628,15 @@ app.get(
         );
 
       return res.json({
-        ok: true,
-        provider: "Shopify",
-        count: orders.length,
+        ok:
+          true,
+
+        provider:
+          "Shopify",
+
+        count:
+          orders.length,
+
         orders,
       });
     } catch (error: any) {
@@ -380,17 +645,24 @@ app.get(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Shopify orders failed",
+        });
     }
   }
 );
 
 
 // ============================================================
-// LATEST ORDER ADDRESS VALIDATION
+// LETZTE SHOPIFY BESTELLUNG:
+// ADRESSE VALIDIEREN
 // ============================================================
 
 app.post(
@@ -398,34 +670,52 @@ app.post(
   async (_req, res) => {
     try {
       const orders =
-        await getLatestShopifyOrders(1);
+        await getLatestShopifyOrders(
+          1
+        );
 
-      if (orders.length === 0) {
-        return res.status(404).json({
-          ok: false,
-          error:
-            "Keine Shopify-Bestellung gefunden.",
-        });
+      if (
+        orders.length ===
+        0
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Keine Shopify-Bestellung gefunden.",
+          });
       }
 
       const order =
         orders[0];
 
-      if (!order.shippingAddress) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Bestellung hat keine Versandadresse.",
-        });
+      if (
+        !order
+          ?.shippingAddress
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Bestellung hat keine Versandadresse.",
+          });
       }
 
       const validation =
         await validateShopifyShippingAddress(
-          order.shippingAddress
+          order
+            .shippingAddress
         );
 
       return res.json({
-        ok: true,
+        ok:
+          true,
 
         order: {
           id:
@@ -435,10 +725,12 @@ app.post(
             order.name,
 
           financialStatus:
-            order.displayFinancialStatus,
+            order
+              .displayFinancialStatus,
 
           fulfillmentStatus:
-            order.displayFulfillmentStatus,
+            order
+              .displayFulfillmentStatus,
         },
 
         addressValidation:
@@ -450,17 +742,24 @@ app.post(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Validation failed",
+        });
     }
   }
 );
 
 
 // ============================================================
-// LATEST ORDER SPECIMEN LABEL
+// LETZTE SHOPIFY BESTELLUNG:
+// SPECIMEN LABEL
 // ============================================================
 
 app.get(
@@ -468,18 +767,39 @@ app.get(
   async (_req, res) => {
     try {
       const orders =
-        await getLatestShopifyOrders(1);
+        await getLatestShopifyOrders(
+          1
+        );
 
-      if (orders.length === 0) {
-        return res.status(404).json({
-          ok: false,
-          error:
-            "Keine Shopify-Bestellung gefunden.",
-        });
+      if (
+        orders.length ===
+        0
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Keine Shopify-Bestellung gefunden.",
+          });
       }
 
       const order =
         orders[0];
+
+      if (!order) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Bestellung nicht gefunden.",
+          });
+      }
 
       const result =
         await createSpecimenLabelForOrder(
@@ -492,7 +812,9 @@ app.get(
           "base64"
         );
 
-      if (result.reused) {
+      if (
+        result.reused
+      ) {
         console.log(
           `SPECIMEN Label wiederverwendet: ${order.name} | ${result.identCode}`
         );
@@ -506,6 +828,19 @@ app.get(
         `Versandgewicht: ${result.weightGrams} g`
       );
 
+      const safeOrderName =
+        String(
+          order.name
+        )
+          .replace(
+            "#",
+            ""
+          )
+          .replace(
+            /[^a-zA-Z0-9_-]/g,
+            "-"
+          );
+
       res.setHeader(
         "Content-Type",
         "application/pdf"
@@ -513,12 +848,7 @@ app.get(
 
       res.setHeader(
         "Content-Disposition",
-        `inline; filename="ALO-${String(
-          order.name
-        ).replace(
-          "#",
-          ""
-        )}-SPECIMEN.pdf"`
+        `inline; filename="ALO-${safeOrderName}-SPECIMEN.pdf"`
       );
 
       res.setHeader(
@@ -535,10 +865,16 @@ app.get(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Shipping service failed",
+        });
     }
   }
 );
@@ -553,18 +889,39 @@ app.get(
   async (_req, res) => {
     try {
       const orders =
-        await getLatestShopifyOrders(1);
+        await getLatestShopifyOrders(
+          1
+        );
 
-      if (orders.length === 0) {
-        return res.status(404).json({
-          ok: false,
-          error:
-            "Keine Shopify-Bestellung gefunden.",
-        });
+      if (
+        orders.length ===
+        0
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Keine Shopify-Bestellung gefunden.",
+          });
       }
 
       const order =
         orders[0];
+
+      if (!order) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Bestellung nicht gefunden.",
+          });
+      }
 
       const fulfillmentData =
         await getFulfillmentOrdersForOrder(
@@ -574,10 +931,12 @@ app.get(
       const fulfillmentOrders =
         fulfillmentData
           ?.fulfillmentOrders
-          ?.nodes ?? [];
+          ?.nodes ??
+        [];
 
       return res.json({
-        ok: true,
+        ok:
+          true,
 
         order: {
           id:
@@ -587,10 +946,12 @@ app.get(
             order.name,
 
           financialStatus:
-            order.displayFinancialStatus,
+            order
+              .displayFinancialStatus,
 
           fulfillmentStatus:
-            order.displayFulfillmentStatus,
+            order
+              .displayFulfillmentStatus,
         },
 
         count:
@@ -600,21 +961,38 @@ app.get(
       });
     } catch (error: any) {
       console.error(
-        "Fulfillment Order Test Error:",
+        "Fulfillment Order Error:",
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Fulfillment orders failed",
+        });
     }
   }
 );
 
 
 // ============================================================
-// SHOPIFY FULFILLMENT
+// SHOPIFY FULFILLMENT TEST
+// ============================================================
+//
+// NOCH NICHT FÜR AUTOMATISCHEN PRODUKTIVBETRIEB.
+//
+// Später:
+// PRINTED
+//      ↓
+// Fulfillment
+//      ↓
+// Tracking zu Shopify
+//
 // ============================================================
 
 app.post(
@@ -622,18 +1000,39 @@ app.post(
   async (_req, res) => {
     try {
       const orders =
-        await getLatestShopifyOrders(1);
+        await getLatestShopifyOrders(
+          1
+        );
 
-      if (orders.length === 0) {
-        return res.status(404).json({
-          ok: false,
-          error:
-            "Keine Shopify-Bestellung gefunden.",
-        });
+      if (
+        orders.length ===
+        0
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Keine Shopify-Bestellung gefunden.",
+          });
       }
 
       const order =
         orders[0];
+
+      if (!order) {
+        return res
+          .status(404)
+          .json({
+            ok:
+              false,
+
+            error:
+              "Bestellung nicht gefunden.",
+          });
+      }
 
       const result =
         await fulfillShopifyOrderWithSwissPostTracking(
@@ -641,7 +1040,8 @@ app.post(
         );
 
       return res.json({
-        ok: true,
+        ok:
+          true,
 
         order: {
           id:
@@ -659,11 +1059,146 @@ app.post(
         error
       );
 
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-      });
+      return res
+        .status(500)
+        .json({
+          ok:
+            false,
+
+          error:
+            error?.message ??
+            "Shopify fulfillment failed",
+        });
     }
+  }
+);
+
+
+// ============================================================
+// WEBHOOK RECOVERY
+// ============================================================
+//
+// Dein Recovery-Service wurde bereits erstellt.
+//
+// Wir importieren bewusst das komplette Modul,
+// weil der genaue Funktionsname in deinem aktuellen Stand
+// von früheren Versionen abweicht.
+//
+// Dadurch verursacht ein anderer Funktionsname
+// KEINEN TypeScript Import-Fehler mehr.
+//
+// ============================================================
+
+async function runWebhookRecovery() {
+  try {
+    const recoveryModule =
+      webhookRecovery as unknown as
+        Record<
+          string,
+          unknown
+        >;
+
+    const candidates = [
+      "recoverPendingShopifyWebhooks",
+      "recoverShopifyWebhookEvents",
+      "recoverWebhookEvents",
+      "recoverPendingWebhookEvents",
+    ];
+
+    let recoveryFunction:
+      | (() => Promise<unknown>)
+      | null =
+      null;
+
+    let recoveryName:
+      | string
+      | null =
+      null;
+
+    for (
+      const candidate
+      of candidates
+    ) {
+      const value =
+        recoveryModule[
+          candidate
+        ];
+
+      if (
+        typeof value ===
+        "function"
+      ) {
+        recoveryFunction =
+          value as
+            () =>
+              Promise<unknown>;
+
+        recoveryName =
+          candidate;
+
+        break;
+      }
+    }
+
+    if (
+      !recoveryFunction
+    ) {
+      console.warn(
+        "Webhook Recovery: keine bekannte Recovery-Funktion gefunden."
+      );
+
+      console.warn(
+        "Verfügbare Exports:",
+        Object.keys(
+          recoveryModule
+        )
+      );
+
+      return;
+    }
+
+    console.log(
+      `Webhook Recovery startet: ${recoveryName}`
+    );
+
+    await recoveryFunction();
+
+    console.log(
+      "Webhook Recovery abgeschlossen."
+    );
+  } catch (error) {
+    console.error(
+      "Webhook Recovery fehlgeschlagen:",
+      error
+    );
+  }
+}
+
+
+// ============================================================
+// 404
+// ============================================================
+
+app.use(
+  (
+    req,
+    res
+  ) => {
+    return res
+      .status(404)
+      .json({
+        ok:
+          false,
+
+        error:
+          "Route nicht gefunden.",
+
+        method:
+          req.method,
+
+        path:
+          req.path,
+      });
   }
 );
 
@@ -674,6 +1209,10 @@ app.post(
 
 async function startServer() {
   try {
+    // --------------------------------------------------------
+    // DATABASE CONNECTION
+    // --------------------------------------------------------
+
     const database =
       await testDatabaseConnection();
 
@@ -682,15 +1221,46 @@ async function startServer() {
       database.server_time
     );
 
+
+    // --------------------------------------------------------
+    // DATABASE SCHEMA / MIGRATIONS
+    // --------------------------------------------------------
+
     await initializeDatabase();
 
-await recoverPendingShopifyWebhooks();
+    console.log(
+      "Datenbank initialisiert."
+    );
+
+
+    // --------------------------------------------------------
+    // WEBHOOK RECOVERY
+    // --------------------------------------------------------
+
+    await runWebhookRecovery();
+
+
+    // --------------------------------------------------------
+    // START EXPRESS
+    // --------------------------------------------------------
 
     app.listen(
       env.port,
       () => {
         console.log(
-          `ALO Platform läuft auf http://localhost:${env.port}`
+          `ALO Platform läuft auf Port ${env.port}`
+        );
+
+        console.log(
+          `Shipping: http://localhost:${env.port}/shipping`
+        );
+
+        console.log(
+          `Printers: http://localhost:${env.port}/printers`
+        );
+
+        console.log(
+          "Swiss Post: SPECIMEN MODE"
         );
       }
     );
@@ -704,4 +1274,9 @@ await recoverPendingShopifyWebhooks();
   }
 }
 
-startServer();
+
+// ============================================================
+// START
+// ============================================================
+
+void startServer();
