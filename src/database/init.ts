@@ -8,46 +8,32 @@ export async function initializeDatabase() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS shipping_labels (
       id BIGSERIAL PRIMARY KEY,
-
       shopify_order_id TEXT NOT NULL,
       shopify_order_name TEXT NOT NULL,
-
       swisspost_ident_code TEXT,
-
       label_mode TEXT NOT NULL DEFAULT 'SPECIMEN',
       service TEXT NOT NULL DEFAULT 'ECO',
-
       weight_grams INTEGER,
       address_quality TEXT,
-
       status TEXT NOT NULL DEFAULT 'RESERVED',
-
       label_pdf_base64 TEXT,
       error_message TEXT,
-
       shopify_fulfillment_order_id TEXT,
       shopify_fulfillment_id TEXT,
-
       tracking_number TEXT,
-
       shipment_status TEXT NOT NULL DEFAULT 'LABEL_PENDING',
-
       print_status TEXT NOT NULL DEFAULT 'NOT_PRINTED',
       print_count INTEGER NOT NULL DEFAULT 0,
-
       printer_name TEXT,
       printed_at TIMESTAMPTZ,
-
       fulfilled_at TIMESTAMPTZ,
-
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
-
   // ==========================================================
-  // SHIPPING LABEL MIGRATIONS
+  // MIGRATIONS FÜR BEREITS EXISTIERENDE DATENBANK
   // ==========================================================
 
   await db.query(`
@@ -144,10 +130,14 @@ export async function initializeDatabase() {
     NOT NULL DEFAULT NOW();
   `);
 
-
   // ==========================================================
   // SHIPPING LABEL INDIZES
   // ==========================================================
+
+  await db.query(`
+    DROP INDEX IF EXISTS
+    shipping_labels_order_mode_unique;
+  `);
 
   await db.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS
@@ -190,7 +180,6 @@ export async function initializeDatabase() {
     );
   `);
 
-
   // ==========================================================
   // PRINT JOBS
   // ==========================================================
@@ -198,26 +187,17 @@ export async function initializeDatabase() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS print_jobs (
       id BIGSERIAL PRIMARY KEY,
-
       shipping_label_id BIGINT NOT NULL
         REFERENCES shipping_labels(id)
         ON DELETE CASCADE,
-
       printer_name TEXT,
-
       status TEXT NOT NULL DEFAULT 'PENDING',
-
       attempts INTEGER NOT NULL DEFAULT 0,
-
       error_message TEXT,
-
       requested_at TIMESTAMPTZ
         NOT NULL DEFAULT NOW(),
-
       started_at TIMESTAMPTZ,
-
       printed_at TIMESTAMPTZ,
-
       updated_at TIMESTAMPTZ
         NOT NULL DEFAULT NOW()
     );
@@ -239,13 +219,180 @@ export async function initializeDatabase() {
     );
   `);
 
+  // ==========================================================
+  // PRINTERS
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS printers (
+      id BIGSERIAL PRIMARY KEY,
+
+      name TEXT NOT NULL UNIQUE,
+
+      display_name TEXT,
+
+      location TEXT,
+
+      platform TEXT,
+
+      status TEXT
+        NOT NULL
+        DEFAULT 'OFFLINE',
+
+      is_default BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      agent_version TEXT,
+
+      device_name TEXT,
+
+      driver_name TEXT,
+
+      port_name TEXT,
+
+      paper_size TEXT,
+
+      capabilities JSONB
+        NOT NULL
+        DEFAULT '{}'::jsonb,
+
+      last_error TEXT,
+
+      last_seen_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW()
+    );
+  `);
+
+  // ==========================================================
+  // PRINTER MIGRATIONS
+  // ==========================================================
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS display_name TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS location TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS platform TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS status TEXT
+    NOT NULL DEFAULT 'OFFLINE';
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS is_default BOOLEAN
+    NOT NULL DEFAULT FALSE;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS agent_version TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS device_name TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS driver_name TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS port_name TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS paper_size TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS capabilities JSONB
+    NOT NULL DEFAULT '{}'::jsonb;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS last_error TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ
+    NOT NULL DEFAULT NOW();
+  `);
+
+  await db.query(`
+    ALTER TABLE printers
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ
+    NOT NULL DEFAULT NOW();
+  `);
+
+  // ==========================================================
+  // PRINTER INDIZES
+  // ==========================================================
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      printers_status_idx
+    ON printers (
+      status
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      printers_default_idx
+    ON printers (
+      is_default
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      printers_location_idx
+    ON printers (
+      location
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      printers_last_seen_idx
+    ON printers (
+      last_seen_at
+    );
+  `);
 
   // ==========================================================
   // SHOPIFY WEBHOOK EVENTS
-  //
-  // Jeder Shopify Webhook wird zuerst dauerhaft gespeichert.
-  // webhook_id ist UNIQUE -> derselbe Shopify Event kann nicht
-  // doppelt verarbeitet werden.
   // ==========================================================
 
   await db.query(`
@@ -259,23 +406,30 @@ export async function initializeDatabase() {
       shop_domain TEXT,
 
       shopify_order_id TEXT NOT NULL,
+
       shopify_order_name TEXT,
 
-      status TEXT NOT NULL DEFAULT 'PENDING',
+      status TEXT
+        NOT NULL
+        DEFAULT 'PENDING',
 
-      attempts INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER
+        NOT NULL
+        DEFAULT 0,
 
       error_message TEXT,
 
       received_at TIMESTAMPTZ
-        NOT NULL DEFAULT NOW(),
+        NOT NULL
+        DEFAULT NOW(),
 
       processing_started_at TIMESTAMPTZ,
 
       processed_at TIMESTAMPTZ,
 
       updated_at TIMESTAMPTZ
-        NOT NULL DEFAULT NOW()
+        NOT NULL
+        DEFAULT NOW()
     );
   `);
 
@@ -303,8 +457,11 @@ export async function initializeDatabase() {
     );
   `);
 
+  // ==========================================================
+  // FERTIG
+  // ==========================================================
 
   console.log(
-    "PostgreSQL: Shipping + Print Queue + Shopify Webhooks bereit."
+    "PostgreSQL: Shipping + Print Queue + Printers + Webhooks bereit."
   );
 }
