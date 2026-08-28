@@ -1,18 +1,31 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+# ALO Platform - Shopify Production Configuration
 
 client_id = "186ce81dd333b4e0736a199c76f6afea"
+
 name = "ALO Platform"
-application_url = "https://example.com"
+
+application_url = "https://daring-acceptance-production-049e.up.railway.app"
+
 embedded = true
 
 [webhooks]
+
 api_version = "2026-07"
 
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+
 scopes = "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_orders,read_products"
-optional_scopes = [ ]
+
+optional_scopes = []
+
 use_legacy_install_flow = false
 
 [auth]
-redirect_urls = [ ]
+
+redirect_urls = [
+  "https://daring-acceptance-production-049e.up.railway.app/auth/callback"
+]
+
+[build]
+
+automatically_update_urls_on_dev = true
