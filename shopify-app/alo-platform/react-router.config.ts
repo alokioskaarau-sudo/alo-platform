@@ -2,6 +2,7 @@ import type { Config } from "@react-router/dev/config";
 
 export default {
   allowedActionOrigins: [
-    "https://admin.shopify.com",
+    "admin.shopify.com",
+    "localhost:8080",
   ],
 } satisfies Config;
