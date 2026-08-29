@@ -3,7 +3,7 @@ import {
 } from "../../integrations/shopify/orders.js";
 
 import {
-  createSpecimenLabelForOrder,
+  createLiveLabelForOrder,
 } from "./shipping.service.js";
 
 import {
@@ -296,7 +296,7 @@ export async function processPaidShopifyOrder(
 
 
   const label =
-    await createSpecimenLabelForOrder(
+    await createLiveLabelForOrder(
       order
     );
 
@@ -304,7 +304,7 @@ export async function processPaidShopifyOrder(
   const storedLabel =
     await findShippingLabel(
       order.id,
-      "SPECIMEN"
+      "LIVE"
     );
 
 
@@ -368,7 +368,7 @@ export async function processPaidShopifyOrder(
         storedLabel.id,
 
       mode:
-        "SPECIMEN",
+        "LIVE",
 
       identCode:
         label.identCode,

@@ -64,7 +64,7 @@ export async function createSwissPostPreviewLabel(
       printAddresses: "RECIPIENT_AND_CUSTOMER",
       imageFileType: "PDF",
       imageResolution: 300,
-      printPreview: true,
+      printPreview: false,
     },
 
     item: {

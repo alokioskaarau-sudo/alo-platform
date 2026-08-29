@@ -32,7 +32,7 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
     const existingLabel =
       await findShippingLabel(
         order.id,
-        "SPECIMEN"
+        "LIVE"
       );
 
     return {
@@ -63,7 +63,7 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
   const label =
     await findShippingLabel(
       order.id,
-      "SPECIMEN"
+      "LIVE"
     );
 
 

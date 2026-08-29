@@ -128,7 +128,7 @@ function calculateOrderWeightGrams(
 // SPECIMEN LABEL
 // ============================================================
 
-export async function createSpecimenLabelForOrder(
+export async function createLiveLabelForOrder(
   order: ShopifyOrder
 ) {
   if (
@@ -252,7 +252,7 @@ export async function createSpecimenLabelForOrder(
         order.name,
 
       mode:
-        "SPECIMEN",
+        "LIVE",
 
       service:
         "ECO",

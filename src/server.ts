@@ -39,7 +39,7 @@ import {
 } from "./modules/shipping/shopifyShipping.js";
 
 import {
-  createSpecimenLabelForOrder,
+  createLiveLabelForOrder,
 } from "./modules/shipping/shipping.service.js";
 
 import {
@@ -160,7 +160,7 @@ app.get(
         "online",
 
       mode:
-        "SPECIMEN",
+        "LIVE",
 
       pages: {
         shipping:
@@ -813,7 +813,7 @@ app.get(
       }
 
       const result =
-        await createSpecimenLabelForOrder(
+        await createLiveLabelForOrder(
           order
         );
 
@@ -1276,7 +1276,7 @@ console.log(
         );
 
         console.log(
-          "Swiss Post: SPECIMEN MODE"
+          "Swiss Post: LIVE MODE"
         );
       }
     );
