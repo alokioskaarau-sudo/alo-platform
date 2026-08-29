@@ -1,11 +1,41 @@
 {
   "name": "alo-print-agent",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "ALO Kiosk Print Connector",
-  "main": "src/index.js",
+  "main": "electron/main.cjs",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "app": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
   },
-  "dependencies": {}
+  "build": {
+    "appId": "ch.alokiosk.printconnector",
+    "productName": "ALO Print Connector",
+    "files": [
+      "electron/**/*",
+      "ui/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.utilities"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  }
 }

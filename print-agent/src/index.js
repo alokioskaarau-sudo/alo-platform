@@ -4,7 +4,7 @@ import os from "node:os";
 import readline from "node:readline";
 import { execFileSync } from "node:child_process";
 
-const AGENT_VERSION = "1.1.0";
+const AGENT_VERSION = "2.0.1";
 
 const DEFAULT_BACKEND_URL =
   "https://alo-platform-production.up.railway.app";
@@ -601,6 +601,214 @@ function getWindowsPrinters() {
     );
 }
 
+
+/* =========================================================
+   MACOS DRUCKER ERKENNEN
+========================================================= */
+
+function getMacPrinters() {
+  try {
+    const output = execFileSync(
+      "lpstat",
+      ["-p"],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+      }
+    ).trim();
+
+    if (!output) {
+      return [];
+    }
+
+    return output
+      .split(/\r?\n/)
+      .map((line) => {
+        let printerName = "";
+
+        // macOS Deutsch:
+        // Drucker „Brother_QL_1110NWB“ ist ...
+        const germanMatch = line.match(
+          /^Drucker\s+„([^“]+)“/i
+        );
+
+        // macOS Englisch / andere CUPS-Ausgabe:
+        // printer Brother_QL_1110NWB ...
+        const englishMatch = line.match(
+          /^printer\s+(\S+)/i
+        );
+
+        if (germanMatch) {
+          printerName = germanMatch[1].trim();
+        } else if (englishMatch) {
+          printerName = englishMatch[1].trim();
+        }
+
+        if (!printerName) {
+          return null;
+        }
+
+        return {
+          name: printerName,
+          displayName: printerName,
+          driverName: "",
+          portName: "",
+          paperSize: null,
+          platform: "macos",
+          status: "ONLINE",
+          agentVersion: AGENT_VERSION,
+          deviceName: DEVICE_NAME,
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    logError(
+      "Mac-Druckererkennung fehlgeschlagen",
+      error
+    );
+    return [];
+  }
+}
+
+function printPdfMac(
+  printerName,
+  pdfPath
+) {
+  const tempDir = path.join(
+    os.tmpdir(),
+    "alo-print-agent"
+  );
+
+  fs.mkdirSync(
+    tempDir,
+    {
+      recursive: true,
+    }
+  );
+
+  const baseName =
+    `alo-print-${Date.now()}-${process.pid}`;
+
+  const pngPath = path.join(
+    tempDir,
+    `${baseName}.png`
+  );
+
+  try {
+    log(
+      "PDF wird für Thermodruck gerastert ..."
+    );
+
+    execFileSync(
+      "magick",
+      [
+        "-density",
+        "203",
+        pdfPath,
+        "-background",
+        "white",
+        "-alpha",
+        "remove",
+        "-alpha",
+        "off",
+        pngPath,
+      ],
+      {
+        stdio: "pipe",
+        timeout: 60000,
+      }
+    );
+
+    if (!fs.existsSync(pngPath)) {
+      throw new Error(
+        "Rasterisiertes Druckbild wurde nicht erstellt."
+      );
+    }
+
+    const rotatedPath = path.join(
+      tempDir,
+      `${baseName}-rotated.png`
+    );
+
+    log(
+      "Druckbild wird ins Querformat gedreht ..."
+    );
+
+    execFileSync(
+      "magick",
+      [
+        pngPath,
+        "-rotate",
+        "90",
+        rotatedPath,
+      ],
+      {
+        stdio: "pipe",
+        timeout: 60000,
+      }
+    );
+
+    if (!fs.existsSync(rotatedPath)) {
+      throw new Error(
+        "Gedrehtes Druckbild wurde nicht erstellt."
+      );
+    }
+
+    log(
+      `Sende Druckbild an "${printerName}" ...`
+    );
+
+    execFileSync(
+      "lp",
+      [
+        "-d",
+        printerName,
+        "-o",
+        "PageSize=Custom.102x152mm",
+        "-o",
+        "MediaType=labels",
+        "-o",
+        "CutMedia=EndOfPage",
+        rotatedPath,
+      ],
+      {
+        stdio: "pipe",
+        timeout: 60000,
+      }
+    );
+
+    log(
+      "Druckauftrag an CUPS übergeben."
+    );
+
+    if (fs.existsSync(pngPath)) {
+      fs.unlinkSync(pngPath);
+    }
+
+    if (fs.existsSync(rotatedPath)) {
+      fs.unlinkSync(rotatedPath);
+    }
+  } catch (error) {
+    if (fs.existsSync(pngPath)) {
+      try {
+        fs.unlinkSync(pngPath);
+      } catch {}
+    }
+
+    const rotatedPath = path.join(
+      tempDir,
+      `${baseName}-rotated.png`
+    );
+
+    if (fs.existsSync(rotatedPath)) {
+      try {
+        fs.unlinkSync(rotatedPath);
+      } catch {}
+    }
+
+    throw error;
+  }
+}
 
 /* =========================================================
    DRUCKER AUSWÄHLEN
@@ -1253,57 +1461,255 @@ async function runWindowsAgent(
 
 
 /* =========================================================
+   MACOS AGENT
+========================================================= */
+
+async function runMacAgent(deviceConfig) {
+  const deviceToken = deviceConfig.deviceToken;
+
+  log("Suche installierte Mac-Drucker ...");
+
+  let printers = [];
+
+  try {
+    printers = getMacPrinters();
+  } catch (error) {
+    logError(
+      "Mac-Drucker konnten nicht gelesen werden",
+      error
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (printers.length === 0) {
+    log("Keine Mac-Drucker gefunden.");
+    log("Bitte den Brother-Drucker in macOS installieren.");
+    process.exitCode = 1;
+    return;
+  }
+
+  log(`${printers.length} Drucker gefunden.`);
+
+  for (const printer of printers) {
+    log(`Gefunden: ${printer.name}`);
+  }
+
+  await heartbeatAllPrinters(
+    printers,
+    deviceToken
+  );
+
+  const selectedPrinter = choosePrinter(printers);
+
+  if (!selectedPrinter) {
+    log(
+      "Kein eindeutiger ALO-Drucker konnte automatisch ausgewählt werden."
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  log(
+    `ALO Drucker: ${selectedPrinter.name}`
+  );
+
+  log("Mac-PDF-Drucksystem bereit.");
+  log("Mac Print Queue gestartet.");
+
+  let lastHeartbeat = 0;
+
+  while (true) {
+    try {
+      const now = Date.now();
+
+      if (
+        now - lastHeartbeat >=
+        HEARTBEAT_INTERVAL_MS
+      ) {
+        printers = getMacPrinters();
+
+        if (printers.length > 0) {
+          await heartbeatAllPrinters(
+            printers,
+            deviceToken
+          );
+        }
+
+        lastHeartbeat = now;
+      }
+
+      await processNextMacJob(
+        selectedPrinter,
+        deviceToken
+      );
+    } catch (error) {
+      logError(
+        "Mac Connector-Schleife fehlgeschlagen",
+        error
+      );
+    }
+
+    await sleep(
+      JOB_POLL_INTERVAL_MS
+    );
+  }
+}
+
+
+/* =========================================================
+   MAC JOB VERARBEITEN
+========================================================= */
+
+async function processNextMacJob(
+  printer,
+  deviceToken
+) {
+  let job = null;
+  let pdfPath = null;
+
+  try {
+    const result = await claimNextJob(
+      printer.name,
+      deviceToken
+    );
+
+    job = result?.job || null;
+
+    if (!job) {
+      return false;
+    }
+
+    log(
+      `Druckauftrag erhalten: ${
+        job.shopify_order_name || job.id
+      }`
+    );
+
+    pdfPath = createTemporaryPdf(job);
+
+    log(
+      `Drucke auf "${printer.name}" ...`
+    );
+
+    printPdfMac(
+      printer.name,
+      pdfPath
+    );
+
+    await completeJob(
+      job.id,
+      deviceToken
+    );
+
+    log(
+      `Druckauftrag abgeschlossen: ${
+        job.shopify_order_name || job.id
+      }`
+    );
+
+    return true;
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    logError(
+      "Mac-Druckauftrag fehlgeschlagen",
+      error
+    );
+
+    if (job?.id) {
+      try {
+        await failJob(
+          job.id,
+          message,
+          deviceToken
+        );
+      } catch (failError) {
+        logError(
+          "Fehlerstatus konnte nicht an den Server gemeldet werden",
+          failError
+        );
+      }
+    }
+
+    return false;
+  } finally {
+    if (
+      pdfPath &&
+      fs.existsSync(pdfPath)
+    ) {
+      try {
+        fs.unlinkSync(pdfPath);
+      } catch {
+        // Temporäre Datei bleibt bis zum System-Cleanup bestehen.
+      }
+    }
+  }
+}
+
+/* =========================================================
    START
 ========================================================= */
 
 async function main() {
   console.log("");
+
   console.log(
     "======================================"
   );
+
   console.log(
     "          ALO PRINT CONNECTOR"
   );
+
   console.log(
     "======================================"
   );
+
   console.log(
     `Version:   ${AGENT_VERSION}`
   );
+
   console.log(
     `Computer:  ${DEVICE_NAME}`
   );
+
   console.log(
     `Plattform: ${PLATFORM}`
   );
+
   console.log(
     `Backend:   ${BACKEND_URL}`
   );
+
   console.log(
     "======================================"
   );
+
   console.log("");
-
-  if (
-    PLATFORM !==
-    "win32"
-  ) {
-    log(
-      "Dieser Computer ist kein Windows-PC."
-    );
-
-    log(
-      "Windows-Druck und Print-Queue werden hier nicht gestartet."
-    );
-
-    return;
-  }
 
   const deviceConfig =
     await ensurePaired();
 
-  await runWindowsAgent(
-    deviceConfig
+  if (PLATFORM === "darwin") {
+    await runMacAgent(
+      deviceConfig
+    );
+    return;
+  }
+
+  if (PLATFORM === "win32") {
+    await runWindowsAgent(
+      deviceConfig
+    );
+    return;
+  }
+
+  log(
+    `Nicht unterstützte Plattform: ${PLATFORM}`
   );
 }
 

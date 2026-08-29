@@ -11,6 +11,11 @@ function getShopDomain(): string {
   return `${shop}.myshopify.com`;
 }
 
+
+// ============================================================
+// SHOPIFY ORDER FIELDS
+// ============================================================
+
 const ORDER_FIELDS = `
   id
   name
@@ -41,6 +46,20 @@ const ORDER_FIELDS = `
     phone
   }
 
+  fulfillmentOrders(first: 20) {
+    edges {
+      node {
+        id
+        status
+
+        deliveryMethod {
+          methodType
+          presentedName
+        }
+      }
+    }
+  }
+
   lineItems(first: 50) {
     edges {
       node {
@@ -62,6 +81,11 @@ const ORDER_FIELDS = `
     }
   }
 `;
+
+
+// ============================================================
+// SHOPIFY GRAPHQL
+// ============================================================
 
 async function shopifyGraphQL(
   query: string,
@@ -125,6 +149,11 @@ async function shopifyGraphQL(
   return response.data?.data;
 }
 
+
+// ============================================================
+// LETZTE SHOPIFY BESTELLUNGEN
+// ============================================================
+
 export async function getLatestShopifyOrders(
   limit = 5
 ) {
@@ -161,6 +190,11 @@ export async function getLatestShopifyOrders(
       edge.node
   );
 }
+
+
+// ============================================================
+// SHOPIFY BESTELLUNG NACH ID
+// ============================================================
 
 export async function getShopifyOrderById(
   orderId: string
