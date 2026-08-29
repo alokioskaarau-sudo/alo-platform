@@ -1,5 +1,4 @@
 import type {
-  ActionFunctionArgs,
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
@@ -82,6 +81,11 @@ export const loader = async ({
       count: data.count ?? 0,
     };
   } catch (error) {
+    console.error(
+      "Printer loader error:",
+      error,
+    );
+
     return {
       connected: false,
       error:
@@ -92,94 +96,6 @@ export const loader = async ({
       defaultPrinter: null as Printer | null,
       count: 0,
     };
-  }
-};
-
-/* =========================================================
-   ACTION
-========================================================= */
-
-export const action = async ({
-  request,
-}: ActionFunctionArgs) => {
-  try {
-    await authenticate.admin(request);
-
-    const formData = await request.formData();
-
-    const intent = String(
-      formData.get("intent") ?? "",
-    ).trim();
-
-    if (intent !== "create-pairing-code") {
-      return {
-        ok: false,
-        error: "Unbekannte Aktion.",
-      } satisfies PairingResponse;
-    }
-
-    const response = await fetch(
-      `${BACKEND_URL}/api/printer-pairing/create`,
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({}),
-      },
-    );
-
-    let data: PairingResponse;
-
-    try {
-      data =
-        (await response.json()) as PairingResponse;
-    } catch {
-      return {
-        ok: false,
-        error:
-          `Railway hat keine gültige Antwort geliefert ` +
-          `(HTTP ${response.status}).`,
-      } satisfies PairingResponse;
-    }
-
-    if (!response.ok || !data.ok) {
-      return {
-        ok: false,
-        error:
-          data.error ||
-          `Pairing fehlgeschlagen (HTTP ${response.status}).`,
-      } satisfies PairingResponse;
-    }
-
-    if (!data.code) {
-      return {
-        ok: false,
-        error:
-          "Railway hat keinen Pairing-Code zurückgegeben.",
-      } satisfies PairingResponse;
-    }
-
-    return {
-      ok: true,
-      code: data.code,
-      expiresInMinutes:
-        data.expiresInMinutes ?? 10,
-    } satisfies PairingResponse;
-  } catch (error) {
-    console.error(
-      "Printer Pairing Action Error:",
-      error,
-    );
-
-    return {
-      ok: false,
-      error:
-        error instanceof Error
-          ? error.message
-          : "Pairing-Code konnte nicht erzeugt werden.",
-    } satisfies PairingResponse;
   }
 };
 
@@ -236,7 +152,7 @@ export default function Printers() {
     useLoaderData<typeof loader>();
 
   const pairingFetcher =
-    useFetcher<typeof action>();
+    useFetcher<PairingResponse>();
 
   const pairingData =
     pairingFetcher.data;
@@ -269,11 +185,10 @@ export default function Printers() {
     if (pairingLoading) return;
 
     pairingFetcher.submit(
-      {
-        intent: "create-pairing-code",
-      },
+      {},
       {
         method: "post",
+        action: "/app/printer-pairing",
       },
     );
   }
@@ -331,24 +246,22 @@ export default function Printers() {
           gap="base"
         >
           <s-paragraph>
-            Verbinde einen Computer mit der
-            ALO Platform. Dafür wird einmalig
-            ein sechsstelliger Verbindungscode
-            erzeugt.
+            Verbinde einen Computer mit
+            der ALO Platform. Dafür wird
+            einmalig ein sechsstelliger
+            Verbindungscode erzeugt.
           </s-paragraph>
 
           {!pairingCode && (
-            <>
-              <s-button
-                variant="primary"
-                onClick={createPairingCode}
-                disabled={pairingLoading}
-              >
-                {pairingLoading
-                  ? "Code wird erstellt..."
-                  : "Drucker verbinden"}
-              </s-button>
-            </>
+            <s-button
+              variant="primary"
+              onClick={createPairingCode}
+              disabled={pairingLoading}
+            >
+              {pairingLoading
+                ? "Code wird erstellt..."
+                : "Drucker verbinden"}
+            </s-button>
           )}
 
           {pairingError && (
@@ -407,7 +320,7 @@ export default function Printers() {
                 </s-paragraph>
 
                 <s-paragraph>
-                  Öffne jetzt den ALO Print
+                  Öffne den ALO Print
                   Connector auf dem Computer
                   und gib diesen Code dort ein.
                 </s-paragraph>
@@ -581,9 +494,10 @@ export default function Printers() {
           </s-paragraph>
 
           <s-paragraph>
-            Ist kein Drucker verfügbar, bleibt
-            der Auftrag in der Warteschlange,
-            bis wieder ein Drucker online ist.
+            Ist kein Drucker verfügbar,
+            bleibt der Auftrag in der
+            Warteschlange, bis wieder ein
+            Drucker online ist.
           </s-paragraph>
         </s-stack>
       </s-section>
@@ -618,7 +532,7 @@ export default function Printers() {
           </s-paragraph>
 
           <s-paragraph>
-            Das System ist dadurch unabhängig
+            Das System funktioniert unabhängig
             davon, ob die ALO Platform auf
             einem Mac oder Windows-PC geöffnet
             wird.
