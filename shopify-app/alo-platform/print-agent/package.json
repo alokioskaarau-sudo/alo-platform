@@ -1,0 +1,11 @@
+{
+  "name": "alo-print-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ALO Kiosk Print Connector",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {}
+}
