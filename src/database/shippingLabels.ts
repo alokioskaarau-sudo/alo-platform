@@ -2,7 +2,8 @@ import { db } from "./db.js";
 
 export type LabelMode =
   | "SPECIMEN"
-  | "LIVE";
+  | "LIVE"
+  | "PICKUP";
 
 export type ShippingLabelRecord = {
   id: string;
@@ -150,7 +151,7 @@ export async function reserveShippingLabel(
 export async function completeShippingLabel(
   id: string,
   input: {
-    identCode: string;
+    identCode: string | null;
     pdfBase64: string;
   }
 ): Promise<ShippingLabelRecord> {
