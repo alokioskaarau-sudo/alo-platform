@@ -1,9 +1,26 @@
 import { db } from "./db.js";
 
+
+// ==========================================================
+// TYPES
+// ==========================================================
+
+export type DocumentType =
+  | "SHIPPING_LABEL"
+  | "PACKING_SLIP"
+  | "PICKUP_RECEIPT";
+
+
+// ==========================================================
+// SHIPPING DASHBOARD RECORD
+// ==========================================================
+
 export type ShippingDashboardRecord = {
+
   id: string;
 
   shopify_order_id: string;
+
   shopify_order_name: string;
 
   swisspost_ident_code:
@@ -63,6 +80,7 @@ export type ShippingDashboardRecord = {
 export async function getShippingDashboardLabels(
   limit = 100
 ): Promise<ShippingDashboardRecord[]> {
+
   const result =
     await db.query<ShippingDashboardRecord>(
       `
@@ -104,6 +122,7 @@ export async function getShippingDashboardLabels(
 export async function getShippingDashboardLabelById(
   id: string
 ): Promise<ShippingDashboardRecord | null> {
+
   const result =
     await db.query<ShippingDashboardRecord>(
       `
@@ -139,7 +158,7 @@ export async function getShippingDashboardLabelById(
 
 
 // ==========================================================
-// PDF AUS DB
+// VERSANDLABEL PDF
 // ==========================================================
 
 export async function getShippingLabelPdf(
@@ -149,6 +168,7 @@ export async function getShippingLabelPdf(
   orderName: string;
   pdfBase64: string;
 } | null> {
+
   const result =
     await db.query<{
       id: string;
@@ -181,8 +201,10 @@ export async function getShippingLabelPdf(
 
   return {
     id: row.id,
+
     orderName:
       row.shopify_order_name,
+
     pdfBase64:
       row.label_pdf_base64,
   };
@@ -190,13 +212,68 @@ export async function getShippingLabelPdf(
 
 
 // ==========================================================
-// PRINT JOB ERSTELLEN
+// LIEFERSCHEIN PDF
+// ==========================================================
+
+export async function getPackingSlipPdf(
+  id: string
+): Promise<{
+  id: string;
+  orderName: string;
+  pdfBase64: string;
+} | null> {
+
+  const result =
+    await db.query<{
+      id: string;
+      shopify_order_name: string;
+      pdf_base64:
+        | string
+        | null;
+    }>(
+      `
+        SELECT
+          id,
+          shopify_order_name,
+          pdf_base64
+        FROM packing_slips
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [id]
+    );
+
+  const row =
+    result.rows[0];
+
+  if (
+    !row ||
+    !row.pdf_base64
+  ) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+
+    orderName:
+      row.shopify_order_name,
+
+    pdfBase64:
+      row.pdf_base64,
+  };
+}
+
+
+// ==========================================================
+// VERSANDLABEL PRINT JOB
 // ==========================================================
 
 export async function createPrintJob(
   shippingLabelId: string,
   printerName?: string
 ) {
+
   const label =
     await getShippingDashboardLabelById(
       shippingLabelId
@@ -222,6 +299,7 @@ export async function createPrintJob(
         SELECT *
         FROM print_jobs
         WHERE shipping_label_id = $1
+          AND document_type = 'SHIPPING_LABEL'
           AND status IN (
             'PENDING',
             'PRINTING'
@@ -234,8 +312,7 @@ export async function createPrintJob(
   if (existing.rows[0]) {
     return {
       created: false,
-      job:
-        existing.rows[0],
+      job: existing.rows[0],
     };
   }
 
@@ -244,11 +321,15 @@ export async function createPrintJob(
       `
         INSERT INTO print_jobs (
           shipping_label_id,
+          packing_slip_id,
+          document_type,
           printer_name,
           status
         )
         VALUES (
           $1,
+          NULL,
+          'SHIPPING_LABEL',
           $2,
           'PENDING'
         )
@@ -265,11 +346,14 @@ export async function createPrintJob(
       UPDATE shipping_labels
       SET
         print_status = 'QUEUED',
+
         printer_name = COALESCE(
           $2,
           printer_name
         ),
+
         updated_at = NOW()
+
       WHERE id = $1
     `,
     [
@@ -280,8 +364,130 @@ export async function createPrintJob(
 
   return {
     created: true,
-    job:
-      result.rows[0],
+    job: result.rows[0],
+  };
+}
+
+
+// ==========================================================
+// LIEFERSCHEIN PRINT JOB
+// ==========================================================
+
+export async function createPackingSlipPrintJob(
+  packingSlipId: string,
+  printerName?: string
+) {
+
+  const result =
+    await db.query(
+      `
+        SELECT
+          id,
+          shopify_order_name,
+          status,
+          pdf_base64
+        FROM packing_slips
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [packingSlipId]
+    );
+
+  const slip =
+    result.rows[0];
+
+  if (!slip) {
+    throw new Error(
+      "Lieferschein wurde nicht gefunden."
+    );
+  }
+
+  if (
+    slip.status !== "COMPLETED"
+  ) {
+    throw new Error(
+      "Nur vollständig erstellte Lieferscheine können gedruckt werden."
+    );
+  }
+
+  if (!slip.pdf_base64) {
+    throw new Error(
+      "Lieferschein enthält kein PDF."
+    );
+  }
+
+  const existing =
+    await db.query(
+      `
+        SELECT *
+        FROM print_jobs
+        WHERE packing_slip_id = $1
+          AND document_type = 'PACKING_SLIP'
+          AND status IN (
+            'PENDING',
+            'PRINTING'
+          )
+        LIMIT 1
+      `,
+      [packingSlipId]
+    );
+
+  if (existing.rows[0]) {
+    return {
+      created: false,
+      job: existing.rows[0],
+    };
+  }
+
+  const insert =
+    await db.query(
+      `
+        INSERT INTO print_jobs (
+          shipping_label_id,
+          packing_slip_id,
+          document_type,
+          printer_name,
+          status
+        )
+        VALUES (
+          NULL,
+          $1,
+          'PACKING_SLIP',
+          $2,
+          'PENDING'
+        )
+        RETURNING *
+      `,
+      [
+        packingSlipId,
+        printerName ?? null,
+      ]
+    );
+
+  await db.query(
+    `
+      UPDATE packing_slips
+      SET
+        print_status = 'QUEUED',
+
+        printer_name = COALESCE(
+          $2,
+          printer_name
+        ),
+
+        updated_at = NOW()
+
+      WHERE id = $1
+    `,
+    [
+      packingSlipId,
+      printerName ?? null,
+    ]
+  );
+
+  return {
+    created: true,
+    job: insert.rows[0],
   };
 }
 
@@ -291,58 +497,98 @@ export async function createPrintJob(
 // ==========================================================
 
 export async function claimNextPrintJob(
-  printerName: string
+  printerName: string,
+  documentType:
+    | "SHIPPING_LABEL"
+    | "PACKING_SLIP"
 ) {
-  const client =
-    await db.connect();
+  const client = await db.connect();
 
   try {
-    await client.query(
-      "BEGIN"
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `
+        SELECT
+          pj.id,
+          pj.shipping_label_id,
+          pj.packing_slip_id,
+          pj.document_type,
+          pj.printer_name,
+          pj.status,
+
+          CASE
+            WHEN pj.document_type = 'SHIPPING_LABEL'
+              THEN sl.shopify_order_name
+            WHEN pj.document_type = 'PACKING_SLIP'
+              THEN ps.shopify_order_name
+            ELSE NULL
+          END AS shopify_order_name,
+
+          CASE
+            WHEN pj.document_type = 'SHIPPING_LABEL'
+              THEN sl.label_pdf_base64
+            WHEN pj.document_type = 'PACKING_SLIP'
+              THEN ps.pdf_base64
+            ELSE NULL
+          END AS pdf_base64
+
+        FROM print_jobs pj
+
+        LEFT JOIN shipping_labels sl
+          ON sl.id = pj.shipping_label_id
+
+        LEFT JOIN packing_slips ps
+          ON ps.id = pj.packing_slip_id
+
+        WHERE
+          pj.status = 'PENDING'
+
+          AND pj.document_type = $2
+
+          AND (
+            pj.printer_name IS NULL
+            OR pj.printer_name = $1
+          )
+
+        ORDER BY
+          pj.requested_at ASC
+
+        FOR UPDATE OF pj
+        SKIP LOCKED
+
+        LIMIT 1
+      `,
+      [
+        printerName,
+        documentType,
+      ]
     );
 
-    const result =
-      await client.query(
-        `
-          SELECT
-            pj.id,
-            pj.shipping_label_id,
-            pj.printer_name,
-            pj.status,
-            sl.shopify_order_name,
-            sl.label_pdf_base64
-          FROM print_jobs pj
-
-          JOIN shipping_labels sl
-            ON sl.id =
-              pj.shipping_label_id
-
-          WHERE
-            pj.status = 'PENDING'
-
-            AND (
-              pj.printer_name IS NULL
-              OR pj.printer_name = $1
-            )
-
-          ORDER BY
-            pj.requested_at ASC
-
-          FOR UPDATE
-          SKIP LOCKED
-
-          LIMIT 1
-        `,
-        [printerName]
-      );
-
-    const job =
-      result.rows[0];
+    const job = result.rows[0];
 
     if (!job) {
+      await client.query("COMMIT");
+      return null;
+    }
+
+    if (!job.pdf_base64) {
       await client.query(
-        "COMMIT"
+        `
+          UPDATE print_jobs
+          SET
+            status = 'FAILED',
+            error_message = $2,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          job.id,
+          `Für ${documentType} wurde kein PDF gefunden.`,
+        ]
       );
+
+      await client.query("COMMIT");
 
       return null;
     }
@@ -353,8 +599,7 @@ export async function claimNextPrintJob(
         SET
           status = 'PRINTING',
           printer_name = $2,
-          attempts =
-            attempts + 1,
+          attempts = attempts + 1,
           started_at = NOW(),
           updated_at = NOW()
         WHERE id = $1
@@ -365,43 +610,56 @@ export async function claimNextPrintJob(
       ]
     );
 
-    await client.query(
-      `
-        UPDATE shipping_labels
-        SET
-          print_status = 'PRINTING',
-          printer_name = $2,
-          updated_at = NOW()
-        WHERE id = $1
-      `,
-      [
-        job.shipping_label_id,
-        printerName,
-      ]
-    );
+    if (documentType === "SHIPPING_LABEL") {
+      await client.query(
+        `
+          UPDATE shipping_labels
+          SET
+            print_status = 'PRINTING',
+            printer_name = $2,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          job.shipping_label_id,
+          printerName,
+        ]
+      );
+    }
 
-    await client.query(
-      "COMMIT"
-    );
+    if (documentType === "PACKING_SLIP") {
+      await client.query(
+        `
+          UPDATE packing_slips
+          SET
+            print_status = 'PRINTING',
+            printer_name = $2,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          job.packing_slip_id,
+          printerName,
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
 
     return {
       ...job,
-      printer_name:
-        printerName,
-      status:
-        "PRINTING",
+      printer_name: printerName,
+      status: "PRINTING",
     };
-  } catch (error) {
-    await client.query(
-      "ROLLBACK"
-    );
 
+  } catch (error) {
+    await client.query("ROLLBACK");
     throw error;
+
   } finally {
     client.release();
   }
 }
-
 
 // ==========================================================
 // PRINT JOB ERFOLGREICH
@@ -410,10 +668,12 @@ export async function claimNextPrintJob(
 export async function completePrintJob(
   printJobId: string
 ) {
+
   const client =
     await db.connect();
 
   try {
+
     await client.query(
       "BEGIN"
     );
@@ -422,12 +682,19 @@ export async function completePrintJob(
       await client.query(
         `
           UPDATE print_jobs
+
           SET
+
             status = 'PRINTED',
+
             printed_at = NOW(),
+
             error_message = NULL,
+
             updated_at = NOW()
+
           WHERE id = $1
+
           RETURNING *
         `,
         [printJobId]
@@ -437,40 +704,89 @@ export async function completePrintJob(
       jobResult.rows[0];
 
     if (!job) {
+
       throw new Error(
         "Print Job wurde nicht gefunden."
       );
     }
 
-    await client.query(
-      `
-        UPDATE shipping_labels
-        SET
-          print_status = 'PRINTED',
-          print_count =
-            print_count + 1,
-          printed_at = NOW(),
-          updated_at = NOW()
-        WHERE id = $1
-      `,
-      [
-        job.shipping_label_id,
-      ]
-    );
+    if (
+      job.document_type ===
+      "SHIPPING_LABEL"
+    ) {
+
+      await client.query(
+        `
+          UPDATE shipping_labels
+
+          SET
+
+            print_status = 'PRINTED',
+
+            print_count =
+              print_count + 1,
+
+            printed_at = NOW(),
+
+            error_message = NULL,
+
+            updated_at = NOW()
+
+          WHERE id = $1
+        `,
+        [
+          job.shipping_label_id,
+        ]
+      );
+
+    } else if (
+      job.document_type ===
+      "PACKING_SLIP"
+    ) {
+
+      await client.query(
+        `
+          UPDATE packing_slips
+
+          SET
+
+            print_status = 'PRINTED',
+
+            print_count =
+              print_count + 1,
+
+            printed_at = NOW(),
+
+            error_message = NULL,
+
+            updated_at = NOW()
+
+          WHERE id = $1
+        `,
+        [
+          job.packing_slip_id,
+        ]
+      );
+    }
 
     await client.query(
       "COMMIT"
     );
 
     return job;
+
   } catch (error) {
+
     await client.query(
       "ROLLBACK"
     );
 
     throw error;
+
   } finally {
+
     client.release();
+
   }
 }
 
@@ -483,10 +799,12 @@ export async function failPrintJob(
   printJobId: string,
   errorMessage: string
 ) {
+
   const client =
     await db.connect();
 
   try {
+
     await client.query(
       "BEGIN"
     );
@@ -495,11 +813,17 @@ export async function failPrintJob(
       await client.query(
         `
           UPDATE print_jobs
+
           SET
+
             status = 'FAILED',
+
             error_message = $2,
+
             updated_at = NOW()
+
           WHERE id = $1
+
           RETURNING *
         `,
         [
@@ -512,20 +836,57 @@ export async function failPrintJob(
       jobResult.rows[0];
 
     if (job) {
-      await client.query(
-        `
-          UPDATE shipping_labels
-          SET
-            print_status = 'FAILED',
-            error_message = $2,
-            updated_at = NOW()
-          WHERE id = $1
-        `,
-        [
-          job.shipping_label_id,
-          errorMessage,
-        ]
-      );
+
+      if (
+        job.document_type ===
+        "SHIPPING_LABEL"
+      ) {
+
+        await client.query(
+          `
+            UPDATE shipping_labels
+
+            SET
+
+              print_status = 'FAILED',
+
+              error_message = $2,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+          `,
+          [
+            job.shipping_label_id,
+            errorMessage,
+          ]
+        );
+
+      } else if (
+        job.document_type ===
+        "PACKING_SLIP"
+      ) {
+
+        await client.query(
+          `
+            UPDATE packing_slips
+
+            SET
+
+              print_status = 'FAILED',
+
+              error_message = $2,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+          `,
+          [
+            job.packing_slip_id,
+            errorMessage,
+          ]
+        );
+      }
     }
 
     await client.query(
@@ -533,13 +894,18 @@ export async function failPrintJob(
     );
 
     return job ?? null;
+
   } catch (error) {
+
     await client.query(
       "ROLLBACK"
     );
 
     throw error;
+
   } finally {
+
     client.release();
+
   }
 }

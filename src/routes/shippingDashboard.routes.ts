@@ -244,6 +244,12 @@ shippingDashboardRouter.post(
           ""
         ).trim();
 
+      const documentType =
+        String(
+          req.body?.documentType ??
+          "SHIPPING_LABEL"
+        ).trim().toUpperCase();
+
       if (!printerName) {
         return res
           .status(400)
@@ -254,9 +260,25 @@ shippingDashboardRouter.post(
           });
       }
 
+      if (
+        documentType !==
+          "SHIPPING_LABEL" &&
+        documentType !==
+          "PACKING_SLIP"
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Ungültiger documentType.",
+          });
+      }
+
       const job =
         await claimNextPrintJob(
-          printerName
+          printerName,
+          documentType
         );
 
       return res.json({

@@ -12,11 +12,16 @@ import {
 
 import {
   createPrintJob,
+  createPackingSlipPrintJob,
 } from "../../database/shippingDashboard.js";
 
 import {
   createPickupReceiptForOrder,
 } from "../pickup/pickupReceipt.service.js";
+
+import {
+  createPackingSlipForOrder,
+} from "./packingSlip.service.js";
 
 
 // ============================================================
@@ -38,14 +43,12 @@ function isPickupOrder(
       ?.filter(Boolean) ??
     [];
 
-
   if (
     fulfillmentOrders.length ===
     0
   ) {
     return false;
   }
-
 
   return fulfillmentOrders.some(
     (fulfillmentOrder: any) => {
@@ -66,18 +69,14 @@ function isPickupOrder(
           ""
         ).toLowerCase();
 
-
       return (
         methodType ===
           "PICK_UP" ||
-
         methodType ===
           "PICKUP" ||
-
         presentedName.includes(
           "abholung"
         ) ||
-
         presentedName.includes(
           "pickup"
         )
@@ -109,7 +108,6 @@ export async function processPaidShopifyOrder(
     await getShopifyOrderById(
       orderId
     );
-
 
   if (!order) {
     throw new Error(
@@ -147,7 +145,6 @@ export async function processPaidShopifyOrder(
     );
 
     return {
-
       skipped: true,
 
       reason:
@@ -160,14 +157,13 @@ export async function processPaidShopifyOrder(
 
 
   // ----------------------------------------------------------
-  // VERSANDART ERKENNEN
+  // VERSANDART
   // ----------------------------------------------------------
 
   const pickup =
     isPickupOrder(
       order
     );
-
 
   console.log(
     `Bestellung ${order.name}:`,
@@ -295,6 +291,10 @@ export async function processPaidShopifyOrder(
   );
 
 
+  // ----------------------------------------------------------
+  // 1. VERSANDLABEL
+  // ----------------------------------------------------------
+
   const label =
     await createLiveLabelForOrder(
       order
@@ -327,14 +327,62 @@ export async function processPaidShopifyOrder(
   }
 
 
-  const printJob =
+  // ----------------------------------------------------------
+  // 2. VERSANDLABEL PRINT JOB
+  // ----------------------------------------------------------
+
+  const shippingPrintJob =
     await createPrintJob(
       storedLabel.id
     );
 
 
+  // ----------------------------------------------------------
+  // 3. LIEFERSCHEIN ERZEUGEN
+  // ----------------------------------------------------------
+
+  const packingSlip =
+    await createPackingSlipForOrder(
+      order
+    );
+
+
+  if (
+    !packingSlip?.id
+  ) {
+
+    throw new Error(
+      `Lieferschein für ${order.name} wurde nicht erstellt.`
+    );
+  }
+
+
+  if (
+    !packingSlip?.pdfBase64
+  ) {
+
+    throw new Error(
+      `Lieferschein für ${order.name} enthält kein PDF.`
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // 4. LIEFERSCHEIN PRINT JOB
+  // ----------------------------------------------------------
+
+  const packingSlipPrintJob =
+    await createPackingSlipPrintJob(
+      packingSlip.id
+    );
+
+
+  // ----------------------------------------------------------
+  // LOG
+  // ----------------------------------------------------------
+
   console.log(
-    `Shipping Pipeline bereit: ${order.name}`,
+    `Shipping Pipeline vollständig bereit: ${order.name}`,
     {
 
       labelId:
@@ -343,11 +391,24 @@ export async function processPaidShopifyOrder(
       labelReused:
         label.reused,
 
-      printJobCreated:
-        printJob.created,
+      shippingPrintJobCreated:
+        shippingPrintJob.created,
+
+      packingSlipId:
+        packingSlip.id,
+
+      packingSlipReused:
+        packingSlip.reused,
+
+      packingSlipPrintJobCreated:
+        packingSlipPrintJob.created,
     }
   );
 
+
+  // ----------------------------------------------------------
+  // RETURN
+  // ----------------------------------------------------------
 
   return {
 
@@ -361,6 +422,7 @@ export async function processPaidShopifyOrder(
 
     fulfillmentType:
       "SHIPPING",
+
 
     label: {
 
@@ -380,18 +442,47 @@ export async function processPaidShopifyOrder(
         label.weightGrams,
     },
 
-    printJob: {
 
-      created:
-        printJob.created,
+    packingSlip: {
 
       id:
-        printJob.job?.id ??
-        null,
+        packingSlip.id,
 
-      status:
-        printJob.job?.status ??
-        null,
+      reused:
+        packingSlip.reused,
+    },
+
+
+    printJobs: {
+
+      shippingLabel: {
+
+        created:
+          shippingPrintJob.created,
+
+        id:
+          shippingPrintJob.job?.id ??
+          null,
+
+        status:
+          shippingPrintJob.job?.status ??
+          null,
+      },
+
+
+      packingSlip: {
+
+        created:
+          packingSlipPrintJob.created,
+
+        id:
+          packingSlipPrintJob.job?.id ??
+          null,
+
+        status:
+          packingSlipPrintJob.job?.status ??
+          null,
+      },
     },
   };
 }

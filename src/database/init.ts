@@ -181,27 +181,122 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // PACKING SLIPS / LIEFERSCHEINE
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS packing_slips (
+
+      id BIGSERIAL PRIMARY KEY,
+
+      shopify_order_id TEXT NOT NULL,
+
+      shopify_order_name TEXT NOT NULL,
+
+      pdf_base64 TEXT,
+
+      status TEXT NOT NULL DEFAULT 'PENDING',
+
+      print_status TEXT NOT NULL DEFAULT 'NOT_PRINTED',
+
+      print_count INTEGER NOT NULL DEFAULT 0,
+
+      printer_name TEXT,
+
+      printed_at TIMESTAMPTZ,
+
+      error_message TEXT,
+
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+
+    );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      packing_slips_order_unique
+    ON packing_slips (
+      shopify_order_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      packing_slips_print_status_idx
+    ON packing_slips (
+      print_status
+    );
+  `);
+
+  // ==========================================================
   // PRINT JOBS
   // ==========================================================
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS print_jobs (
+
       id BIGSERIAL PRIMARY KEY,
-      shipping_label_id BIGINT NOT NULL
+
+      shipping_label_id BIGINT
         REFERENCES shipping_labels(id)
         ON DELETE CASCADE,
+
+      packing_slip_id BIGINT
+        REFERENCES packing_slips(id)
+        ON DELETE CASCADE,
+
       printer_name TEXT,
-      status TEXT NOT NULL DEFAULT 'PENDING',
-      attempts INTEGER NOT NULL DEFAULT 0,
+
+      document_type TEXT
+        NOT NULL DEFAULT 'SHIPPING_LABEL',
+
+      status TEXT
+        NOT NULL DEFAULT 'PENDING',
+
+      attempts INTEGER
+        NOT NULL DEFAULT 0,
+
       error_message TEXT,
+
       requested_at TIMESTAMPTZ
         NOT NULL DEFAULT NOW(),
+
       started_at TIMESTAMPTZ,
+
       printed_at TIMESTAMPTZ,
+
       updated_at TIMESTAMPTZ
         NOT NULL DEFAULT NOW()
     );
   `);
+
+  // ==========================================================
+  // MIGRATION FÜR BESTEHENDE PRINT JOBS
+  // ==========================================================
+
+  await db.query(`
+    ALTER TABLE print_jobs
+    ALTER COLUMN shipping_label_id DROP NOT NULL;
+  `);
+
+  await db.query(`
+    ALTER TABLE print_jobs
+    ADD COLUMN IF NOT EXISTS document_type TEXT
+    NOT NULL DEFAULT 'SHIPPING_LABEL';
+  `);
+
+  await db.query(`
+    ALTER TABLE print_jobs
+    ADD COLUMN IF NOT EXISTS packing_slip_id BIGINT
+    REFERENCES packing_slips(id)
+    ON DELETE CASCADE;
+  `);
+
+  // ==========================================================
+  // PRINT JOB INDIZES
+  // ==========================================================
 
   await db.query(`
     CREATE INDEX IF NOT EXISTS
@@ -216,6 +311,22 @@ export async function initializeDatabase() {
       print_jobs_shipping_label_idx
     ON print_jobs (
       shipping_label_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      print_jobs_packing_slip_idx
+    ON print_jobs (
+      packing_slip_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      print_jobs_document_type_idx
+    ON print_jobs (
+      document_type
     );
   `);
 
