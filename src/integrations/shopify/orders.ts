@@ -24,11 +24,54 @@ const ORDER_FIELDS = `
   displayFulfillmentStatus
   email
 
+  subtotalPriceSet {
+    shopMoney {
+      amount
+      currencyCode
+    }
+  }
+
+  totalDiscountsSet {
+    shopMoney {
+      amount
+      currencyCode
+    }
+  }
+
+  totalShippingPriceSet {
+    shopMoney {
+      amount
+      currencyCode
+    }
+  }
+
+  totalTaxSet {
+    shopMoney {
+      amount
+      currencyCode
+    }
+  }
+
   totalPriceSet {
     shopMoney {
       amount
       currencyCode
     }
+  }
+
+  billingAddress {
+    firstName
+    lastName
+    company
+    address1
+    address2
+    zip
+    city
+    province
+    provinceCode
+    country
+    countryCodeV2
+    phone
   }
 
   shippingAddress {
@@ -67,6 +110,27 @@ const ORDER_FIELDS = `
         name
         quantity
         sku
+
+        originalUnitPriceSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+
+        discountedUnitPriceSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+
+        totalDiscountSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
 
         weight {
           value
