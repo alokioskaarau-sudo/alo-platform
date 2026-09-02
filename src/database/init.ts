@@ -503,6 +503,60 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // ORDER DISCOUNT CODES / LIEFERSCHEIN-RABATTE
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_discount_codes (
+      id BIGSERIAL PRIMARY KEY,
+
+      shopify_order_id TEXT NOT NULL,
+      shopify_order_name TEXT NOT NULL,
+
+      code TEXT NOT NULL,
+      shopify_discount_id TEXT,
+
+      percentage NUMERIC(5,4)
+        NOT NULL DEFAULT 0.1500,
+
+      status TEXT
+        NOT NULL DEFAULT 'PENDING',
+
+      error_message TEXT,
+
+      created_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      order_discount_codes_order_unique
+    ON order_discount_codes (
+      shopify_order_id
+    );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      order_discount_codes_code_unique
+    ON order_discount_codes (
+      code
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_discount_codes_status_idx
+    ON order_discount_codes (
+      status
+    );
+  `);
+
+  // ==========================================================
   // SHOPIFY WEBHOOK EVENTS
   // ==========================================================
 

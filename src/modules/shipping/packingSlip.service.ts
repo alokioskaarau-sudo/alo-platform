@@ -1,7 +1,32 @@
 import {
+  readFile,
+} from "node:fs/promises";
+
+import {
+  fileURLToPath,
+} from "node:url";
+
+import {
+  dirname,
+  resolve,
+} from "node:path";
+
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  type PDFFont,
+  type PDFPage,
+} from "pdf-lib";
+
+import {
   reservePackingSlip,
   completePackingSlip,
 } from "../../database/packingSlips.js";
+
+import {
+  getOrCreatePackingSlipDiscount,
+} from "./packingSlipDiscount.service.js";
 
 type ShopifyOrder = {
   id: string;
@@ -39,61 +64,155 @@ type ShopifyOrder = {
    PDF HELPERS
 ========================================================= */
 
-function pdfText(value: unknown): string {
-  return String(value ?? "")
-    .replace(/[^\x20-\x7E\xA0-\xFF]/g, " ")
-    .replace(/\\/g, "\\\\")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)");
-}
-
-function pdfStringLength(value: string): number {
-  return Buffer.byteLength(value, "latin1");
-}
-
 function formatDate(value?: string): string {
   if (!value) {
-    return new Date().toLocaleDateString("de-CH");
+    return new Date().toLocaleDateString(
+      "de-CH"
+    );
   }
 
   const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return new Date().toLocaleDateString("de-CH");
+    return new Date().toLocaleDateString(
+      "de-CH"
+    );
   }
 
-  return date.toLocaleDateString("de-CH");
+  return date.toLocaleDateString(
+    "de-CH"
+  );
 }
 
-function wrapText(
-  value: string,
-  maxCharacters: number
-): string[] {
-  const clean = String(value ?? "")
+function cleanPdfText(
+  value: unknown
+): string {
+  return String(value ?? "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function truncateToWidth(
+  text: string,
+  font: PDFFont,
+  size: number,
+  maxWidth: number
+): string {
+  const clean =
+    cleanPdfText(text);
+
+  if (
+    font.widthOfTextAtSize(
+      clean,
+      size
+    ) <= maxWidth
+  ) {
+    return clean;
+  }
+
+  const suffix = "...";
+  let candidate = clean;
+
+  while (
+    candidate.length > 0 &&
+    font.widthOfTextAtSize(
+      candidate + suffix,
+      size
+    ) > maxWidth
+  ) {
+    candidate =
+      candidate.slice(0, -1);
+  }
+
+  return (
+    candidate.trimEnd() +
+    suffix
+  );
+}
+
+function wrapTextToWidth(
+  text: string,
+  font: PDFFont,
+  size: number,
+  maxWidth: number
+): string[] {
+  const clean =
+    cleanPdfText(text);
 
   if (!clean) {
     return [];
   }
 
-  const words = clean.split(" ");
-  const lines: string[] = [];
+  const words =
+    clean.split(" ");
 
+  const lines: string[] = [];
   let current = "";
 
-  for (const word of words) {
-    if (!current) {
-      current = word;
+  for (const originalWord of words) {
+    let word = originalWord;
+
+    if (
+      font.widthOfTextAtSize(
+        word,
+        size
+      ) > maxWidth
+    ) {
+      if (current) {
+        lines.push(current);
+        current = "";
+      }
+
+      while (word.length > 0) {
+        let part = "";
+
+        while (
+          word.length > 0
+        ) {
+          const candidate =
+            part + word[0];
+
+          if (
+            part &&
+            font.widthOfTextAtSize(
+              candidate,
+              size
+            ) > maxWidth
+          ) {
+            break;
+          }
+
+          part = candidate;
+          word = word.slice(1);
+        }
+
+        if (part) {
+          lines.push(part);
+        } else {
+          break;
+        }
+      }
+
       continue;
     }
 
-    const candidate = `${current} ${word}`;
+    const candidate =
+      current
+        ? `${current} ${word}`
+        : word;
 
-    if (candidate.length <= maxCharacters) {
+    if (
+      font.widthOfTextAtSize(
+        candidate,
+        size
+      ) <= maxWidth
+    ) {
       current = candidate;
     } else {
-      lines.push(current);
+      if (current) {
+        lines.push(current);
+      }
+
       current = word;
     }
   }
@@ -105,60 +224,77 @@ function wrapText(
   return lines;
 }
 
-function textCommand(
-  x: number,
-  y: number,
+function centeredX(
   text: string,
-  font = "F1",
-  size = 10
-): string {
-  return [
-    "BT",
-    `/${font} ${size} Tf`,
-    `1 0 0 1 ${x} ${y} Tm`,
-    `(${pdfText(text)}) Tj`,
-    "ET",
-  ].join("\n");
+  font: PDFFont,
+  size: number,
+  pageWidth: number
+): number {
+  const width =
+    font.widthOfTextAtSize(
+      text,
+      size
+    );
+
+  return Math.max(
+    48,
+    (pageWidth - width) / 2
+  );
 }
 
-function lineCommand(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  width = 0.7
-): string {
-  return [
-    `${width} w`,
-    `${x1} ${y1} m`,
-    `${x2} ${y2} l`,
-    "S",
-  ].join("\n");
+function drawDivider(
+  page: PDFPage,
+  y: number,
+  left: number,
+  right: number,
+  thickness = 0.7
+) {
+  page.drawLine({
+    start: {
+      x: left,
+      y,
+    },
+    end: {
+      x: right,
+      y,
+    },
+    thickness,
+    color: rgb(
+      0.72,
+      0.72,
+      0.72
+    ),
+  });
 }
 
-function filledRectCommand(
+function drawSectionLabel(
+  page: PDFPage,
+  text: string,
   x: number,
   y: number,
-  width: number,
-  height: number,
-  gray = 0.95
-): string {
-  return [
-    `${gray} g`,
-    `${x} ${y} ${width} ${height} re`,
-    "f",
-    "0 g",
-  ].join("\n");
+  bold: PDFFont
+) {
+  page.drawText(
+    text.toUpperCase(),
+    {
+      x,
+      y,
+      size: 9,
+      font: bold,
+      color: rgb(
+        0.16,
+        0.16,
+        0.16
+      ),
+    }
+  );
 }
 
-/* =========================================================
-   A4 PACKING SLIP PDF
-========================================================= */
-
-export function createPackingSlipPdf(input: {
+type PackingSlipPdfInput = {
   orderName: string;
   date: string;
   email?: string | null;
+  discountCode: string;
   addressLines: string[];
   items: Array<{
     quantity: number;
@@ -166,471 +302,848 @@ export function createPackingSlipPdf(input: {
     sku: string;
     variant: string;
   }>;
-}): string {
-  const pageWidth = 595;
-  const pageHeight = 842;
+};
 
-  const left = 48;
-  const right = 547;
-  const contentWidth = right - left;
+/* =========================================================
+   A4 PACKING SLIP PDF
+========================================================= */
 
-  const commands: string[] = [];
+export async function createPackingSlipPdf(
+  input: PackingSlipPdfInput
+): Promise<string> {
+  const pdf =
+    await PDFDocument.create();
 
-  /* -------------------------------------------------------
-     HEADER
-  ------------------------------------------------------- */
+  const regular =
+    await pdf.embedFont(
+      StandardFonts.Helvetica
+    );
 
-  commands.push(
-    textCommand(
-      left,
-      790,
-      "ALO KIOSK",
-      "F2",
-      22
-    )
-  );
+  const bold =
+    await pdf.embedFont(
+      StandardFonts.HelveticaBold
+    );
 
-  commands.push(
-    textCommand(
-      left,
-      771,
-      "ONLINE SHOP",
-      "F1",
-      9
-    )
-  );
-
-  commands.push(
-    textCommand(
-      398,
-      790,
-      "LIEFERSCHEIN",
-      "F2",
-      17
-    )
-  );
-
-  commands.push(
-    textCommand(
-      398,
-      768,
-      `Bestellung ${input.orderName}`,
-      "F1",
-      9
-    )
-  );
-
-  commands.push(
-    textCommand(
-      398,
-      753,
-      input.date,
-      "F1",
-      9
-    )
-  );
-
-  commands.push(
-    lineCommand(
-      left,
-      730,
-      right,
-      730,
-      1.2
-    )
-  );
-
-  /* -------------------------------------------------------
-     ADDRESS
-  ------------------------------------------------------- */
-
-  commands.push(
-    textCommand(
-      left,
-      700,
-      "LIEFERADRESSE",
-      "F2",
-      10
-    )
-  );
-
-  let y = 678;
-
-  for (const addressLine of input.addressLines) {
-    commands.push(
-      textCommand(
-        left,
-        y,
-        addressLine,
-        "F1",
-        10
+  const currentDir =
+    dirname(
+      fileURLToPath(
+        import.meta.url
       )
     );
 
-    y -= 16;
+  /*
+   * Funktioniert sowohl:
+   * - lokal aus src/modules/shipping
+   * - nach Build aus dist/modules/shipping
+   *
+   * Beide liegen drei Ebenen unter dem
+   * Projekt-Root.
+   */
+  const logoPath =
+    resolve(
+      currentDir,
+      "../../../assets/packing-slip/alo-kiosk-logo.png"
+    );
+
+  const logoBytes =
+    await readFile(
+      logoPath
+    );
+
+  const logo =
+    await pdf.embedPng(
+      logoBytes
+    );
+
+  const PAGE_WIDTH = 595.28;
+  const PAGE_HEIGHT = 841.89;
+
+  const LEFT = 48;
+  const RIGHT = 547;
+  const CONTENT_WIDTH =
+    RIGHT - LEFT;
+
+  const ITEM_NAME_X =
+    LEFT + 65;
+
+  const SKU_X = 455;
+
+  const ITEM_NAME_WIDTH =
+    SKU_X -
+    ITEM_NAME_X -
+    18;
+
+  const SKU_WIDTH =
+    RIGHT -
+    SKU_X -
+    5;
+
+  /*
+   * Der Rabattbereich bleibt auf der
+   * letzten Seite frei.
+   */
+  const LAST_PAGE_ITEMS_BOTTOM =
+    220;
+
+  const NORMAL_PAGE_ITEMS_BOTTOM =
+    78;
+
+  let pageNumber = 0;
+
+  function createPage(
+    continuation = false
+  ) {
+    const page =
+      pdf.addPage([
+        PAGE_WIDTH,
+        PAGE_HEIGHT,
+      ]);
+
+    pageNumber += 1;
+
+    /*
+     * Echtes ALO-Logo.
+     * PNG bleibt farbig und transparent.
+     */
+    const logoSize = 94;
+
+    page.drawImage(
+      logo,
+      {
+        x: LEFT - 5,
+        y:
+          PAGE_HEIGHT -
+          52 -
+          logoSize,
+        width: logoSize,
+        height: logoSize,
+      }
+    );
+
+    page.drawText(
+      "ONLINE SHOP",
+      {
+        x: LEFT + 98,
+        y: 770,
+        size: 8,
+        font: bold,
+        color: rgb(
+          0.28,
+          0.28,
+          0.28
+        ),
+      }
+    );
+
+    page.drawText(
+      continuation
+        ? "LIEFERSCHEIN · FORTSETZUNG"
+        : "LIEFERSCHEIN",
+      {
+        x:
+          continuation
+            ? 350
+            : 407,
+        y: 792,
+        size:
+          continuation
+            ? 11
+            : 17,
+        font: bold,
+        color: rgb(
+          0.08,
+          0.08,
+          0.08
+        ),
+      }
+    );
+
+    const orderText =
+      `Bestellung ${input.orderName}`;
+
+    page.drawText(
+      truncateToWidth(
+        orderText,
+        regular,
+        9,
+        145
+      ),
+      {
+        x: 402,
+        y: 770,
+        size: 9,
+        font: regular,
+      }
+    );
+
+    page.drawText(
+      input.date,
+      {
+        x: 402,
+        y: 754,
+        size: 9,
+        font: regular,
+      }
+    );
+
+    if (pageNumber > 1) {
+      const pageLabel =
+        `Seite ${pageNumber}`;
+
+      page.drawText(
+        pageLabel,
+        {
+          x:
+            RIGHT -
+            regular.widthOfTextAtSize(
+              pageLabel,
+              8
+            ),
+          y: 730,
+          size: 8,
+          font: regular,
+          color: rgb(
+            0.4,
+            0.4,
+            0.4
+          ),
+        }
+      );
+    }
+
+    drawDivider(
+      page,
+      718,
+      LEFT,
+      RIGHT,
+      1
+    );
+
+    return page;
+  }
+
+  function drawTableHeader(
+    page: PDFPage,
+    y: number
+  ): number {
+    page.drawRectangle({
+      x: LEFT,
+      y: y - 7,
+      width: CONTENT_WIDTH,
+      height: 24,
+      color: rgb(
+        0.95,
+        0.95,
+        0.95
+      ),
+    });
+
+    page.drawText(
+      "MENGE",
+      {
+        x: LEFT + 8,
+        y,
+        size: 8,
+        font: bold,
+      }
+    );
+
+    page.drawText(
+      "ARTIKEL",
+      {
+        x: ITEM_NAME_X,
+        y,
+        size: 8,
+        font: bold,
+      }
+    );
+
+    page.drawText(
+      "SKU",
+      {
+        x: SKU_X,
+        y,
+        size: 8,
+        font: bold,
+      }
+    );
+
+    return y - 29;
+  }
+
+  function getItemHeight(
+    item:
+      PackingSlipPdfInput["items"][number]
+  ): {
+    height: number;
+    nameLines: string[];
+    skuLines: string[];
+    showVariant: boolean;
+  } {
+    const nameLines =
+      wrapTextToWidth(
+        item.name || "Artikel",
+        regular,
+        9.5,
+        ITEM_NAME_WIDTH
+      );
+
+    const skuLines =
+      item.sku
+        ? wrapTextToWidth(
+            item.sku,
+            regular,
+            7.5,
+            SKU_WIDTH
+          )
+        : [];
+
+    const showVariant =
+      Boolean(
+        item.variant &&
+        item.variant !==
+          "Default Title"
+      );
+
+    const nameHeight =
+      Math.max(
+        1,
+        nameLines.length
+      ) * 13;
+
+    const skuHeight =
+      Math.max(
+        1,
+        skuLines.length
+      ) * 11;
+
+    const variantHeight =
+      showVariant
+        ? 13
+        : 0;
+
+    return {
+      height:
+        Math.max(
+          nameHeight +
+            variantHeight,
+          skuHeight,
+          18
+        ) + 15,
+
+      nameLines:
+        nameLines.length
+          ? nameLines
+          : ["Artikel"],
+
+      skuLines,
+
+      showVariant,
+    };
+  }
+
+  function drawItem(
+    page: PDFPage,
+    y: number,
+    item:
+      PackingSlipPdfInput["items"][number],
+    layout:
+      ReturnType<
+        typeof getItemHeight
+      >
+  ): number {
+    page.drawText(
+      String(
+        item.quantity ?? 0
+      ),
+      {
+        x: LEFT + 12,
+        y,
+        size: 10,
+        font: bold,
+      }
+    );
+
+    let nameY = y;
+
+    for (
+      const line
+      of layout.nameLines
+    ) {
+      page.drawText(
+        line,
+        {
+          x: ITEM_NAME_X,
+          y: nameY,
+          size: 9.5,
+          font: regular,
+        }
+      );
+
+      nameY -= 13;
+    }
+
+    if (
+      layout.showVariant
+    ) {
+      page.drawText(
+        truncateToWidth(
+          `Variante: ${item.variant}`,
+          regular,
+          7.5,
+          ITEM_NAME_WIDTH
+        ),
+        {
+          x: ITEM_NAME_X,
+          y: nameY,
+          size: 7.5,
+          font: regular,
+          color: rgb(
+            0.38,
+            0.38,
+            0.38
+          ),
+        }
+      );
+    }
+
+    let skuY = y;
+
+    for (
+      const line
+      of layout.skuLines
+    ) {
+      page.drawText(
+        line,
+        {
+          x: SKU_X,
+          y: skuY,
+          size: 7.5,
+          font: regular,
+        }
+      );
+
+      skuY -= 11;
+    }
+
+    const dividerY =
+      y -
+      layout.height +
+      8;
+
+    drawDivider(
+      page,
+      dividerY,
+      LEFT,
+      RIGHT,
+      0.35
+    );
+
+    return (
+      y -
+      layout.height
+    );
+  }
+
+  /*
+   * -------------------------------------------------------
+   * ERSTE SEITE
+   * -------------------------------------------------------
+   */
+
+  let page =
+    createPage(false);
+
+  drawSectionLabel(
+    page,
+    "Lieferadresse",
+    LEFT,
+    688,
+    bold
+  );
+
+  let y = 665;
+
+  for (
+    const addressLine
+    of input.addressLines
+  ) {
+    const lines =
+      wrapTextToWidth(
+        addressLine,
+        regular,
+        10,
+        270
+      );
+
+    for (
+      const line
+      of lines
+    ) {
+      page.drawText(
+        line,
+        {
+          x: LEFT,
+          y,
+          size: 10,
+          font: regular,
+        }
+      );
+
+      y -= 15;
+    }
   }
 
   if (input.email) {
-    y -= 5;
+    y -= 3;
 
-    commands.push(
-      textCommand(
-        left,
-        y,
+    page.drawText(
+      truncateToWidth(
         `E-Mail: ${input.email}`,
-        "F1",
-        9
-      )
+        regular,
+        8.5,
+        300
+      ),
+      {
+        x: LEFT,
+        y,
+        size: 8.5,
+        font: regular,
+        color: rgb(
+          0.35,
+          0.35,
+          0.35
+        ),
+      }
     );
 
     y -= 16;
   }
 
-  y -= 25;
+  y -= 20;
 
-  /* -------------------------------------------------------
-     ITEMS TITLE
-  ------------------------------------------------------- */
-
-  commands.push(
-    textCommand(
-      left,
-      y,
-      "BESTELLUNG",
-      "F2",
-      11
-    )
+  drawSectionLabel(
+    page,
+    "Bestellung",
+    LEFT,
+    y,
+    bold
   );
 
-  y -= 23;
+  y -= 24;
 
-  /* -------------------------------------------------------
-     TABLE HEADER
-  ------------------------------------------------------- */
-
-  commands.push(
-    filledRectCommand(
-      left,
-      y - 7,
-      contentWidth,
-      25,
-      0.94
-    )
-  );
-
-  commands.push(
-    textCommand(
-      left + 8,
-      y,
-      "MENGE",
-      "F2",
-      8
-    )
-  );
-
-  commands.push(
-    textCommand(
-      left + 68,
-      y,
-      "ARTIKEL",
-      "F2",
-      8
-    )
-  );
-
-  commands.push(
-    textCommand(
-      458,
-      y,
-      "SKU",
-      "F2",
-      8
-    )
-  );
-
-  y -= 28;
-
-  /* -------------------------------------------------------
-     ITEMS
-  ------------------------------------------------------- */
-
-  for (const item of input.items) {
-    if (y < 120) {
-      commands.push(
-        textCommand(
-          left,
-          y,
-          "Weitere Artikel siehe Bestelldaten.",
-          "F1",
-          9
-        )
-      );
-
-      y -= 20;
-      break;
-    }
-
-    const nameLines =
-      wrapText(item.name, 45);
-
-    commands.push(
-      textCommand(
-        left + 8,
-        y,
-        String(item.quantity),
-        "F2",
-        10
-      )
+  y =
+    drawTableHeader(
+      page,
+      y
     );
 
-    let itemY = y;
+  /*
+   * Wir bestimmen vor jedem Artikel,
+   * ob auf der aktuellen Seite genug
+   * Platz vorhanden ist.
+   *
+   * Die letzte Seite reserviert unten
+   * Platz für Versand + Rabatt.
+   */
+  for (
+    let index = 0;
+    index < input.items.length;
+    index += 1
+  ) {
+    const item =
+      input.items[index];
 
-    for (const nameLine of nameLines) {
-      commands.push(
-        textCommand(
-          left + 68,
-          itemY,
-          nameLine,
-          "F1",
-          10
-        )
+    const layout =
+      getItemHeight(
+        item
       );
 
-      itemY -= 14;
-    }
-
-    if (item.sku) {
-      const skuLines =
-        wrapText(item.sku, 16);
-
-      let skuY = y;
-
-      for (const skuLine of skuLines) {
-        commands.push(
-          textCommand(
-            458,
-            skuY,
-            skuLine,
-            "F1",
-            8
-          )
-        );
-
-        skuY -= 12;
-      }
-    }
-
-    let rowBottom =
-      Math.min(
-        itemY,
-        y - 14
-      );
-
+    /*
+     * Zunächst konservativ den
+     * Rabattbereich freihalten.
+     */
     if (
-      item.variant &&
-      item.variant !== "Default Title"
+      y -
+        layout.height <
+      LAST_PAGE_ITEMS_BOTTOM
     ) {
-      commands.push(
-        textCommand(
-          left + 68,
-          rowBottom,
-          `Variante: ${item.variant}`,
-          "F1",
-          8
-        )
+      /*
+       * Wenn noch weitere Artikel
+       * vorhanden sind, beginnen wir
+       * eine Fortsetzungsseite.
+       */
+      page =
+        createPage(true);
+
+      drawSectionLabel(
+        page,
+        "Bestellung",
+        LEFT,
+        688,
+        bold
       );
 
-      rowBottom -= 13;
+      y =
+        drawTableHeader(
+          page,
+          658
+        );
     }
 
-    y = rowBottom - 8;
+    /*
+     * Extrem hohe Einzelzeilen oder
+     * sehr volle Folgeseiten zusätzlich
+     * absichern.
+     */
+    if (
+      y -
+        layout.height <
+      NORMAL_PAGE_ITEMS_BOTTOM
+    ) {
+      page =
+        createPage(true);
 
-    commands.push(
-      lineCommand(
-        left,
-        y,
-        right,
-        y,
-        0.3
-      )
-    );
+      drawSectionLabel(
+        page,
+        "Bestellung",
+        LEFT,
+        688,
+        bold
+      );
 
-    y -= 17;
+      y =
+        drawTableHeader(
+          page,
+          658
+        );
+    }
+
+    y =
+      drawItem(
+        page,
+        y,
+        item,
+        layout
+      );
   }
 
-  /* -------------------------------------------------------
-     SHIPPING
-  ------------------------------------------------------- */
+  /*
+   * -------------------------------------------------------
+   * VERSAND + RABATT
+   * immer auf der letzten Seite
+   * -------------------------------------------------------
+   */
 
-  if (y > 125) {
-    y -= 7;
+  if (y < 215) {
+    page =
+      createPage(true);
 
-    commands.push(
-      textCommand(
-        left,
-        y,
-        "VERSAND",
-        "F2",
-        9
-      )
-    );
-
-    y -= 17;
-
-    commands.push(
-      textCommand(
-        left,
-        y,
-        "Versand mit der Schweizerischen Post",
-        "F1",
-        9
-      )
-    );
+    y = 665;
   }
 
-  /* -------------------------------------------------------
-     FOOTER
-  ------------------------------------------------------- */
+  y -= 8;
 
-  commands.push(
-    lineCommand(
-      left,
-      75,
-      right,
-      75,
-      0.7
-    )
+  drawSectionLabel(
+    page,
+    "Versand",
+    LEFT,
+    y,
+    bold
   );
 
-  commands.push(
-    textCommand(
-      left,
-      56,
-      "ALO KIOSK  |  Zwischen den Toren 14  |  5000 Aarau",
-      "F1",
-      8
-    )
+  y -= 18;
+
+  page.drawText(
+    "Versand mit der Schweizerischen Post",
+    {
+      x: LEFT,
+      y,
+      size: 9,
+      font: regular,
+    }
   );
 
-  commands.push(
-    textCommand(
-      left,
-      40,
-      "Vielen Dank fuer deine Bestellung.",
-      "F1",
-      8
-    )
+  /*
+   * Fester hochwertiger Rabattbereich.
+   */
+  drawDivider(
+    page,
+    184,
+    LEFT,
+    RIGHT,
+    0.8
   );
 
-  /* =======================================================
-     PDF STRUCTURE
-  ======================================================= */
+  const thankYou =
+    "DANKE FÜR DEINE BESTELLUNG";
 
-  const stream = commands.join("\n");
-
-  const objects: string[] = [];
-
-  objects.push(
-    "<< /Type /Catalog /Pages 2 0 R >>"
+  page.drawText(
+    thankYou,
+    {
+      x: centeredX(
+        thankYou,
+        bold,
+        10,
+        PAGE_WIDTH
+      ),
+      y: 160,
+      size: 10,
+      font: bold,
+    }
   );
 
-  objects.push(
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+  const offer =
+    "15% AUF DEINE NÄCHSTE BESTELLUNG";
+
+  page.drawText(
+    offer,
+    {
+      x: centeredX(
+        offer,
+        bold,
+        12,
+        PAGE_WIDTH
+      ),
+      y: 137,
+      size: 12,
+      font: bold,
+    }
   );
 
-  objects.push(
-    `<<
-      /Type /Page
-      /Parent 2 0 R
-      /MediaBox [0 0 ${pageWidth} ${pageHeight}]
-      /Resources <<
-        /Font <<
-          /F1 5 0 R
-          /F2 6 0 R
-        >>
-      >>
-      /Contents 4 0 R
-    >>`
+  const code =
+    cleanPdfText(
+      input.discountCode
+    );
+
+  page.drawRectangle({
+    x: 172,
+    y: 96,
+    width: 251,
+    height: 31,
+    borderWidth: 0.8,
+    borderColor: rgb(
+      0.18,
+      0.18,
+      0.18
+    ),
+  });
+
+  page.drawText(
+    code,
+    {
+      x: centeredX(
+        code,
+        bold,
+        17,
+        PAGE_WIDTH
+      ),
+      y: 105,
+      size: 17,
+      font: bold,
+    }
   );
 
-  objects.push(
-    `<< /Length ${pdfStringLength(stream)} >>
-stream
-${stream}
-endstream`
+  const discountInfo =
+    "Einmalig einlösbar im ALO Online Shop";
+
+  page.drawText(
+    discountInfo,
+    {
+      x: centeredX(
+        discountInfo,
+        regular,
+        8,
+        PAGE_WIDTH
+      ),
+      y: 79,
+      size: 8,
+      font: regular,
+      color: rgb(
+        0.35,
+        0.35,
+        0.35
+      ),
+    }
   );
 
-  objects.push(
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
-  );
+  /*
+   * -------------------------------------------------------
+   * FOOTER AUF ALLEN SEITEN
+   * -------------------------------------------------------
+   */
 
-  objects.push(
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"
-  );
-
-  let pdf = "%PDF-1.4\n";
-
-  const offsets: number[] = [0];
+  const pages =
+    pdf.getPages();
 
   for (
     let index = 0;
-    index < objects.length;
-    index++
+    index < pages.length;
+    index += 1
   ) {
-    offsets.push(
-      Buffer.byteLength(
-        pdf,
-        "latin1"
-      )
+    const footerPage =
+      pages[index];
+
+    drawDivider(
+      footerPage,
+      57,
+      LEFT,
+      RIGHT,
+      0.6
     );
 
-    pdf +=
-      `${index + 1} 0 obj\n` +
-      `${objects[index]}\n` +
-      "endobj\n";
-  }
+    const footer =
+      "ALO KIOSK  ·  Zwischen den Toren 14  ·  5000 Aarau  ·  alokiosk.ch";
 
-  const xrefOffset =
-    Buffer.byteLength(
-      pdf,
-      "latin1"
+    footerPage.drawText(
+      footer,
+      {
+        x: LEFT,
+        y: 38,
+        size: 7.5,
+        font: regular,
+        color: rgb(
+          0.38,
+          0.38,
+          0.38
+        ),
+      }
     );
 
-  pdf += "xref\n";
-  pdf +=
-    `0 ${objects.length + 1}\n`;
+    if (pages.length > 1) {
+      const pageText =
+        `${index + 1} / ${pages.length}`;
 
-  pdf +=
-    "0000000000 65535 f \n";
-
-  for (
-    let index = 1;
-    index <= objects.length;
-    index++
-  ) {
-    pdf +=
-      `${String(
-        offsets[index]
-      ).padStart(
-        10,
-        "0"
-      )} 00000 n \n`;
+      footerPage.drawText(
+        pageText,
+        {
+          x:
+            RIGHT -
+            regular.widthOfTextAtSize(
+              pageText,
+              7.5
+            ),
+          y: 38,
+          size: 7.5,
+          font: regular,
+          color: rgb(
+            0.38,
+            0.38,
+            0.38
+          ),
+        }
+      );
+    }
   }
 
-  pdf +=
-    "trailer\n" +
-    `<< /Size ${objects.length + 1} /Root 1 0 R >>\n` +
-    "startxref\n" +
-    `${xrefOffset}\n` +
-    "%%EOF\n";
+  const pdfBytes =
+    await pdf.save();
 
   return Buffer
-    .from(
-      pdf,
-      "latin1"
-    )
+    .from(pdfBytes)
     .toString("base64");
 }
+
 
 /* =========================================================
    CREATE PACKING SLIP
@@ -674,6 +1187,22 @@ export async function createPackingSlipForOrder(
       pdfBase64:
         reservation.record.pdf_base64,
     };
+  }
+
+  /*
+   * Genau einen echten Shopify-Rabattcode
+   * pro Bestellung erstellen oder wiederverwenden.
+   */
+  const discount =
+    await getOrCreatePackingSlipDiscount({
+      id: order.id,
+      name: order.name,
+    });
+
+  if (!discount?.code) {
+    throw new Error(
+      `Kein Lieferschein-Rabattcode für ${order.name} vorhanden.`
+    );
   }
 
   const address =
@@ -769,12 +1298,13 @@ export async function createPackingSlipForOrder(
       }));
 
   const pdfBase64 =
-    createPackingSlipPdf({
+    await createPackingSlipPdf({
       orderName: order.name,
       date: formatDate(
         order.createdAt
       ),
       email: order.email,
+      discountCode: discount.code,
       addressLines,
       items,
     });
@@ -790,5 +1320,6 @@ export async function createPackingSlipForOrder(
     reused: false,
     id: completed.id,
     pdfBase64,
+    discountCode: discount.code,
   };
 }
