@@ -231,6 +231,67 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // INVOICES / RECHNUNGSARCHIV
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS invoices (
+      id BIGSERIAL PRIMARY KEY,
+      invoice_number TEXT NOT NULL,
+      shopify_order_id TEXT NOT NULL,
+      shopify_order_name TEXT NOT NULL,
+      order_created_at TIMESTAMPTZ,
+      currency TEXT NOT NULL DEFAULT 'CHF',
+      subtotal_amount NUMERIC(14,2),
+      discount_amount NUMERIC(14,2),
+      shipping_amount NUMERIC(14,2),
+      tax_amount NUMERIC(14,2),
+      total_amount NUMERIC(14,2),
+      pdf_base64 TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      print_status TEXT NOT NULL DEFAULT 'NOT_PRINTED',
+      print_count INTEGER NOT NULL DEFAULT 0,
+      printer_name TEXT,
+      printed_at TIMESTAMPTZ,
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      invoices_invoice_number_unique
+    ON invoices (
+      invoice_number
+    );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      invoices_order_unique
+    ON invoices (
+      shopify_order_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      invoices_created_at_idx
+    ON invoices (
+      created_at
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      invoices_print_status_idx
+    ON invoices (
+      print_status
+    );
+  `);
+
+  // ==========================================================
   // PRINT JOBS
   // ==========================================================
 
@@ -245,6 +306,10 @@ export async function initializeDatabase() {
 
       packing_slip_id BIGINT
         REFERENCES packing_slips(id)
+        ON DELETE CASCADE,
+
+      invoice_id BIGINT
+        REFERENCES invoices(id)
         ON DELETE CASCADE,
 
       printer_name TEXT,
@@ -294,6 +359,13 @@ export async function initializeDatabase() {
     ON DELETE CASCADE;
   `);
 
+  await db.query(`
+    ALTER TABLE print_jobs
+    ADD COLUMN IF NOT EXISTS invoice_id BIGINT
+    REFERENCES invoices(id)
+    ON DELETE CASCADE;
+  `);
+
   // ==========================================================
   // PRINT JOB INDIZES
   // ==========================================================
@@ -319,6 +391,14 @@ export async function initializeDatabase() {
       print_jobs_packing_slip_idx
     ON print_jobs (
       packing_slip_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      print_jobs_invoice_idx
+    ON print_jobs (
+      invoice_id
     );
   `);
 

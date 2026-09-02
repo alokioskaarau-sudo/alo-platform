@@ -13,6 +13,7 @@ import {
 import {
   createPrintJob,
   createPackingSlipPrintJob,
+  createInvoicePrintJob,
 } from "../../database/shippingDashboard.js";
 
 import {
@@ -22,6 +23,10 @@ import {
 import {
   createPackingSlipForOrder,
 } from "./packingSlip.service.js";
+
+import {
+  createInvoiceForOrder,
+} from "../invoices/invoice.service.js";
 
 
 // ============================================================
@@ -378,6 +383,42 @@ export async function processPaidShopifyOrder(
 
 
   // ----------------------------------------------------------
+  // 5. RECHNUNG ERZEUGEN / ARCHIVIEREN
+  // ----------------------------------------------------------
+
+  const invoice =
+    await createInvoiceForOrder(
+      order
+    );
+
+  if (
+    !invoice?.id
+  ) {
+    throw new Error(
+      `Rechnung für ${order.name} wurde nicht erstellt.`
+    );
+  }
+
+  if (
+    !invoice?.pdfBase64
+  ) {
+    throw new Error(
+      `Rechnung für ${order.name} enthält kein PDF.`
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // 6. RECHNUNG PRINT JOB
+  // ----------------------------------------------------------
+
+  const invoicePrintJob =
+    await createInvoicePrintJob(
+      invoice.id
+    );
+
+
+  // ----------------------------------------------------------
   // LOG
   // ----------------------------------------------------------
 
@@ -402,6 +443,18 @@ export async function processPaidShopifyOrder(
 
       packingSlipPrintJobCreated:
         packingSlipPrintJob.created,
+
+      invoiceId:
+        invoice.id,
+
+      invoiceNumber:
+        invoice.invoiceNumber,
+
+      invoiceReused:
+        invoice.reused,
+
+      invoicePrintJobCreated:
+        invoicePrintJob.created,
     }
   );
 
@@ -452,6 +505,18 @@ export async function processPaidShopifyOrder(
         packingSlip.reused,
     },
 
+    invoice: {
+
+      id:
+        invoice.id,
+
+      invoiceNumber:
+        invoice.invoiceNumber,
+
+      reused:
+        invoice.reused,
+    },
+
 
     printJobs: {
 
@@ -482,6 +547,21 @@ export async function processPaidShopifyOrder(
         status:
           packingSlipPrintJob.job?.status ??
           null,
+      },
+
+      invoice: {
+
+        created:
+          invoicePrintJob.created,
+
+        id:
+          invoicePrintJob.job?.id ??
+          null,
+
+        status:
+          invoicePrintJob.job?.status ??
+          null,
+
       },
     },
   };

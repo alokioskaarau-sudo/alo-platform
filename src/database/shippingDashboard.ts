@@ -8,6 +8,7 @@ import { db } from "./db.js";
 export type DocumentType =
   | "SHIPPING_LABEL"
   | "PACKING_SLIP"
+  | "INVOICE"
   | "PICKUP_RECEIPT";
 
 
@@ -492,6 +493,241 @@ export async function createPackingSlipPrintJob(
 }
 
 
+
+// ==========================================================
+// INVOICE PRINT JOB
+// ==========================================================
+
+export async function createInvoicePrintJob(
+
+  invoiceId: string,
+
+  printerName?: string
+
+) {
+
+  const client =
+    await db.connect();
+
+  try {
+
+    await client.query(
+      "BEGIN"
+    );
+
+
+    /*
+     * Pro Rechnung nur ein automatischer Drucklauf.
+     *
+     * Der Advisory Lock verhindert, dass zwei parallele
+     * Webhook-Ausführungen gleichzeitig zwei Printjobs
+     * für dieselbe Rechnung erzeugen.
+     */
+    await client.query(
+      `
+        SELECT
+          pg_advisory_xact_lock(
+            hashtext($1::text)
+          )
+      `,
+      [
+        `invoice-print:${invoiceId}`,
+      ]
+    );
+
+
+    const invoiceResult =
+      await client.query(
+        `
+          SELECT
+            id,
+            status,
+            print_status,
+            pdf_base64
+          FROM invoices
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [
+          invoiceId,
+        ]
+      );
+
+    const invoice =
+      invoiceResult.rows[0];
+
+    if (!invoice) {
+
+      throw new Error(
+        "Rechnung wurde nicht gefunden."
+      );
+    }
+
+
+    if (
+      invoice.status !==
+      "COMPLETED"
+    ) {
+
+      throw new Error(
+        "Rechnung ist noch nicht abgeschlossen."
+      );
+    }
+
+
+    if (!invoice.pdf_base64) {
+
+      throw new Error(
+        "Rechnung enthält kein PDF."
+      );
+    }
+
+
+    /*
+     * PENDING:
+     * bereits in Queue
+     *
+     * PRINTING:
+     * wird gerade gedruckt
+     *
+     * PRINTED:
+     * bereits erfolgreich gedruckt
+     *
+     * In allen drei Fällen darf ein automatischer
+     * Webhook-Retry KEINEN neuen Printjob erzeugen.
+     */
+    const existing =
+      await client.query(
+        `
+          SELECT *
+          FROM print_jobs
+          WHERE invoice_id = $1
+            AND document_type = 'INVOICE'
+            AND status IN (
+              'PENDING',
+              'PRINTING',
+              'PRINTED'
+            )
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+        [
+          invoiceId,
+        ]
+      );
+
+
+    if (
+      existing.rows[0]
+    ) {
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return {
+        created: false,
+        job:
+          existing.rows[0],
+      };
+    }
+
+
+    const insert =
+      await client.query(
+        `
+          INSERT INTO print_jobs (
+
+            shipping_label_id,
+
+            packing_slip_id,
+
+            invoice_id,
+
+            printer_name,
+
+            document_type,
+
+            status
+
+          )
+
+          VALUES (
+
+            NULL,
+
+            NULL,
+
+            $1,
+
+            $2,
+
+            'INVOICE',
+
+            'PENDING'
+
+          )
+
+          RETURNING *
+        `,
+        [
+          invoiceId,
+          printerName ?? null,
+        ]
+      );
+
+
+    await client.query(
+      `
+        UPDATE invoices
+
+        SET
+
+          print_status = 'QUEUED',
+
+          printer_name = $2,
+
+          error_message = NULL,
+
+          updated_at = NOW()
+
+        WHERE id = $1
+      `,
+      [
+        invoiceId,
+        printerName ?? null,
+      ]
+    );
+
+
+    await client.query(
+      "COMMIT"
+    );
+
+
+    return {
+      created: true,
+      job:
+        insert.rows[0],
+    };
+
+  } catch (error) {
+
+    await client.query(
+      "ROLLBACK"
+    );
+
+    throw error;
+
+  } finally {
+
+    client.release();
+
+  }
+
+}
+
+
 // ==========================================================
 // NÄCHSTEN PRINT JOB HOLEN
 // ==========================================================
@@ -501,6 +737,7 @@ export async function claimNextPrintJob(
   documentType:
     | "SHIPPING_LABEL"
     | "PACKING_SLIP"
+    | "INVOICE"
 ) {
   const client = await db.connect();
 
@@ -513,6 +750,7 @@ export async function claimNextPrintJob(
           pj.id,
           pj.shipping_label_id,
           pj.packing_slip_id,
+          pj.invoice_id,
           pj.document_type,
           pj.printer_name,
           pj.status,
@@ -522,6 +760,8 @@ export async function claimNextPrintJob(
               THEN sl.shopify_order_name
             WHEN pj.document_type = 'PACKING_SLIP'
               THEN ps.shopify_order_name
+            WHEN pj.document_type = 'INVOICE'
+              THEN inv.shopify_order_name
             ELSE NULL
           END AS shopify_order_name,
 
@@ -530,6 +770,8 @@ export async function claimNextPrintJob(
               THEN sl.label_pdf_base64
             WHEN pj.document_type = 'PACKING_SLIP'
               THEN ps.pdf_base64
+            WHEN pj.document_type = 'INVOICE'
+              THEN inv.pdf_base64
             ELSE NULL
           END AS pdf_base64
 
@@ -540,6 +782,9 @@ export async function claimNextPrintJob(
 
         LEFT JOIN packing_slips ps
           ON ps.id = pj.packing_slip_id
+
+        LEFT JOIN invoices inv
+          ON inv.id = pj.invoice_id
 
         WHERE
           pj.status = 'PENDING'
@@ -639,6 +884,23 @@ export async function claimNextPrintJob(
         `,
         [
           job.packing_slip_id,
+          printerName,
+        ]
+      );
+    }
+
+    if (documentType === "INVOICE") {
+      await client.query(
+        `
+          UPDATE invoices
+          SET
+            print_status = 'PRINTING',
+            printer_name = $2,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          job.invoice_id,
           printerName,
         ]
       );
@@ -767,6 +1029,35 @@ export async function completePrintJob(
           job.packing_slip_id,
         ]
       );
+
+    } else if (
+      job.document_type ===
+      "INVOICE"
+    ) {
+
+      await client.query(
+        `
+          UPDATE invoices
+
+          SET
+
+            print_status = 'PRINTED',
+
+            print_count =
+              print_count + 1,
+
+            printed_at = NOW(),
+
+            error_message = NULL,
+
+            updated_at = NOW()
+
+          WHERE id = $1
+        `,
+        [
+          job.invoice_id,
+        ]
+      );
     }
 
     await client.query(
@@ -883,6 +1174,31 @@ export async function failPrintJob(
           `,
           [
             job.packing_slip_id,
+            errorMessage,
+          ]
+        );
+
+      } else if (
+        job.document_type ===
+        "INVOICE"
+      ) {
+
+        await client.query(
+          `
+            UPDATE invoices
+
+            SET
+
+              print_status = 'FAILED',
+
+              error_message = $2,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+          `,
+          [
+            job.invoice_id,
             errorMessage,
           ]
         );

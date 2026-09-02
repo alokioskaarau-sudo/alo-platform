@@ -264,7 +264,9 @@ shippingDashboardRouter.post(
         documentType !==
           "SHIPPING_LABEL" &&
         documentType !==
-          "PACKING_SLIP"
+          "PACKING_SLIP" &&
+        documentType !==
+          "INVOICE"
       ) {
         return res
           .status(400)

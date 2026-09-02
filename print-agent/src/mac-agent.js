@@ -582,6 +582,20 @@ async function processNextJob(
           pdfPath
         );
 
+    } else if (
+      documentType ===
+      "INVOICE"
+    ) {
+      log(
+        `Rechnung -> ${printer.name}`
+      );
+
+      printResult =
+        printA4Document(
+          printer.name,
+          pdfPath
+        );
+
     } else {
       throw new Error(
         `Nicht unterstützter Dokumenttyp: ${documentType}`
@@ -757,13 +771,21 @@ async function runMacAgent(
           deviceToken
         );
 
+      const printedInvoice =
+        await processNextJob(
+          a4Printer,
+          "INVOICE",
+          deviceToken
+        );
+
       /*
         Wenn etwas gedruckt wurde,
         sofort erneut Queue prüfen.
       */
       if (
         printedLabel ||
-        printedPackingSlip
+        printedPackingSlip ||
+        printedInvoice
       ) {
         continue;
       }
