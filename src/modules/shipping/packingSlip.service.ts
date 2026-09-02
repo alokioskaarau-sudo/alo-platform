@@ -1093,7 +1093,7 @@ export async function createPackingSlipPdf(
     );
 
     const footer =
-      "ALO KIOSK  ·  Zwischen den Toren 14  ·  5000 Aarau  ·  alokiosk.ch";
+      "ALO KIOSK  ·  Zielempgasse 17  ·  4600 Olten  ·  alokiosk.ch";
 
     footerPage.drawText(
       footer,

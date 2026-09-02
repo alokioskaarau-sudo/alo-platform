@@ -978,7 +978,7 @@ export async function createInvoicePdf(
   );
 
   page.drawText(
-    "ALO KIOSK · Zwischen den Toren 14 · 5000 Aarau · alokiosk.ch",
+    "ALO KIOSK · Zielempgasse 17 · 4600 Olten · alokiosk.ch",
     {
       x: MARGIN_X,
       y:

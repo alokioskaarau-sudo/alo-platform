@@ -52,10 +52,10 @@ export async function createSwissPostPreviewLabel(
 
     customer: {
       name1: "ALO Kiosk",
-      street: "Zwischen den Toren 14",
-      zip: "5000",
-      city: "Aarau",
-      domicilePostOffice: "5000 Aarau",
+      street: "Zielempgasse 17",
+      zip: "4600",
+      city: "Olten",
+      domicilePostOffice: "4600 Olten",
       country: "CH",
     },
 
