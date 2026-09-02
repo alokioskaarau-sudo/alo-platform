@@ -1225,3 +1225,465 @@ export async function failPrintJob(
 
   }
 }
+
+
+
+// ==========================================================
+// RECHNUNG PDF AUS ARCHIV
+// ==========================================================
+
+export async function getInvoicePdf(
+  id: string
+): Promise<{
+  id: string;
+  invoiceNumber: string;
+  orderName: string;
+  pdfBase64: string;
+} | null> {
+
+  const result =
+    await db.query<{
+      id: string;
+      invoice_number: string;
+      shopify_order_name: string;
+      pdf_base64: string | null;
+    }>(
+      `
+        SELECT
+          id,
+          invoice_number,
+          shopify_order_name,
+          pdf_base64
+        FROM invoices
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [id]
+    );
+
+  const row =
+    result.rows[0];
+
+  if (
+    !row ||
+    !row.pdf_base64
+  ) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    invoiceNumber:
+      row.invoice_number,
+    orderName:
+      row.shopify_order_name,
+    pdfBase64:
+      row.pdf_base64,
+  };
+}
+
+
+// ==========================================================
+// UNIFIED ORDER DASHBOARD
+//
+// Führt Versandlabel, Lieferschein und Rechnung anhand der
+// Shopify Order ID zu genau einer Bestellung zusammen.
+//
+// WICHTIG:
+// - rein lesend
+// - keine Dokumente werden neu erzeugt
+// - keine Printjobs
+// - keine Swiss-Post-Anfrage
+// ==========================================================
+
+export type OrderDashboardRecord = {
+  shopify_order_id: string;
+  shopify_order_name: string;
+
+  order_created_at: Date | null;
+  latest_created_at: Date;
+
+  label_id: string | null;
+  label_mode: string | null;
+  service: string | null;
+  weight_grams: number | null;
+  tracking_number: string | null;
+  swisspost_ident_code: string | null;
+  shipment_status: string | null;
+  label_status: string | null;
+  label_print_status: string | null;
+  label_print_count: number | null;
+  label_error_message: string | null;
+
+  packing_slip_id: string | null;
+  packing_slip_status: string | null;
+  packing_slip_print_status: string | null;
+  packing_slip_print_count: number | null;
+  packing_slip_error_message: string | null;
+
+  invoice_id: string | null;
+  invoice_number: string | null;
+  currency: string | null;
+  total_amount: string | null;
+  invoice_status: string | null;
+  invoice_print_status: string | null;
+  invoice_print_count: number | null;
+  invoice_error_message: string | null;
+
+  is_archived: boolean;
+  is_test: boolean;
+  archived_at: Date | null;
+
+  dashboard_status:
+    | "CURRENT"
+    | "COMPLETED"
+    | "ERROR"
+    | "ARCHIVED";
+};
+
+
+export async function getOrderDashboard(
+  limit = 250
+): Promise<OrderDashboardRecord[]> {
+
+  const result =
+    await db.query<OrderDashboardRecord>(
+      `
+        WITH order_ids AS (
+
+          SELECT
+            shopify_order_id
+          FROM shipping_labels
+
+          UNION
+
+          SELECT
+            shopify_order_id
+          FROM packing_slips
+
+          UNION
+
+          SELECT
+            shopify_order_id
+          FROM invoices
+
+        ),
+
+        labels AS (
+          SELECT DISTINCT ON (
+            shopify_order_id
+          )
+            id,
+            shopify_order_id,
+            shopify_order_name,
+            swisspost_ident_code,
+            label_mode,
+            service,
+            weight_grams,
+            tracking_number,
+            shipment_status,
+            status,
+            print_status,
+            print_count,
+            error_message,
+            created_at
+          FROM shipping_labels
+          ORDER BY
+            shopify_order_id,
+            created_at DESC,
+            id DESC
+        ),
+
+        slips AS (
+          SELECT DISTINCT ON (
+            shopify_order_id
+          )
+            id,
+            shopify_order_id,
+            shopify_order_name,
+            status,
+            print_status,
+            print_count,
+            error_message,
+            created_at
+          FROM packing_slips
+          ORDER BY
+            shopify_order_id,
+            created_at DESC,
+            id DESC
+        ),
+
+        invoice_rows AS (
+          SELECT DISTINCT ON (
+            shopify_order_id
+          )
+            id,
+            invoice_number,
+            shopify_order_id,
+            shopify_order_name,
+            order_created_at,
+            currency,
+            total_amount,
+            status,
+            print_status,
+            print_count,
+            error_message,
+            created_at
+          FROM invoices
+          ORDER BY
+            shopify_order_id,
+            created_at DESC,
+            id DESC
+        )
+
+        SELECT
+          ids.shopify_order_id,
+
+          COALESCE(
+            i.shopify_order_name,
+            s.shopify_order_name,
+            p.shopify_order_name
+          ) AS shopify_order_name,
+
+          i.order_created_at,
+
+          GREATEST(
+            COALESCE(
+              s.created_at,
+              '-infinity'::timestamptz
+            ),
+            COALESCE(
+              p.created_at,
+              '-infinity'::timestamptz
+            ),
+            COALESCE(
+              i.created_at,
+              '-infinity'::timestamptz
+            )
+          ) AS latest_created_at,
+
+          s.id AS label_id,
+          s.label_mode,
+          s.service,
+          s.weight_grams,
+          s.tracking_number,
+          s.swisspost_ident_code,
+          s.shipment_status,
+          s.status AS label_status,
+          s.print_status AS label_print_status,
+          s.print_count AS label_print_count,
+          s.error_message AS label_error_message,
+
+          p.id AS packing_slip_id,
+          p.status AS packing_slip_status,
+          p.print_status AS packing_slip_print_status,
+          p.print_count AS packing_slip_print_count,
+          p.error_message AS packing_slip_error_message,
+
+          i.id AS invoice_id,
+          i.invoice_number,
+          i.currency,
+          i.total_amount,
+          i.status AS invoice_status,
+          i.print_status AS invoice_print_status,
+          i.print_count AS invoice_print_count,
+          i.error_message AS invoice_error_message,
+
+          COALESCE(
+            f.is_archived,
+            FALSE
+          ) AS is_archived,
+
+          COALESCE(
+            f.is_test,
+            FALSE
+          ) AS is_test,
+
+          f.archived_at,
+
+          CASE
+
+            WHEN
+              COALESCE(
+                f.is_archived,
+                FALSE
+              ) = TRUE
+            THEN 'ARCHIVED'
+
+
+            WHEN
+              s.status = 'FAILED'
+              OR s.print_status = 'FAILED'
+              OR p.status = 'FAILED'
+              OR p.print_status = 'FAILED'
+              OR i.status = 'FAILED'
+              OR i.print_status = 'FAILED'
+            THEN 'ERROR'
+
+            /*
+             * Abholung:
+             * Der bestehende Pickup-Pfad erzeugt bewusst
+             * keinen normalen Lieferschein + Rechnung.
+             * Deshalb darf PICKUP nicht dauerhaft als
+             * unvollständig erscheinen.
+             */
+            WHEN
+              s.label_mode = 'PICKUP'
+              AND s.status = 'COMPLETED'
+              AND s.print_status = 'PRINTED'
+            THEN 'COMPLETED'
+
+            /*
+             * Normaler Versand nach aktueller Pipeline:
+             * Label + Lieferschein + Rechnung müssen
+             * vorhanden, abgeschlossen und gedruckt sein.
+             */
+            WHEN
+              s.label_mode <> 'PICKUP'
+              AND s.status = 'COMPLETED'
+              AND s.print_status = 'PRINTED'
+
+              AND p.id IS NOT NULL
+              AND p.status = 'COMPLETED'
+              AND p.print_status = 'PRINTED'
+
+              AND i.id IS NOT NULL
+              AND i.status = 'COMPLETED'
+              AND i.print_status = 'PRINTED'
+            THEN 'COMPLETED'
+
+            ELSE 'CURRENT'
+
+          END AS dashboard_status
+
+        FROM order_ids ids
+
+        LEFT JOIN labels s
+          ON s.shopify_order_id =
+             ids.shopify_order_id
+
+        LEFT JOIN slips p
+          ON p.shopify_order_id =
+             ids.shopify_order_id
+
+        LEFT JOIN invoice_rows i
+          ON i.shopify_order_id =
+             ids.shopify_order_id
+
+        LEFT JOIN order_dashboard_flags f
+          ON f.shopify_order_id =
+             ids.shopify_order_id
+
+        ORDER BY
+          latest_created_at DESC
+
+        LIMIT $1
+      `,
+      [
+        Math.max(
+          1,
+          Math.min(
+            Number(limit) || 250,
+            1000
+          )
+        ),
+      ]
+    );
+
+  return result.rows;
+}
+
+
+
+// ==========================================================
+// ORDER DASHBOARD ARCHIV
+// ==========================================================
+
+export async function setOrderArchiveStatus(
+  shopifyOrderId: string,
+  archived: boolean,
+  isTest = false
+): Promise<void> {
+
+  if (!shopifyOrderId?.trim()) {
+    throw new Error(
+      "Shopify Order ID fehlt."
+    );
+  }
+
+  await db.query(
+    `
+      INSERT INTO order_dashboard_flags (
+        shopify_order_id,
+        is_archived,
+        is_test,
+        archived_at,
+        updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        CASE
+          WHEN $2 = TRUE
+          THEN NOW()
+          ELSE NULL
+        END,
+        NOW()
+      )
+
+      ON CONFLICT (
+        shopify_order_id
+      )
+
+      DO UPDATE SET
+        is_archived =
+          EXCLUDED.is_archived,
+
+        is_test =
+          EXCLUDED.is_test,
+
+        archived_at =
+          CASE
+            WHEN EXCLUDED.is_archived = TRUE
+            THEN COALESCE(
+              order_dashboard_flags.archived_at,
+              NOW()
+            )
+            ELSE NULL
+          END,
+
+        updated_at =
+          NOW()
+    `,
+    [
+      shopifyOrderId.trim(),
+      archived,
+      isTest,
+    ]
+  );
+}
+
+
+export async function archiveOrderAsTest(
+  shopifyOrderId: string
+): Promise<void> {
+
+  await setOrderArchiveStatus(
+    shopifyOrderId,
+    true,
+    true
+  );
+}
+
+
+export async function restoreArchivedOrder(
+  shopifyOrderId: string
+): Promise<void> {
+
+  await setOrderArchiveStatus(
+    shopifyOrderId,
+    false,
+    false
+  );
+}

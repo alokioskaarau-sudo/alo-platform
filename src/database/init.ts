@@ -637,6 +637,40 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // ORDER DASHBOARD FLAGS / ARCHIV
+  //
+  // Dashboard-Metadaten werden bewusst getrennt von
+  // Rechnungen, Lieferscheinen und Versandlabels gespeichert.
+  // Dadurch bleiben ausgestellte Dokumente unverändert.
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_dashboard_flags (
+      shopify_order_id TEXT PRIMARY KEY,
+      is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+      is_test BOOLEAN NOT NULL DEFAULT FALSE,
+      archived_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_dashboard_flags_archived_idx
+    ON order_dashboard_flags (
+      is_archived
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_dashboard_flags_test_idx
+    ON order_dashboard_flags (
+      is_test
+    );
+  `);
+
+  // ==========================================================
   // SHOPIFY WEBHOOK EVENTS
   // ==========================================================
 
