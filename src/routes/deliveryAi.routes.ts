@@ -78,12 +78,36 @@ const deliverySchema = {
           },
           quantity: {
             type: 'number',
+            description:
+              'Die im Dokument sichtbare Mengenangabe. Nicht raten.',
+          },
+          cases: {
+            type: ['number', 'null'],
+            description:
+              'Anzahl Kartons/Trays/Displays, nur wenn eindeutig erkennbar.',
+          },
+          unitsPerCase: {
+            type: ['number', 'null'],
+            description:
+              'Verkaufseinheiten pro Karton/Tray/Display, nur wenn eindeutig erkennbar.',
+          },
+          totalUnits: {
+            type: ['number', 'null'],
+            description:
+              'Gesamtzahl einzelner Verkaufseinheiten. Darf aus cases * unitsPerCase berechnet werden, wenn beide Werte eindeutig sind.',
+          },
+          unitSize: {
+            type: ['string', 'null'],
+            description:
+              'Gebindegrösse einer Verkaufseinheit, z.B. 330ml, 500ml, 42g.',
           },
           unit: {
             type: ['string', 'null'],
           },
           purchasePrice: {
             type: ['number', 'null'],
+            description:
+              'Einkaufspreis pro einzelner Verkaufseinheit. Nur setzen, wenn aus dem Dokument eindeutig bestimmbar.',
           },
           totalPrice: {
             type: ['number', 'null'],
@@ -113,6 +137,10 @@ const deliverySchema = {
           'articleNumber',
           'barcode',
           'quantity',
+          'cases',
+          'unitsPerCase',
+          'totalUnits',
+          'unitSize',
           'unit',
           'purchasePrice',
           'totalPrice',
@@ -204,8 +232,18 @@ WICHTIGE REGELN:
 - Lieferscheinnummer möglichst exakt übernehmen.
 - Jede echte Produktposition einzeln erfassen.
 - Mengen exakt aus dem Dokument übernehmen.
-- Einkaufspreis und Gesamtpreis nur übernehmen, wenn klar erkennbar.
-- Barcode/EAN nur übernehmen, wenn tatsächlich vorhanden.
+- quantity ist die im Dokument sichtbare Mengenangabe; nichts hineininterpretieren.
+- Wenn eine Position eindeutig z.B. 4 Kartons mit je 24 Verkaufseinheiten enthält: cases=4, unitsPerCase=24 und totalUnits=96.
+- totalUnits darf nur mathematisch aus eindeutig erkennbaren cases und unitsPerCase berechnet werden oder wenn die Gesamtstückzahl selbst sichtbar ist.
+- Wenn nur 48 einzelne Verkaufseinheiten erkennbar sind, totalUnits=48.
+- Wenn die Verpackungsstruktur nicht sicher erkennbar ist, cases, unitsPerCase und totalUnits null setzen statt zu raten.
+- unitSize beschreibt EINE Verkaufseinheit, z.B. 330ml, 500ml oder 42g, nur wenn erkennbar.
+- purchasePrice bedeutet ausschließlich Einkaufspreis pro einzelner Verkaufseinheit.
+- Wenn im Dokument nur ein Kartonpreis steht und die Stückzahl pro Karton eindeutig ist, darf purchasePrice = Kartonpreis / unitsPerCase berechnet werden.
+- Wenn die Preisbasis nicht eindeutig ist, purchasePrice null setzen.
+- totalPrice ist ausschließlich die Positionssumme dieser Produktzeile, niemals Lieferschein-Gesamtsumme.
+- Einkaufspreis und Positionssumme nur übernehmen oder berechnen, wenn die Grundlage eindeutig ist.
+- Barcode/EAN nur übernehmen, wenn tatsächlich vorhanden. Keine EAN aus Produktwissen ergänzen.
 - MHD und Charge nur übernehmen, wenn sie tatsächlich im Dokument stehen.
 - Ein Datum des Lieferscheins ist NICHT automatisch ein MHD.
 - Unsichere Felder null setzen.
@@ -213,7 +251,10 @@ WICHTIGE REGELN:
 - Kopfzeilen, Zwischensummen, MwSt., Porto und Gesamtsummen nicht als Produkte interpretieren.
 - confidence zwischen 0 und 1 verwenden.
 - Unsicherheiten in warnings beschreiben.
-- Bei Mengen wie Karton, Tray, Pack oder Stück die sichtbare Einheit in unit angeben.
+- Bei Mengen wie Karton, Tray, Display, Pack oder Stück die sichtbare Einheit in unit angeben.
+- Für die spätere Lagerbuchung ist die Anzahl einzelner verkaufbarer Einheiten entscheidend; deshalb Verpackungshierarchien so exakt wie möglich strukturiert erfassen.
+- Rechenwerte nur erzeugen, wenn ihre Ausgangswerte eindeutig im Dokument stehen.
+- Keine Verkaufspreise erfinden oder aus Einkaufspreisen ableiten.
                   `.trim(),
                 },
                 {

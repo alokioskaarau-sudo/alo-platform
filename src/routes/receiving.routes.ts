@@ -12,6 +12,7 @@ type ReceivingLineInput = {
   quantity: number;
   cases?: number | null;
   unitsPerCase?: number | null;
+  totalUnits?: number | null;
   unitSize?: string | null;
   purchasePrice?: number | null;
   totalPrice?: number | null;
@@ -41,6 +42,111 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed)
     ? parsed
     : null;
+}
+
+function resolveReceivedQuantity(
+  input: ReceivingLineInput,
+  position: number
+): number {
+  const visibleQuantity =
+    numberOrNull(input.quantity);
+
+  const cases =
+    numberOrNull(input.cases);
+
+  const unitsPerCase =
+    numberOrNull(input.unitsPerCase);
+
+  const totalUnits =
+    numberOrNull(input.totalUnits);
+
+  const cleanPositiveInteger = (
+    value: number | null
+  ): number | null => {
+    if (
+      value === null ||
+      !Number.isFinite(value) ||
+      value <= 0 ||
+      !Number.isInteger(value)
+    ) {
+      return null;
+    }
+
+    return value;
+  };
+
+  const q =
+    cleanPositiveInteger(
+      visibleQuantity
+    );
+
+  const c =
+    cleanPositiveInteger(cases);
+
+  const u =
+    cleanPositiveInteger(
+      unitsPerCase
+    );
+
+  const total =
+    cleanPositiveInteger(
+      totalUnits
+    );
+
+  if (
+    totalUnits !== null &&
+    total === null
+  ) {
+    throw new Error(
+      `Position ${position}: Gesamtstückzahl ist ungültig.`
+    );
+  }
+
+  if (
+    cases !== null &&
+    c === null
+  ) {
+    throw new Error(
+      `Position ${position}: Kartonanzahl ist ungültig.`
+    );
+  }
+
+  if (
+    unitsPerCase !== null &&
+    u === null
+  ) {
+    throw new Error(
+      `Position ${position}: Stück pro Karton ist ungültig.`
+    );
+  }
+
+  if (c !== null && u !== null) {
+    const calculated =
+      c * u;
+
+    if (
+      total !== null &&
+      total !== calculated
+    ) {
+      throw new Error(
+        `Position ${position}: Mengen widersprechen sich (${c} × ${u} = ${calculated}, aber Gesamtstückzahl ${total}).`
+      );
+    }
+
+    return total ?? calculated;
+  }
+
+  if (total !== null) {
+    return total;
+  }
+
+  if (q !== null) {
+    return q;
+  }
+
+  throw new Error(
+    `Position ${position}: Keine gültige Stückzahl vorhanden.`
+  );
 }
 
 function calculateUnitCost(
@@ -308,8 +414,9 @@ router.post(
           cleanBarcode(input.barcode);
 
         const quantity =
-          Math.trunc(
-            Number(input.quantity)
+          resolveReceivedQuantity(
+            input,
+            index + 1
           );
 
         if (!productName) {
