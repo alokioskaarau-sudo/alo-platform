@@ -737,6 +737,99 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // ALO PRODUCT MASTER
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id BIGSERIAL PRIMARY KEY,
+      barcode TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      brand TEXT,
+      product_name TEXT,
+      flavor TEXT,
+      unit_size TEXT,
+      category TEXT,
+      subcategory TEXT,
+      country TEXT,
+      short_description TEXT,
+      description_html TEXT,
+      ingredients TEXT,
+      allergens TEXT,
+      nutrition TEXT,
+      nutrition_per_100 JSONB NOT NULL DEFAULT '{}'::jsonb,
+      dietary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      search_keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+      seo_title TEXT,
+      seo_description TEXT,
+      vendor TEXT,
+      product_type TEXT,
+      confidence DOUBLE PRECISION,
+      field_confidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+      warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+      review_status TEXT NOT NULL DEFAULT 'DRAFT',
+      reviewed_by TEXT,
+      reviewed_at TIMESTAMPTZ,
+      shopify_status TEXT NOT NULL DEFAULT 'NOT_SYNCED',
+      shopify_product_id TEXT,
+      shopify_variant_id TEXT,
+      shopify_inventory_item_id TEXT,
+      source_type TEXT,
+      source_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      ai_draft JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      products_title_idx
+    ON products (
+      title
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      products_brand_idx
+    ON products (
+      brand
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      products_shopify_status_idx
+    ON products (
+      shopify_status
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS product_versions (
+      id BIGSERIAL PRIMARY KEY,
+      product_id BIGINT NOT NULL
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+      snapshot JSONB NOT NULL,
+      changed_by TEXT,
+      change_source TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      product_versions_product_idx
+    ON product_versions (
+      product_id,
+      created_at DESC
+    );
+  `);
+
+  // ==========================================================
   // FERTIG
   // ==========================================================
 

@@ -65,6 +65,10 @@ import {
   printerPairingRouter,
   initPrinterPairingTables,
 } from "./routes/printerPairing.routes.js";
+import deliveryAiRouter from './routes/deliveryAi.routes.js';
+import productAiRouter from './routes/productAi.routes.js';
+import productsRouter from "./routes/products.routes.js";
+import productOpsRouter from "./routes/productOps.routes.js";
 
 // ============================================================
 // EXPRESS
@@ -72,6 +76,9 @@ import {
 
 const app =
   express();
+
+app.use('/api/ai', deliveryAiRouter);
+app.use('/api/ai', productAiRouter);
 
 
 // ============================================================
@@ -115,6 +122,9 @@ app.use(
       "10mb",
   })
 );
+
+app.use(productsRouter);
+app.use(productOpsRouter);
 
 
 // ============================================================
