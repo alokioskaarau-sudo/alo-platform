@@ -69,6 +69,7 @@ import deliveryAiRouter from './routes/deliveryAi.routes.js';
 import productAiRouter from './routes/productAi.routes.js';
 import productsRouter from "./routes/products.routes.js";
 import productOpsRouter from "./routes/productOps.routes.js";
+import receivingRouter from "./routes/receiving.routes.js";
 
 // ============================================================
 // EXPRESS
@@ -125,6 +126,7 @@ app.use(
 
 app.use(productsRouter);
 app.use(productOpsRouter);
+app.use("/api/receiving", receivingRouter);
 
 
 // ============================================================
