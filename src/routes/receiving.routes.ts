@@ -8,11 +8,21 @@ const router = Router();
 
 type StoreId = "aarau" | "olten";
 
+class ReceivingValidationError extends Error {
+  statusCode = 422;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ReceivingValidationError";
+  }
+}
+
 type ReceivingLineInput = {
   product: string;
   barcode?: string | null;
   articleNumber?: string | null;
   quantity: number;
+  unit?: string | null;
   cases?: number | null;
   unitsPerCase?: number | null;
   totalUnits?: number | null;
@@ -100,7 +110,7 @@ function resolveReceivedQuantity(
     totalUnits !== null &&
     total === null
   ) {
-    throw new Error(
+    throw new ReceivingValidationError(
       `Position ${position}: Gesamtstückzahl ist ungültig.`
     );
   }
@@ -109,7 +119,7 @@ function resolveReceivedQuantity(
     cases !== null &&
     c === null
   ) {
-    throw new Error(
+    throw new ReceivingValidationError(
       `Position ${position}: Kartonanzahl ist ungültig.`
     );
   }
@@ -118,7 +128,7 @@ function resolveReceivedQuantity(
     unitsPerCase !== null &&
     u === null
   ) {
-    throw new Error(
+    throw new ReceivingValidationError(
       `Position ${position}: Stück pro Karton ist ungültig.`
     );
   }
@@ -131,7 +141,7 @@ function resolveReceivedQuantity(
       total !== null &&
       total !== calculated
     ) {
-      throw new Error(
+      throw new ReceivingValidationError(
         `Position ${position}: Mengen widersprechen sich (${c} × ${u} = ${calculated}, aber Gesamtstückzahl ${total}).`
       );
     }
@@ -147,9 +157,71 @@ function resolveReceivedQuantity(
     return q;
   }
 
-  throw new Error(
+  throw new ReceivingValidationError(
     `Position ${position}: Keine gültige Stückzahl vorhanden.`
   );
+}
+
+
+function looksLikePackagingUnit(
+  value: unknown
+): boolean {
+  const unit = cleanText(value)
+    .toLowerCase()
+    .replace(/[._-]+/g, " ");
+
+  if (!unit) {
+    return false;
+  }
+
+  return [
+    "karton",
+    "carton",
+    "case",
+    "tray",
+    "display",
+    "box",
+    "kiste",
+    "packungseinheit",
+  ].some((token) =>
+    unit.includes(token)
+  );
+}
+
+function validateReceivingPackaging(
+  input: ReceivingLineInput,
+  position: number
+): void {
+  const cases =
+    numberOrNull(input.cases);
+
+  const unitsPerCase =
+    numberOrNull(input.unitsPerCase);
+
+  const totalUnits =
+    numberOrNull(input.totalUnits);
+
+  if (
+    looksLikePackagingUnit(input.unit) &&
+    unitsPerCase === null &&
+    totalUnits === null
+  ) {
+    throw new ReceivingValidationError(
+      `Position ${position}: Verpackungseinheit "${cleanText(
+        input.unit
+      )}" erkannt, aber Stück pro Verpackung bzw. Gesamtstückzahl fehlt.`
+    );
+  }
+
+  if (
+    cases !== null &&
+    unitsPerCase === null &&
+    totalUnits === null
+  ) {
+    throw new ReceivingValidationError(
+      `Position ${position}: ${cases} Verpackungseinheiten erkannt, aber Stück pro Verpackung bzw. Gesamtstückzahl fehlt.`
+    );
+  }
 }
 
 function calculateUnitCost(
@@ -389,6 +461,11 @@ router.post(
         let quantity: number;
 
         try {
+          validateReceivingPackaging(
+            input,
+            index + 1
+          );
+
           quantity =
             resolveReceivedQuantity(
               input,
@@ -492,6 +569,44 @@ router.post(
               productMaster?.product_data
                 ?.netWeight,
           });
+
+        if (
+          identity.status ===
+            "EXACT_TITLE_SIZE" &&
+          !barcode &&
+          !productMaster
+        ) {
+          previewLines.push({
+            position: index + 1,
+            classification: "REVIEW",
+            reason: "BARCODE_REQUIRED_FOR_RECEIVING",
+            product: productName,
+            barcode: null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId: null,
+            shopifyProductId:
+              identity.match.productId,
+            shopifyVariantId:
+              identity.match.variantId,
+            shopifyTitle:
+              identity.match.productTitle,
+            matchedBy: "TITLE_SIZE",
+          });
+          continue;
+        }
 
         if (
           identity.status ===
@@ -818,6 +933,11 @@ router.post(
         const barcode =
           cleanBarcode(input.barcode);
 
+        validateReceivingPackaging(
+          input,
+          index + 1
+        );
+
         const quantity =
           resolveReceivedQuantity(
             input,
@@ -825,7 +945,7 @@ router.post(
           );
 
         if (!productName) {
-          throw new Error(
+          throw new ReceivingValidationError(
             `Position ${index + 1}: Produktname fehlt.`
           );
         }
@@ -834,7 +954,7 @@ router.post(
           !Number.isFinite(quantity) ||
           quantity < 1
         ) {
-          throw new Error(
+          throw new ReceivingValidationError(
             `${productName}: ungültige Menge.`
           );
         }
@@ -858,6 +978,8 @@ router.post(
 
         let product: any = null;
         let createdProduct = false;
+        let linkedExistingShopify = false;
+        let resolvedShopifyMatch: any = null;
 
         if (barcode) {
           const existing =
@@ -867,7 +989,11 @@ router.post(
                   id,
                   barcode,
                   title,
-                  product_data
+                  product_data,
+                  shopify_status,
+                  shopify_product_id,
+                  shopify_variant_id,
+                  shopify_inventory_item_id
                 FROM products
                 WHERE barcode = $1
                 LIMIT 1
@@ -877,6 +1003,38 @@ router.post(
 
           product =
             existing.rows[0] ?? null;
+        }
+
+        if (!product && barcode) {
+          const identity =
+            await resolveProductIdentity({
+              barcode,
+              title: productName,
+              unitSize:
+                input.unitSize ?? null,
+              netWeight: null,
+            });
+
+          if (
+            identity.status ===
+              "MULTIPLE_BARCODE_MATCHES" ||
+            identity.status ===
+              "MULTIPLE_IDENTITY_MATCHES"
+          ) {
+            throw new ReceivingValidationError(
+              `${productName}: mehrere mögliche Shopify-Produkte gefunden. Bitte Position prüfen.`
+            );
+          }
+
+          if (
+            identity.status ===
+              "EXACT_BARCODE" ||
+            identity.status ===
+              "EXACT_TITLE_SIZE"
+          ) {
+            resolvedShopifyMatch =
+              identity.match;
+          }
         }
 
         if (!product && barcode) {
@@ -914,6 +1072,10 @@ router.post(
                   review_status,
                   reviewed_by,
                   reviewed_at,
+                  shopify_status,
+                  shopify_product_id,
+                  shopify_variant_id,
+                  shopify_inventory_item_id,
                   updated_at
                 )
                 VALUES (
@@ -922,8 +1084,12 @@ router.post(
                   $3::jsonb,
                   'alo_staff_receiving',
                   'NEEDS_REVIEW',
-                  'ALO STAFF',
-                  NOW(),
+                  NULL,
+                  NULL,
+                  $4,
+                  $5,
+                  $6,
+                  $7,
                   NOW()
                 )
                 RETURNING
@@ -936,15 +1102,29 @@ router.post(
                 barcode,
                 productName.toUpperCase(),
                 JSON.stringify(draft),
+                resolvedShopifyMatch
+                  ? "LINKED_EXISTING"
+                  : "NOT_SYNCED",
+                resolvedShopifyMatch
+                  ?.productId ?? null,
+                resolvedShopifyMatch
+                  ?.variantId ?? null,
+                resolvedShopifyMatch
+                  ?.inventoryItemId ?? null,
               ]
             );
 
           product = created.rows[0];
           createdProduct = true;
+          linkedExistingShopify =
+            Boolean(
+              resolvedShopifyMatch
+                ?.productId
+            );
         }
 
         if (!product) {
-          throw new Error(
+          throw new ReceivingValidationError(
             `${productName}: kein Barcode vorhanden. Bitte Barcode scannen, bevor die Lieferung abgeschlossen wird.`
           );
         }
@@ -1091,31 +1271,6 @@ router.post(
           ]
         );
 
-        const currentStock =
-          await client.query(
-            `
-              SELECT exact_quantity
-              FROM product_stock_snapshots
-              WHERE
-                product_id = $1
-                AND store_id = $2
-              LIMIT 1
-            `,
-            [
-              product.id,
-              store,
-            ]
-          );
-
-        const previousQuantity =
-          Number(
-            currentStock.rows[0]
-              ?.exact_quantity ?? 0
-          );
-
-        const nextQuantity =
-          previousQuantity + quantity;
-
         await client.query(
           `
             INSERT INTO product_stock_snapshots (
@@ -1128,22 +1283,68 @@ router.post(
               updated_at
             )
             VALUES (
-              $1, $2, $3, $4, $5, $6, NOW()
+              $1,
+              $2,
+              0,
+              'out',
+              $3,
+              $4,
+              NOW()
             )
             ON CONFLICT (
               product_id,
               store_id
             )
-            DO UPDATE SET
-              exact_quantity =
-                EXCLUDED.exact_quantity,
-              stock_level =
-                EXCLUDED.stock_level,
-              note =
-                EXCLUDED.note,
-              updated_by =
-                EXCLUDED.updated_by,
+            DO NOTHING
+          `,
+          [
+            product.id,
+            store,
+            `LS ${cleanText(
+              deliveryNote
+            )}`,
+            cleanText(receivedBy) ||
+              "ALO STAFF",
+          ]
+        );
+
+        const lockedStock =
+          await client.query(
+            `
+              SELECT exact_quantity
+              FROM product_stock_snapshots
+              WHERE
+                product_id = $1
+                AND store_id = $2
+              FOR UPDATE
+            `,
+            [
+              product.id,
+              store,
+            ]
+          );
+
+        const previousQuantity =
+          Number(
+            lockedStock.rows[0]
+              ?.exact_quantity ?? 0
+          );
+
+        const nextQuantity =
+          previousQuantity + quantity;
+
+        await client.query(
+          `
+            UPDATE product_stock_snapshots
+            SET
+              exact_quantity = $3,
+              stock_level = $4,
+              note = $5,
+              updated_by = $6,
               updated_at = NOW()
+            WHERE
+              product_id = $1
+              AND store_id = $2
           `,
           [
             product.id,
@@ -1204,6 +1405,13 @@ router.post(
           unitPurchaseCost:
             unitCost,
           createdProduct,
+          linkedExistingShopify,
+          shopifyProductId:
+            product.shopify_product_id ??
+            null,
+          shopifyVariantId:
+            product.shopify_variant_id ??
+            null,
           needsReview:
             createdProduct,
         });
@@ -1263,12 +1471,25 @@ router.post(
       const duplicate =
         error?.code === "23505";
 
+      const validation =
+        error instanceof ReceivingValidationError;
+
+      const status =
+        duplicate
+          ? 409
+          : validation
+            ? error.statusCode
+            : 500;
+
       res
-        .status(
-          duplicate ? 409 : 500
-        )
+        .status(status)
         .json({
           ok: false,
+          code: duplicate
+            ? "DUPLICATE_DELIVERY"
+            : validation
+              ? "RECEIVING_VALIDATION_ERROR"
+              : "RECEIVING_INTERNAL_ERROR",
           error: duplicate
             ? "Dieser Lieferschein wurde für diesen Standort bereits verbucht."
             : error instanceof Error
