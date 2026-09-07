@@ -1,5 +1,8 @@
 import { Router } from "express";
 import { db } from "../database/db.js";
+import {
+  resolveProductIdentity,
+} from "../services/productIdentity.service.js";
 
 const router = Router();
 
@@ -301,6 +304,408 @@ async function ensureReceivingSchema() {
     )
   `);
 }
+
+
+router.post(
+  "/preview",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const {
+        store,
+        supplier,
+        deliveryNote,
+        lines,
+      } = req.body ?? {};
+
+      if (
+        store !== "aarau" &&
+        store !== "olten"
+      ) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültiger Standort.",
+        });
+        return;
+      }
+
+      if (!cleanText(supplier)) {
+        res.status(400).json({
+          ok: false,
+          error: "Lieferant fehlt.",
+        });
+        return;
+      }
+
+      if (!cleanText(deliveryNote)) {
+        res.status(400).json({
+          ok: false,
+          error: "Lieferscheinnummer fehlt.",
+        });
+        return;
+      }
+
+      if (
+        !Array.isArray(lines) ||
+        lines.length === 0
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Keine Lieferpositionen vorhanden.",
+        });
+        return;
+      }
+
+      const previewLines: any[] = [];
+
+      for (
+        let index = 0;
+        index < lines.length;
+        index += 1
+      ) {
+        const input =
+          lines[index] as ReceivingLineInput;
+
+        const productName =
+          cleanText(input.product);
+
+        const barcode =
+          cleanBarcode(input.barcode);
+
+        if (!productName) {
+          previewLines.push({
+            position: index + 1,
+            classification: "REVIEW",
+            reason: "MISSING_PRODUCT_NAME",
+            product: "",
+            barcode: barcode || null,
+            quantity: null,
+          });
+          continue;
+        }
+
+        let quantity: number;
+
+        try {
+          quantity =
+            resolveReceivedQuantity(
+              input,
+              index + 1
+            );
+        } catch (error) {
+          previewLines.push({
+            position: index + 1,
+            classification: "REVIEW",
+            reason: "INVALID_QUANTITY",
+            product: productName,
+            barcode: barcode || null,
+            quantity: null,
+            error:
+              error instanceof Error
+                ? error.message
+                : "Menge konnte nicht geprüft werden.",
+          });
+          continue;
+        }
+
+        let productMaster: any = null;
+
+        if (barcode) {
+          const existing =
+            await db.query(
+              `
+                SELECT
+                  id,
+                  barcode,
+                  title,
+                  product_data,
+                  review_status,
+                  shopify_status,
+                  shopify_product_id,
+                  shopify_variant_id,
+                  shopify_inventory_item_id
+                FROM products
+                WHERE barcode = $1
+                LIMIT 1
+              `,
+              [barcode]
+            );
+
+          productMaster =
+            existing.rows[0] ?? null;
+        }
+
+        if (
+          productMaster?.shopify_product_id
+        ) {
+          previewLines.push({
+            position: index + 1,
+            classification: "EXISTING",
+            reason: "PRODUCT_MASTER_LINK",
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId:
+              String(productMaster.id),
+            productMasterTitle:
+              productMaster.title,
+            shopifyProductId:
+              productMaster.shopify_product_id,
+            shopifyVariantId:
+              productMaster.shopify_variant_id,
+            shopifyTitle:
+              productMaster.title,
+            matchedBy:
+              "PRODUCT_MASTER_LINK",
+          });
+          continue;
+        }
+
+        const identity =
+          await resolveProductIdentity({
+            barcode,
+            title:
+              productMaster?.product_data
+                ?.title ??
+              productMaster?.title ??
+              productName,
+            unitSize:
+              productMaster?.product_data
+                ?.unitSize ??
+              input.unitSize,
+            netWeight:
+              productMaster?.product_data
+                ?.netWeight,
+          });
+
+        if (
+          identity.status ===
+            "EXACT_BARCODE" ||
+          identity.status ===
+            "EXACT_TITLE_SIZE"
+        ) {
+          previewLines.push({
+            position: index + 1,
+            classification: "EXISTING",
+            reason:
+              identity.status,
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId:
+              productMaster
+                ? String(productMaster.id)
+                : null,
+            productMasterTitle:
+              productMaster?.title ?? null,
+            shopifyProductId:
+              identity.match.productId,
+            shopifyVariantId:
+              identity.match.variantId,
+            shopifyTitle:
+              identity.match.productTitle,
+            matchedBy:
+              identity.status ===
+                "EXACT_BARCODE"
+                ? "BARCODE"
+                : "TITLE_SIZE",
+          });
+          continue;
+        }
+
+        if (
+          identity.status ===
+            "MULTIPLE_BARCODE_MATCHES" ||
+          identity.status ===
+            "MULTIPLE_IDENTITY_MATCHES"
+        ) {
+          previewLines.push({
+            position: index + 1,
+            classification: "REVIEW",
+            reason:
+              identity.status,
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId:
+              productMaster
+                ? String(productMaster.id)
+                : null,
+            matches:
+              identity.matches,
+          });
+          continue;
+        }
+
+        if (
+          identity.status ===
+          "INSUFFICIENT_IDENTITY"
+        ) {
+          previewLines.push({
+            position: index + 1,
+            classification: "REVIEW",
+            reason:
+              barcode
+                ? "NO_SAFE_SHOPIFY_MATCH"
+                : "MISSING_BARCODE_OR_SIZE",
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId:
+              productMaster
+                ? String(productMaster.id)
+                : null,
+          });
+          continue;
+        }
+
+        previewLines.push({
+          position: index + 1,
+          classification: "NEW",
+          reason: "NO_SHOPIFY_MATCH",
+          product: productName,
+          barcode: barcode || null,
+          quantity,
+          cases: input.cases ?? null,
+          unitsPerCase:
+            input.unitsPerCase ?? null,
+          unitSize:
+            input.unitSize ?? null,
+          purchasePrice:
+            input.purchasePrice ?? null,
+          totalPrice:
+            input.totalPrice ?? null,
+          expiry:
+            input.expiry ?? null,
+          batch:
+            input.batch ?? null,
+          productMasterId:
+            productMaster
+              ? String(productMaster.id)
+              : null,
+        });
+      }
+
+      const existing =
+        previewLines.filter(
+          (line) =>
+            line.classification ===
+            "EXISTING"
+        ).length;
+
+      const newProducts =
+        previewLines.filter(
+          (line) =>
+            line.classification === "NEW"
+        ).length;
+
+      const review =
+        previewLines.filter(
+          (line) =>
+            line.classification ===
+            "REVIEW"
+        ).length;
+
+      res.json({
+        ok: true,
+        preview: true,
+        store,
+        supplier:
+          cleanText(supplier),
+        deliveryNote:
+          cleanText(deliveryNote),
+        summary: {
+          positions:
+            previewLines.length,
+          units:
+            previewLines.reduce(
+              (sum, line) =>
+                sum +
+                (Number.isFinite(
+                  line.quantity
+                )
+                  ? line.quantity
+                  : 0),
+              0
+            ),
+          existing,
+          newProducts,
+          review,
+          readyToComplete:
+            review === 0,
+        },
+        lines: previewLines,
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING PREVIEW]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme-Vorschau fehlgeschlagen.",
+      });
+    }
+  }
+);
 
 router.post(
   "/complete",

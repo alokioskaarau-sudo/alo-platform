@@ -7,6 +7,9 @@ import { env } from "../config/env.js";
 import {
   getShopifyAccessToken,
 } from "../integrations/shopify/auth.js";
+import {
+  resolveProductIdentity,
+} from "../services/productIdentity.service.js";
 
 const router = Router();
 
@@ -401,340 +404,6 @@ async function shopifyGraphql(
 }
 
 
-
-function normalizeProductIdentityText(
-  value: unknown
-): string {
-  return String(value ?? "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/(\d+(?:[.,]\d+)?)\s*(kg|g|mg|l|ml|cl)\b/g, "$1$2")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractProductSize(
-  ...values: unknown[]
-): string | null {
-  for (const value of values) {
-    const normalized =
-      normalizeProductIdentityText(value);
-
-    const matches =
-      normalized.match(
-        /\b\d+(?:[.,]\d+)?(?:kg|g|mg|l|ml|cl)\b/g
-      );
-
-    if (matches?.length) {
-      return matches[
-        matches.length - 1
-      ].replace(",", ".");
-    }
-  }
-
-  return null;
-}
-
-function stripProductSize(
-  value: unknown
-): string {
-  return normalizeProductIdentityText(
-    value
-  )
-    .replace(
-      /\b\d+(?:[.,]\d+)?(?:kg|g|mg|l|ml|cl)\b/g,
-      " "
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-type ShopifyIdentityMatch = {
-  productId: string;
-  productTitle: string;
-  productStatus: string | null;
-  variantId: string | null;
-  inventoryItemId: string | null;
-  barcode: string | null;
-  normalizedTitle: string;
-  size: string | null;
-};
-
-async function findShopifyProductsByIdentity(
-  row: any,
-  draft: any
-): Promise<ShopifyIdentityMatch[]> {
-  const sourceTitle =
-    String(
-      draft?.title ??
-      row?.title ??
-      ""
-    ).trim();
-
-  if (!sourceTitle) {
-    return [];
-  }
-
-  const sourceSize =
-    extractProductSize(
-      draft?.unitSize,
-      draft?.netWeight,
-      sourceTitle
-    );
-
-  const sourceBase =
-    stripProductSize(sourceTitle);
-
-  if (!sourceBase) {
-    return [];
-  }
-
-  const searchWords =
-    sourceBase
-      .split(" ")
-      .filter(
-        (word) =>
-          word.length >= 2
-      )
-      .slice(0, 6);
-
-  if (!searchWords.length) {
-    return [];
-  }
-
-  const searchQuery =
-    searchWords
-      .map(
-        (word) =>
-          `title:${word}*`
-      )
-      .join(" AND ");
-
-  const result =
-    await shopifyGraphql(
-      `
-        query AloFindProductsByIdentity(
-          $query: String!
-        ) {
-          products(
-            first: 20,
-            query: $query
-          ) {
-            nodes {
-              id
-              title
-              status
-
-              variants(first: 10) {
-                nodes {
-                  id
-                  barcode
-
-                  inventoryItem {
-                    id
-                  }
-                }
-              }
-            }
-          }
-        }
-      `,
-      {
-        query: searchQuery,
-      }
-    );
-
-  const products =
-    Array.isArray(
-      result?.products?.nodes
-    )
-      ? result.products.nodes
-      : [];
-
-  const matches:
-    ShopifyIdentityMatch[] = [];
-
-  for (const product of products) {
-    const shopifyTitle =
-      String(
-        product?.title ?? ""
-      );
-
-    const shopifyBase =
-      stripProductSize(
-        shopifyTitle
-      );
-
-    const shopifySize =
-      extractProductSize(
-        shopifyTitle
-      );
-
-    if (
-      !shopifyBase ||
-      shopifyBase !== sourceBase
-    ) {
-      continue;
-    }
-
-    if (
-      !sourceSize ||
-      !shopifySize
-    ) {
-      continue;
-    }
-
-    if (
-      sourceSize !== shopifySize
-    ) {
-      continue;
-    }
-
-    const variants =
-      Array.isArray(
-        product?.variants?.nodes
-      )
-        ? product.variants.nodes
-        : [];
-
-    if (variants.length !== 1) {
-      continue;
-    }
-
-    const variant =
-      variants[0];
-
-    matches.push({
-      productId:
-        String(product.id),
-      productTitle:
-        shopifyTitle,
-      productStatus:
-        product.status
-          ? String(
-              product.status
-            )
-          : null,
-      variantId:
-        variant?.id
-          ? String(
-              variant.id
-            )
-          : null,
-      inventoryItemId:
-        variant?.inventoryItem?.id
-          ? String(
-              variant.inventoryItem.id
-            )
-          : null,
-      barcode:
-        normalizeBarcode(
-          variant?.barcode
-        ) || null,
-      normalizedTitle:
-        shopifyBase,
-      size:
-        shopifySize,
-    });
-  }
-
-  return matches;
-}
-
-type ShopifyBarcodeMatch = {
-  id: string;
-  barcode: string | null;
-  inventoryItemId: string | null;
-  productId: string;
-  productTitle: string;
-  productStatus: string | null;
-};
-
-async function findShopifyVariantsByBarcode(
-  barcodeInput: unknown
-): Promise<ShopifyBarcodeMatch[]> {
-  const barcode =
-    normalizeBarcode(barcodeInput);
-
-  if (!barcode) {
-    return [];
-  }
-
-  const result =
-    await shopifyGraphql(
-      `
-        query AloFindVariantByBarcode(
-          $query: String!
-        ) {
-          productVariants(
-            first: 10,
-            query: $query
-          ) {
-            nodes {
-              id
-              barcode
-
-              inventoryItem {
-                id
-              }
-
-              product {
-                id
-                title
-                status
-              }
-            }
-          }
-        }
-      `,
-      {
-        query: `barcode:${barcode}`,
-      }
-    );
-
-  const nodes =
-    Array.isArray(
-      result?.productVariants?.nodes
-    )
-      ? result.productVariants.nodes
-      : [];
-
-  return nodes
-    .filter(
-      (node: any) =>
-        normalizeBarcode(node?.barcode) ===
-        barcode
-    )
-    .map(
-      (node: any) => ({
-        id: String(node.id),
-        barcode:
-          node.barcode
-            ? String(node.barcode)
-            : null,
-        inventoryItemId:
-          node.inventoryItem?.id
-            ? String(
-                node.inventoryItem.id
-              )
-            : null,
-        productId:
-          String(node.product.id),
-        productTitle:
-          String(
-            node.product.title || ""
-          ),
-        productStatus:
-          node.product.status
-            ? String(
-                node.product.status
-              )
-            : null,
-      })
-    );
-}
 
 async function stageProductImage(
   productId: string
@@ -1855,113 +1524,68 @@ router.post(
         return;
       }
 
-      const barcode =
-        normalizeBarcode(
-          row.barcode
-        );
-
-      if (barcode) {
-        const barcodeMatches =
-          await findShopifyVariantsByBarcode(
-            barcode
-          );
-
-        if (barcodeMatches.length > 1) {
-          res.status(409).json({
-            ok: false,
-            conflict: true,
-            reason:
-              "MULTIPLE_SHOPIFY_BARCODE_MATCHES",
-            barcode,
-            matches:
-              barcodeMatches.map(
-                (match) => ({
-                  shopifyProductId:
-                    match.productId,
-                  shopifyVariantId:
-                    match.id,
-                  shopifyInventoryItemId:
-                    match.inventoryItemId,
-                  title:
-                    match.productTitle,
-                  status:
-                    match.productStatus,
-                })
-              ),
-            error:
-              `EAN ${barcode} existiert mehrfach in Shopify. Manuelle Prüfung erforderlich.`,
-          });
-          return;
-        }
-
-        if (barcodeMatches.length === 1) {
-          const match =
-            barcodeMatches[0];
-
-          await db.query(
-            `
-              UPDATE products
-              SET
-                shopify_status = $2,
-                shopify_product_id = $3,
-                shopify_variant_id = $4,
-                shopify_inventory_item_id = $5,
-                updated_at = NOW()
-              WHERE id = $1
-            `,
-            [
-              req.params.id,
-              match.productStatus ||
-                "LINKED",
-              match.productId,
-              match.id,
-              match.inventoryItemId,
-            ]
-          );
-
-          res.json({
-            ok: true,
-            alreadyExists: true,
-            linkedExisting: true,
-            barcode,
-            shopifyProductId:
-              match.productId,
-            shopifyVariantId:
-              match.id,
-            shopifyInventoryItemId:
-              match.inventoryItemId,
-            status:
-              match.productStatus ||
-              "LINKED",
-            shopifyTitle:
-              match.productTitle,
-          });
-          return;
-        }
-      }
-
       const draft =
         row.product_data ?? {};
 
-      const identityMatches =
-        await findShopifyProductsByIdentity(
-          row,
-          draft
-        );
+      const identity =
+        await resolveProductIdentity({
+          barcode: row.barcode,
+          title:
+            draft?.title ??
+            row.title,
+          unitSize:
+            draft?.unitSize,
+          netWeight:
+            draft?.netWeight,
+        });
 
-      if (identityMatches.length > 1) {
+      if (
+        identity.status ===
+        "MULTIPLE_BARCODE_MATCHES"
+      ) {
+        res.status(409).json({
+          ok: false,
+          conflict: true,
+          reason:
+            "MULTIPLE_SHOPIFY_BARCODE_MATCHES",
+          barcode:
+            identity.barcode,
+          matches:
+            identity.matches.map(
+              (match) => ({
+                shopifyProductId:
+                  match.productId,
+                shopifyVariantId:
+                  match.variantId,
+                shopifyInventoryItemId:
+                  match.inventoryItemId,
+                title:
+                  match.productTitle,
+                status:
+                  match.productStatus,
+              })
+            ),
+          error:
+            `EAN ${identity.barcode} existiert mehrfach in Shopify. Manuelle Prüfung erforderlich.`,
+        });
+        return;
+      }
+
+      if (
+        identity.status ===
+        "MULTIPLE_IDENTITY_MATCHES"
+      ) {
         res.status(409).json({
           ok: false,
           conflict: true,
           reason:
             "MULTIPLE_SHOPIFY_IDENTITY_MATCHES",
           barcode:
-            barcode || null,
+            identity.barcode,
           sourceTitle:
-            draft?.title ||
-            row.title,
+            identity.sourceTitle,
           matches:
-            identityMatches.map(
+            identity.matches.map(
               (match) => ({
                 shopifyProductId:
                   match.productId,
@@ -1985,9 +1609,14 @@ router.post(
         return;
       }
 
-      if (identityMatches.length === 1) {
+      if (
+        identity.status ===
+          "EXACT_BARCODE" ||
+        identity.status ===
+          "EXACT_TITLE_SIZE"
+      ) {
         const match =
-          identityMatches[0];
+          identity.match;
 
         await db.query(
           `
@@ -2015,9 +1644,12 @@ router.post(
           alreadyExists: true,
           linkedExisting: true,
           matchedBy:
-            "TITLE_SIZE",
+            identity.status ===
+            "EXACT_BARCODE"
+              ? "BARCODE"
+              : "TITLE_SIZE",
           sourceTitle:
-            draft?.title ||
+            draft?.title ??
             row.title,
           shopifyTitle:
             match.productTitle,
