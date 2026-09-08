@@ -26,6 +26,8 @@ type ShopifyCatalogProduct = {
   productType: string | null;
   handle: string | null;
   imageUrl: string | null;
+  seoTitle: string | null;
+  seoDescription: string | null;
   metafields: Record<string, string>;
   variants: ShopifyVariant[];
   variantsTruncated: boolean;
@@ -110,6 +112,10 @@ async function loadShopifyCatalog(): Promise<
               vendor
               productType
               handle
+              seo {
+                title
+                description
+              }
               featuredMedia {
                 preview {
                   image {
@@ -202,6 +208,16 @@ async function loadShopifyCatalog(): Promise<
             ? String(
                 node.featuredMedia.preview.image.url
               )
+            : null,
+
+        seoTitle:
+          node.seo?.title
+            ? String(node.seo.title).trim() || null
+            : null,
+
+        seoDescription:
+          node.seo?.description
+            ? String(node.seo.description).trim() || null
             : null,
 
         metafields:
@@ -795,6 +811,25 @@ function mergeShopifyProductData(
 
   if (productType) {
     next.productType = productType;
+  }
+
+  const seoTitle =
+    nonEmptyText(
+      shopifyProduct.seoTitle
+    );
+
+  if (seoTitle) {
+    next.seoTitle = seoTitle;
+  }
+
+  const seoDescription =
+    nonEmptyText(
+      shopifyProduct.seoDescription
+    );
+
+  if (seoDescription) {
+    next.seoDescription =
+      seoDescription;
   }
 
   const country =
