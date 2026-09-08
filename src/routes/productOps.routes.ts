@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import { removeBackground } from "@imgly/background-removal-node";
 import axios from "axios";
 
 import { db } from "../database/db.js";
@@ -1174,6 +1175,69 @@ router.get(
     }
   }
 );
+
+router.post(
+  "/api/product-image/remove-background",
+  imageUpload.single("image"),
+  async (req, res) => {
+    try {
+      const file = req.file;
+
+      if (!file) {
+        res.status(400).json({
+          ok: false,
+          error: "Bild fehlt.",
+        });
+        return;
+      }
+
+      const result =
+        await removeBackground(
+          file.buffer,
+          {
+            debug: false,
+            model: "medium",
+            output: {
+              format: "image/png",
+              quality: 1,
+            },
+          }
+        );
+
+      const arrayBuffer =
+        await result.arrayBuffer();
+
+      const output =
+        Buffer.from(arrayBuffer);
+
+      res.setHeader(
+        "Content-Type",
+        "image/png"
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "no-store"
+      );
+
+      res.send(output);
+    } catch (error) {
+      console.error(
+        "Background removal error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Hintergrund konnte nicht entfernt werden.",
+      });
+    }
+  }
+);
+
 
 router.post(
   "/api/product-master/:id/image",

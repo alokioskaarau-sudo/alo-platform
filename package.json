@@ -9,6 +9,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@imgly/background-removal-node": "^1.4.5",
     "@shopify/shopify-api": "^14.0.0",
     "axios": "^1.0.0",
     "dotenv": "^17.0.0",
@@ -25,5 +26,9 @@
     "@types/pg": "^8.23.1",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.17.3": true,
+    "sharp@0.32.6": true
   }
 }
