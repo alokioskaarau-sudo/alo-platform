@@ -1905,6 +1905,51 @@ router.get(
   }
 );
 
+
+function parseShippingWeightGrams(
+  value: unknown
+): number | null {
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number"
+  ) {
+    return null;
+  }
+
+  const raw = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(",", ".");
+
+  if (!raw) {
+    return null;
+  }
+
+  const match = raw.match(
+    /^(\d+(?:\.\d+)?)\s*(g|kg)$/
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const amount = Number(match[1]);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    return null;
+  }
+
+  const grams =
+    match[2] === "kg"
+      ? amount * 1000
+      : amount;
+
+  return Math.round(grams * 1000) / 1000;
+}
+
 router.post(
   "/api/product-master/:id/sync-to-shopify",
   async (req, res) => {
@@ -2098,6 +2143,11 @@ router.post(
           }
         | undefined;
 
+      const shippingWeightGrams =
+        parseShippingWeightGrams(
+          draft?.netWeight
+        );
+
       if (
         row.shopify_variant_id
       ) {
@@ -2113,6 +2163,21 @@ router.post(
 
         variantInput.barcode =
           barcode || null;
+
+        if (
+          shippingWeightGrams !== null
+        ) {
+          variantInput.inventoryItem = {
+            measurement: {
+              weight: {
+                value:
+                  shippingWeightGrams,
+                unit: "GRAMS",
+              },
+            },
+            requiresShipping: true,
+          };
+        }
 
         const possiblePrice =
           Number(
@@ -2207,6 +2272,74 @@ router.post(
         variant?.inventoryItem?.id ??
         row.shopify_inventory_item_id ??
         null;
+
+      if (
+        shippingWeightGrams !== null &&
+        finalInventoryId
+      ) {
+        const inventoryUpdate =
+          await shopifyGraphql(
+            `
+              mutation AloSyncInventoryWeight(
+                $id: ID!,
+                $input: InventoryItemInput!
+              ) {
+                inventoryItemUpdate(
+                  id: $id,
+                  input: $input
+                ) {
+                  inventoryItem {
+                    id
+
+                    measurement {
+                      weight {
+                        value
+                        unit
+                      }
+                    }
+                  }
+
+                  userErrors {
+                    field
+                    message
+                  }
+                }
+              }
+            `,
+            {
+              id: finalInventoryId,
+              input: {
+                measurement: {
+                  weight: {
+                    value:
+                      shippingWeightGrams,
+                    unit: "GRAMS",
+                  },
+                },
+                requiresShipping: true,
+              },
+            }
+          );
+
+        const inventoryPayload =
+          inventoryUpdate
+            ?.inventoryItemUpdate;
+
+        if (
+          inventoryPayload
+            ?.userErrors
+            ?.length
+        ) {
+          throw new Error(
+            inventoryPayload.userErrors
+              .map(
+                (error: any) =>
+                  error.message
+              )
+              .join(" · ")
+          );
+        }
+      }
 
       const nextShopifyData = {
         ...(

@@ -551,6 +551,11 @@ MARKE / BRAND:
 
 PRODUKTDATEN:
 - Lies Produktname, Geschmacksrichtung, Inhalt, EAN, Herkunft, Zutaten, Allergene und Nährwerte möglichst direkt von der Verpackung.
+- unitSize ist der kunden sichtbare Inhalt, z. B. "355 ml" oder "68 g".
+- netWeight ist ausschließlich ein zuverlässig angegebenes Produktgewicht in g oder kg.
+- Bei einem klar deklarierten Gewicht wie "68 g" darf netWeight "68 g" sein.
+- Volumen niemals in Gewicht umrechnen. Aus "355 ml" darf nicht "355 g" entstehen.
+- Wenn kein echtes Gewicht zuverlässig sichtbar oder angegeben ist, setze netWeight auf null.
 - Zutaten, Allergene, Spuren und Nährwerte niemals erraten.
 - Nicht sichtbare oder nicht sicher lesbare Lebensmittelangaben bleiben null bzw. leere Arrays.
 - title soll ein sauberer verkaufsfähiger Produkttitel sein und wird später automatisch grossgeschrieben.
