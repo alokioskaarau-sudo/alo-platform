@@ -739,99 +739,236 @@ export async function buildShopifyCatalogPreview() {
 }
 
 
-function buildShopifyProductData(
+function nonEmptyText(
+  value: unknown
+): string | null {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return null;
+  }
+
+  const text = String(value).trim();
+
+  return text || null;
+}
+
+function mergeShopifyProductData(
+  existingData: any,
   shopifyProduct: ShopifyCatalogProduct,
   variant: ShopifyVariant
 ) {
-  const barcode =
-    normalizeProductBarcode(
-      variant.barcode
-    ) || null;
+  const existing =
+    existingData &&
+    typeof existingData === "object"
+      ? existingData
+      : {};
+
+  const food =
+    buildShopifyFoodData(shopifyProduct);
+
+  const next: any = {
+    ...existing,
+  };
 
   const normalizedTitle =
     String(shopifyProduct.title ?? "")
       .trim()
       .toUpperCase();
 
-  const shopifyFoodData =
-    buildShopifyFoodData(
-      shopifyProduct
+  if (normalizedTitle) {
+    next.title = normalizedTitle;
+  }
+
+  const vendor =
+    nonEmptyText(shopifyProduct.vendor);
+
+  if (vendor) {
+    next.vendor = vendor;
+  }
+
+  const productType =
+    nonEmptyText(
+      shopifyProduct.productType
     );
 
-  return {
-    title: normalizedTitle,
-    barcode,
+  if (productType) {
+    next.productType = productType;
+  }
 
-    vendor:
-      shopifyProduct.vendor,
+  const country =
+    nonEmptyText(food.country);
 
-    brand:
-      shopifyProduct.vendor,
+  if (country) {
+    next.country = country;
+  }
 
-    productType:
-      shopifyProduct.productType,
-
-    unitSize:
-      shopifyFoodData.unitSize ??
+  const unitSize =
+    nonEmptyText(food.unitSize) ??
+    nonEmptyText(
       extractProductSize(
         shopifyProduct.title
-      ),
+      )
+    );
 
-    country:
-      shopifyFoodData.country,
+  if (unitSize) {
+    next.unitSize = unitSize;
+  }
 
-    flavor:
-      shopifyFoodData.flavor,
+  const flavor =
+    nonEmptyText(food.flavor);
 
-    ingredients:
-      shopifyFoodData.ingredients,
+  if (flavor) {
+    next.flavor = flavor;
+  }
 
-    allergens:
-      shopifyFoodData.allergens,
+  const ingredients =
+    nonEmptyText(food.ingredients);
 
-    traces:
-      shopifyFoodData.traces,
+  if (ingredients) {
+    next.ingredients = ingredients;
+  }
 
-    nutritionPer100:
-      shopifyFoodData.nutritionPer100,
+  const servingRecommendation =
+    nonEmptyText(
+      food.servingRecommendation
+    );
 
-    sellingPrice:
-      variant.price,
+  if (servingRecommendation) {
+    next.servingRecommendation =
+      servingRecommendation;
+  }
 
-    commerce: {
-      sellingPrice:
-        variant.price,
-    },
+  const shopifyAllergens =
+    nonEmptyText(
+      shopifyProduct.metafields?.[
+        "allergene"
+      ]
+    );
 
-    shopify: {
-      productId:
-        shopifyProduct.id,
+  if (shopifyAllergens) {
+    next.allergens =
+      food.allergens;
 
-      variantId:
-        variant.id,
+    next.traces =
+      food.traces;
+  }
 
-      inventoryItemId:
-        variant.inventoryItemId,
+  const existingNutrition =
+    existing.nutritionPer100 &&
+    typeof existing.nutritionPer100 ===
+      "object"
+      ? existing.nutritionPer100
+      : {};
 
-      handle:
-        shopifyProduct.handle,
-
-      status:
-        shopifyProduct.status,
-
-      imageUrl:
-        shopifyProduct.imageUrl,
-
-      originalTitle:
-        shopifyProduct.title,
-    },
-
-    warnings: barcode
-      ? []
-      : ["BARCODE_MISSING"],
+  const nextNutrition: any = {
+    ...existingNutrition,
   };
+
+  let nutritionChanged = false;
+
+  const nutritionKeys = [
+    "energyKj",
+    "energyKcal",
+    "fat",
+    "saturatedFat",
+    "carbohydrates",
+    "sugars",
+    "protein",
+    "fiber",
+    "salt",
+  ] as const;
+
+  for (const key of nutritionKeys) {
+    const value =
+      nonEmptyText(
+        food.nutritionPer100?.[key]
+      );
+
+    if (value) {
+      nextNutrition[key] = value;
+      nutritionChanged = true;
+    }
+  }
+
+  if (nutritionChanged) {
+    if (
+      !nonEmptyText(
+        nextNutrition.basis
+      )
+    ) {
+      nextNutrition.basis =
+        "100 g/ml";
+    }
+
+    next.nutritionPer100 =
+      nextNutrition;
+  }
+
+  const sellingPrice =
+    nonEmptyText(variant.price);
+
+  if (sellingPrice) {
+    next.sellingPrice =
+      sellingPrice;
+
+    next.commerce = {
+      ...(
+        existing.commerce &&
+        typeof existing.commerce ===
+          "object"
+          ? existing.commerce
+          : {}
+      ),
+      sellingPrice,
+    };
+  }
+
+  next.shopify = {
+    ...(
+      existing.shopify &&
+      typeof existing.shopify ===
+        "object"
+        ? existing.shopify
+        : {}
+    ),
+
+    productId:
+      shopifyProduct.id,
+
+    variantId:
+      variant.id,
+
+    inventoryItemId:
+      variant.inventoryItemId,
+
+    handle:
+      shopifyProduct.handle,
+
+    status:
+      shopifyProduct.status,
+
+    imageUrl:
+      shopifyProduct.imageUrl,
+
+    originalTitle:
+      shopifyProduct.title,
+  };
+
+  return next;
 }
 
+function buildShopifyProductData(
+  shopifyProduct: ShopifyCatalogProduct,
+  variant: ShopifyVariant
+) {
+  return mergeShopifyProductData(
+    {},
+    shopifyProduct,
+    variant
+  );
+}
 
 async function importShopifyCatalogProductFromSnapshot(
   shopifyProduct: ShopifyCatalogProduct,
@@ -1085,7 +1222,7 @@ async function importShopifyCatalogProductFromSnapshot(
     title: normalizedTitle,
     barcode,
     vendor: shopifyProduct.vendor,
-    brand: shopifyProduct.vendor,
+    brand: null,
     productType:
       shopifyProduct.productType,
     ...shopifyFoodData,
@@ -1523,7 +1660,8 @@ export async function importShopifyProductToProductMaster(
       shopifyProduct.variants[0];
 
     const shopifyData =
-      buildShopifyProductData(
+      mergeShopifyProductData(
+        existing.product_data,
         shopifyProduct,
         variant
       );
@@ -1536,8 +1674,7 @@ export async function importShopifyProductToProductMaster(
           shopify_variant_id = $3,
           shopify_inventory_item_id = $4,
           product_data =
-            COALESCE(product_data, '{}'::jsonb)
-            || $5::jsonb,
+            $5::jsonb,
           updated_at = NOW()
         WHERE id = $1
         RETURNING
@@ -1796,7 +1933,7 @@ export async function importShopifyProductToProductMaster(
     title: normalizedTitle,
     barcode,
     vendor: shopifyProduct.vendor,
-    brand: shopifyProduct.vendor,
+    brand: null,
     productType:
       shopifyProduct.productType,
     ...shopifyFoodData,
