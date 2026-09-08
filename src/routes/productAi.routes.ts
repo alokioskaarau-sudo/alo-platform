@@ -661,4 +661,349 @@ Das Ergebnis muss exakt dem vorgegebenen JSON-Schema entsprechen.`,
   }
 );
 
+
+router.post(
+  "/api/ai/product-verify-online",
+  async (req, res) => {
+    try {
+      const currentDraft =
+        req.body?.draft &&
+        typeof req.body.draft === "object"
+          ? req.body.draft
+          : {};
+
+      const barcode =
+        typeof req.body?.barcode === "string"
+          ? req.body.barcode.trim()
+          : typeof currentDraft?.barcode === "string"
+            ? currentDraft.barcode.trim()
+            : "";
+
+      const brand =
+        typeof currentDraft?.brand === "string"
+          ? currentDraft.brand.trim()
+          : "";
+
+      const title =
+        typeof currentDraft?.title === "string"
+          ? currentDraft.title.trim()
+          : "";
+
+      const unitSize =
+        typeof currentDraft?.unitSize === "string"
+          ? currentDraft.unitSize.trim()
+          : "";
+
+      if (!barcode && !title && !brand) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Für den Online-Abgleich fehlen Barcode und Produktidentität.",
+        });
+        return;
+      }
+
+      const onlineVerificationSchema = {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "identityStatus",
+          "verifiedDraft",
+          "sources",
+          "conflicts",
+          "summary",
+        ],
+        properties: {
+          identityStatus: {
+            type: "string",
+            enum: [
+              "confirmed",
+              "probable",
+              "not_confirmed",
+            ],
+          },
+
+          verifiedDraft: productSchema,
+
+          sources: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "title",
+                "url",
+                "sourceType",
+              ],
+              properties: {
+                title: {
+                  type: "string",
+                },
+                url: {
+                  type: "string",
+                },
+                sourceType: {
+                  type: "string",
+                  enum: [
+                    "manufacturer",
+                    "official",
+                    "retailer",
+                    "database",
+                    "other",
+                  ],
+                },
+              },
+            },
+          },
+
+          conflicts: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "field",
+                "currentValue",
+                "onlineValue",
+                "reason",
+              ],
+              properties: {
+                field: {
+                  type: "string",
+                },
+                currentValue: {
+                  type: ["string", "null"],
+                },
+                onlineValue: {
+                  type: ["string", "null"],
+                },
+                reason: {
+                  type: "string",
+                },
+              },
+            },
+          },
+
+          summary: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "checkedFields",
+              "foundFields",
+              "conflictCount",
+            ],
+            properties: {
+              checkedFields: {
+                type: "number",
+              },
+              foundFields: {
+                type: "number",
+              },
+              conflictCount: {
+                type: "number",
+              },
+            },
+          },
+        },
+      } as const;
+
+      const response =
+        await openai.responses.create({
+          model: "gpt-5.6-terra",
+          store: false,
+
+          reasoning: {
+            effort: "low",
+          },
+
+          tools: [
+            {
+              type: "web_search",
+              search_context_size:
+                "medium",
+            },
+          ],
+
+          input: [
+            {
+              role: "developer",
+              content: [
+                {
+                  type: "input_text",
+                  text: `
+Du bist ALO VERIFY, das Online-Verifikationssystem
+für einen Schweizer Snack-, Getränke- und
+Süsswarenhandel.
+
+Du erhältst einen bereits per Verpackungsfoto
+erzeugten Product Draft.
+
+DEINE AUFGABE:
+
+1. Identifiziere zuerst exakt das Produkt.
+2. Recherchiere aktuelle und belastbare
+   Produktinformationen im Web.
+3. Verwende vorzugsweise:
+   - offizielle Herstellerseiten
+   - offizielle Markenwebseiten
+   - offizielle Produktdaten
+4. Seriöse Händler oder Produktdatenbanken nur
+   ergänzend verwenden.
+5. Barcode/EAN ist das stärkste Identitätsmerkmal.
+6. Zusätzlich Marke, Produktname, Geschmack und
+   Packungsgrösse abgleichen.
+7. Wenn Packungsgrösse, Variante oder Barcode
+   nicht zusammenpassen, darf die Quelle NICHT
+   blind für Food Data verwendet werden.
+
+WICHTIGE REGELN:
+
+- Keine erfundenen Fakten.
+- Zutaten nicht schätzen.
+- Allergene nicht schätzen.
+- Nährwerte nicht schätzen.
+- Gewicht nicht aus Volumen berechnen.
+- 355 ml darf niemals zu 355 g werden.
+- netWeight nur bei echtem Gewicht in g/kg.
+- unitSize darf Volumen oder Gewicht enthalten.
+- HALAL/KOSHER niemals allein anhand Zutaten
+  bestätigen.
+- Wenn eine Information nicht sicher gefunden
+  wird: null / unknown / leeres Array.
+- Widersprüche zwischen aktuellem Draft und
+  Onlinequelle in conflicts melden.
+- Konflikte NICHT eigenmächtig auflösen.
+- Bestehende Produktidentität nicht durch ein
+  ähnlich klingendes Produkt ersetzen.
+
+IDENTITY STATUS:
+
+confirmed:
+Barcode oder mehrere starke Merkmale stimmen
+eindeutig überein.
+
+probable:
+Produkt scheint korrekt, aber eindeutige
+Bestätigung fehlt.
+
+not_confirmed:
+Recherche deutet auf ein anderes Produkt,
+andere Grösse oder andere Variante.
+
+VERIFIED DRAFT:
+
+Gib einen vollständigen Draft exakt nach dem
+ALO Product Schema zurück.
+
+Bereits vorhandene sichere Werte dürfen im
+verifiedDraft wiederholt werden.
+
+Neue Food-Daten nur eintragen, wenn sie durch
+die gefundenen Quellen belastbar sind.
+
+QUELLEN:
+
+Gib die wichtigsten tatsächlich verwendeten
+Webquellen zurück.
+
+CONFLICTS:
+
+Melde insbesondere Konflikte bei:
+- Barcode
+- Produktvariante
+- Geschmack
+- unitSize
+- netWeight
+- Zutaten
+- Allergenen
+- Nährwerten
+- Herkunft
+
+SEO und Beschreibung dürfen nur auf der
+verifizierten Produktidentität beruhen.
+`,
+                },
+              ],
+            },
+
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: `
+ALO CURRENT PRODUCT DRAFT:
+
+${JSON.stringify(
+  currentDraft,
+  null,
+  2
+)}
+
+IDENTITY HINTS:
+Barcode: ${barcode || "unbekannt"}
+Marke: ${brand || "unbekannt"}
+Titel: ${title || "unbekannt"}
+Inhalt: ${unitSize || "unbekannt"}
+
+Führe jetzt den Online-Abgleich durch.
+`,
+                },
+              ],
+            },
+          ],
+
+          text: {
+            format: {
+              type: "json_schema",
+              name:
+                "alo_product_online_verification",
+              strict: true,
+              schema:
+                onlineVerificationSchema,
+            },
+          },
+        });
+
+      const raw =
+        response.output_text;
+
+      if (!raw) {
+        throw new Error(
+          "ALO Verify hat kein Ergebnis geliefert."
+        );
+      }
+
+      let result: any;
+
+      try {
+        result =
+          JSON.parse(raw);
+      } catch {
+        throw new Error(
+          "ALO Verify Ergebnis konnte nicht gelesen werden."
+        );
+      }
+
+      res.json({
+        ok: true,
+        ...result,
+      });
+    } catch (error) {
+      console.error(
+        "ALO product online verify error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Online-Abgleich fehlgeschlagen.",
+      });
+    }
+  }
+);
+
 export default router;
