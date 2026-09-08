@@ -2077,14 +2077,16 @@ router.post(
       }
 
       const vendor =
-        draft.vendor ??
-        draft.brand;
+        aloText(
+          draft.brand
+        ) ??
+        aloText(
+          draft.vendor
+        );
 
-      if (
-        vendor !== undefined
-      ) {
+      if (vendor) {
         productInput.vendor =
-          String(vendor ?? "");
+          vendor;
       }
 
       const productType =
