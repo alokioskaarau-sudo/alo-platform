@@ -663,7 +663,7 @@ Das Ergebnis muss exakt dem vorgegebenen JSON-Schema entsprechen.`,
 
 
 router.post(
-  "/api/ai/product-verify-online",
+  "/product-verify-online",
   async (req, res) => {
     try {
       const currentDraft =
