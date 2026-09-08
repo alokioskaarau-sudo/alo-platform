@@ -807,6 +807,12 @@ function mergeShopifyProductData(
   const productType =
     nonEmptyText(
       shopifyProduct.productType
+    ) ??
+    nonEmptyText(
+      shopifyText(
+        shopifyProduct,
+        "typ"
+      )
     );
 
   if (productType) {
