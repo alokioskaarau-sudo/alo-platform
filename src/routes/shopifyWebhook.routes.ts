@@ -16,6 +16,10 @@ import {
   markWebhookFailed,
 } from "../database/shopifyWebhookEvents.js";
 
+import {
+  processShopifyProductWebhook,
+} from "../services/shopifyProductWebhook.service.js";
+
 const router =
   Router();
 
@@ -401,6 +405,250 @@ router.post(
             ok: false,
             error:
               "Webhook processing failed",
+          });
+      }
+
+      return;
+    }
+  }
+);
+
+
+
+// ============================================================
+// PRODUCTS / CREATE + UPDATE
+// ============================================================
+
+const PRODUCT_WEBHOOK_TOPICS =
+  new Set([
+    "products/create",
+    "products/update",
+  ]);
+
+async function processStoredProductWebhook(
+  eventId: string,
+  payload: any
+) {
+  try {
+    await markWebhookProcessing(
+      eventId
+    );
+
+    const result =
+      await processShopifyProductWebhook(
+        payload
+      );
+
+    await markWebhookCompleted(
+      eventId
+    );
+
+    console.log(
+      "Shopify Product Webhook vollständig verarbeitet:",
+      {
+        eventId,
+        action:
+          result.action,
+        productMasterId:
+          "productMasterId" in result
+            ? result.productMasterId
+            : null,
+        shopifyProductId:
+          result.shopifyProductId,
+      }
+    );
+  } catch (error: any) {
+    const message =
+      error?.message ??
+      String(error);
+
+    await markWebhookFailed(
+      eventId,
+      message
+    );
+
+    console.error(
+      "Shopify Product Webhook Verarbeitung fehlgeschlagen:",
+      {
+        eventId,
+        error: message,
+      }
+    );
+  }
+}
+
+router.post(
+  "/webhooks/shopify/products",
+  async (req, res) => {
+    try {
+      const rawBody =
+        req.body as Buffer;
+
+      if (!Buffer.isBuffer(rawBody)) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Webhook Raw Body fehlt.",
+          });
+      }
+
+      const hmac =
+        req.get(
+          "X-Shopify-Hmac-Sha256"
+        );
+
+      if (
+        !verifyShopifyWebhook(
+          rawBody,
+          hmac
+        )
+      ) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Invalid Shopify HMAC",
+          });
+      }
+
+      const topic =
+        req.get(
+          "X-Shopify-Topic"
+        );
+
+      const shop =
+        req.get(
+          "X-Shopify-Shop-Domain"
+        );
+
+      const webhookId =
+        req.get(
+          "X-Shopify-Webhook-Id"
+        );
+
+      if (
+        !topic ||
+        !PRODUCT_WEBHOOK_TOPICS.has(
+          topic
+        )
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Unexpected webhook topic",
+          });
+      }
+
+      if (!webhookId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Webhook ID fehlt.",
+          });
+      }
+
+      let payload: any;
+
+      try {
+        payload =
+          JSON.parse(
+            rawBody.toString(
+              "utf8"
+            )
+          );
+      } catch {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Invalid JSON payload",
+          });
+      }
+
+      const rawProductId =
+        payload
+          ?.admin_graphql_api_id ??
+        payload?.id;
+
+      if (!rawProductId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Product ID fehlt.",
+          });
+      }
+
+      const resourceId =
+        String(rawProductId);
+
+      const stored =
+        await createWebhookEvent({
+          webhookId,
+          topic,
+          shopDomain:
+            shop ?? null,
+          resourceId,
+        });
+
+      if (!stored.created) {
+        return res
+          .status(200)
+          .json({
+            ok: true,
+            received: true,
+            duplicate: true,
+          });
+      }
+
+      console.log(
+        "Shopify Product Webhook dauerhaft gespeichert:",
+        {
+          eventId:
+            stored.event.id,
+          webhookId,
+          topic,
+          resourceId,
+        }
+      );
+
+      res
+        .status(200)
+        .json({
+          ok: true,
+          received: true,
+          persisted: true,
+        });
+
+      void processStoredProductWebhook(
+        stored.event.id,
+        payload
+      );
+
+      return;
+    } catch (error: any) {
+      console.error(
+        "Shopify Product Webhook Error:",
+        error?.message ??
+          error
+      );
+
+      if (!res.headersSent) {
+        return res
+          .status(500)
+          .json({
+            ok: false,
+            error:
+              "Product webhook processing failed",
           });
       }
 

@@ -104,7 +104,9 @@ export async function recoverPendingShopifyWebhooks() {
         FROM shopify_webhook_events
 
         WHERE
-          (
+          topic = 'orders/paid'
+          AND shopify_order_id IS NOT NULL
+          AND (
             status = 'PENDING'
 
             OR (

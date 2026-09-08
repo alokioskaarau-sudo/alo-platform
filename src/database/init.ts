@@ -672,6 +672,25 @@ export async function initializeDatabase() {
 
   // ==========================================================
   // SHOPIFY WEBHOOK EVENTS
+  await db.query(`
+    ALTER TABLE shopify_webhook_events
+    ALTER COLUMN shopify_order_id DROP NOT NULL
+  `);
+
+  await db.query(`
+    ALTER TABLE shopify_webhook_events
+    ADD COLUMN IF NOT EXISTS shopify_resource_id TEXT
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      shopify_webhook_events_resource_idx
+    ON shopify_webhook_events (
+      shopify_resource_id
+    )
+  `);
+
+
   // ==========================================================
 
   await db.query(`
@@ -743,7 +762,7 @@ export async function initializeDatabase() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS products (
       id BIGSERIAL PRIMARY KEY,
-      barcode TEXT NOT NULL UNIQUE,
+      barcode TEXT UNIQUE,
       title TEXT NOT NULL,
       brand TEXT,
       product_name TEXT,
@@ -781,6 +800,20 @@ export async function initializeDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      products_shopify_product_id_unique
+    ON products (shopify_product_id)
+    WHERE shopify_product_id IS NOT NULL
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      products_shopify_variant_id_unique
+    ON products (shopify_variant_id)
+    WHERE shopify_variant_id IS NOT NULL
   `);
 
   await db.query(`

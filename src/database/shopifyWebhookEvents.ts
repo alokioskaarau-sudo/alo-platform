@@ -10,7 +10,13 @@ export type ShopifyWebhookEvent = {
     | string
     | null;
 
-  shopify_order_id: string;
+  shopify_order_id:
+    | string
+    | null;
+
+  shopify_resource_id:
+    | string
+    | null;
 
   shopify_order_name:
     | string
@@ -47,8 +53,9 @@ export async function createWebhookEvent(
     webhookId: string;
     topic: string;
     shopDomain?: string | null;
-    orderId: string;
+    orderId?: string | null;
     orderName?: string | null;
+    resourceId?: string | null;
   }
 ): Promise<{
   created: boolean;
@@ -63,6 +70,7 @@ export async function createWebhookEvent(
           shop_domain,
           shopify_order_id,
           shopify_order_name,
+          shopify_resource_id,
           status
         )
 
@@ -72,6 +80,7 @@ export async function createWebhookEvent(
           $3,
           $4,
           $5,
+          $6,
           'PENDING'
         )
 
@@ -86,8 +95,9 @@ export async function createWebhookEvent(
         input.webhookId,
         input.topic,
         input.shopDomain ?? null,
-        input.orderId,
+        input.orderId ?? null,
         input.orderName ?? null,
+        input.resourceId ?? null,
       ]
     );
 

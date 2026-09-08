@@ -10,6 +10,11 @@ import {
 import {
   resolveProductIdentity,
 } from "../services/productIdentity.service.js";
+import {
+  buildShopifyCatalogPreview,
+  importShopifyCatalogBatch,
+  importShopifyProductToProductMaster,
+} from "../services/shopifyCatalog.service.js";
 
 const router = Router();
 
@@ -727,6 +732,187 @@ router.post(
           error instanceof Error
             ? error.message
             : "Produkt konnte nicht gespeichert werden.",
+      });
+    }
+  }
+);
+
+router.put(
+  "/api/product-master/:id",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(req.params.id || "").trim();
+
+      const existingResult =
+        await db.query(
+          `
+            SELECT
+              id,
+              barcode,
+              title,
+              product_data,
+              source_type,
+              review_status,
+              shopify_status,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id,
+              updated_at
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const existing =
+        existingResult.rows[0];
+
+      if (!existing) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      const draft =
+        req.body?.draft ??
+        req.body ??
+        {};
+
+      const title =
+        String(
+          draft.title ??
+          existing.title ??
+          ""
+        )
+          .trim()
+          .toUpperCase();
+
+      if (!title) {
+        res.status(400).json({
+          ok: false,
+          error: "Produkttitel fehlt.",
+        });
+        return;
+      }
+
+      const barcode =
+        normalizeBarcode(
+          draft.barcode ??
+          existing.barcode
+        ) || null;
+
+      if (barcode) {
+        const duplicate =
+          await db.query(
+            `
+              SELECT id
+              FROM products
+              WHERE barcode = $1
+                AND id <> $2
+              LIMIT 1
+            `,
+            [
+              barcode,
+              productId,
+            ]
+          );
+
+        if (duplicate.rows.length) {
+          res.status(409).json({
+            ok: false,
+            error:
+              "Diese EAN ist bereits einem anderen Produkt zugeordnet.",
+          });
+          return;
+        }
+      }
+
+      const mergedData = {
+        ...(existing.product_data ?? {}),
+        ...draft,
+        barcode,
+        title,
+      };
+
+      const reviewedBy =
+        String(
+          req.body?.reviewedBy ??
+          "ALO STAFF"
+        );
+
+      const result =
+        await db.query(
+          `
+            UPDATE products
+            SET
+              barcode = $2,
+              title = $3,
+              product_data = $4::jsonb,
+              review_status = 'REVIEWED',
+              reviewed_by = $5,
+              reviewed_at = NOW(),
+              updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+              id,
+              barcode,
+              title,
+              product_data,
+              source_type,
+              review_status,
+              shopify_status,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id,
+              updated_at
+          `,
+          [
+            productId,
+            barcode,
+            title,
+            JSON.stringify(mergedData),
+            reviewedBy,
+          ]
+        );
+
+      const row =
+        result.rows[0];
+
+      const [
+        stock,
+        signals,
+      ] = await Promise.all([
+        getProductStock(productId),
+        getProductSignals(productId),
+      ]);
+
+      res.json({
+        ok: true,
+        product:
+          toApiProduct(
+            row,
+            stock,
+            signals
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "Product Master update error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Produkt konnte nicht aktualisiert werden.",
       });
     }
   }
@@ -1487,6 +1673,572 @@ function buildShopifyProductMetafields(
       field.value.trim().length > 0
   );
 }
+
+router.post(
+  "/api/product-ops/shopify/import-all",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const rawLimit = req.query.limit;
+
+      let limit: number | undefined;
+
+      if (
+        typeof rawLimit === "string" &&
+        rawLimit.trim()
+      ) {
+        const parsed =
+          Number(rawLimit);
+
+        if (
+          !Number.isInteger(parsed) ||
+          parsed < 1 ||
+          parsed > 500
+        ) {
+          res.status(400).json({
+            ok: false,
+            error:
+              "limit muss eine ganze Zahl zwischen 1 und 500 sein.",
+          });
+          return;
+        }
+
+        limit = parsed;
+      }
+
+      const rawConfirm =
+        req.query.confirm;
+
+      const confirmedImportAll =
+        typeof rawConfirm === "string" &&
+        rawConfirm === "IMPORT_ALL";
+
+      if (
+        limit === undefined &&
+        !confirmedImportAll
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Vollständiger Shopify-Import blockiert. Nutze limit=1..500 oder confirm=IMPORT_ALL.",
+        });
+        return;
+      }
+
+      const before =
+        await buildShopifyCatalogPreview();
+
+      const result =
+        await importShopifyCatalogBatch(
+          limit
+        );
+
+      const after =
+        await buildShopifyCatalogPreview();
+
+      res.json({
+        ok: result.failed === 0,
+        limit: limit ?? null,
+        attempted: result.attempted,
+        imported: result.imported,
+        alreadyLinked:
+          result.alreadyLinked,
+        linkedExisting:
+          result.linkedExisting,
+        failed: result.failed,
+        before: before.summary,
+        after: after.summary,
+        failures: result.failures,
+        results: result.results,
+      });
+    } catch (error) {
+      console.error(
+        "Shopify bulk import error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Shopify-Katalog konnte nicht importiert werden.",
+      });
+    }
+  }
+);
+
+router.post(
+  "/api/product-ops/shopify/import-one",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const shopifyProductId =
+        typeof req.body?.shopifyProductId === "string"
+          ? req.body.shopifyProductId.trim()
+          : "";
+
+      if (!shopifyProductId) {
+        res.status(400).json({
+          ok: false,
+          error: "Shopify Product ID fehlt.",
+        });
+        return;
+      }
+
+      const result =
+        await importShopifyProductToProductMaster(
+          shopifyProductId
+        );
+
+      res.json({
+        ok: true,
+        ...result,
+      });
+    } catch (error) {
+      console.error(
+        "Shopify single product import error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Shopify-Produkt konnte nicht importiert werden.",
+      });
+    }
+  }
+);
+
+router.get(
+  "/api/product-ops/shopify/catalog-preview",
+  async (_req, res) => {
+    try {
+      await ensureSchema();
+
+      const preview =
+        await buildShopifyCatalogPreview();
+
+      res.json({
+        ok: true,
+        readOnly: true,
+        ...preview,
+      });
+    } catch (error) {
+      console.error(
+        "Shopify catalog preview error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Shopify-Katalog konnte nicht geprüft werden.",
+      });
+    }
+  }
+);
+
+router.post(
+  "/api/product-master/:id/sync-to-shopify",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const row =
+        await getProduct(
+          req.params.id
+        );
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      if (
+        !row.shopify_product_id
+      ) {
+        res.status(409).json({
+          ok: false,
+          error:
+            "Produkt ist noch nicht mit Shopify verknüpft.",
+        });
+        return;
+      }
+
+      const draft =
+        row.product_data ?? {};
+
+      const productInput: any = {
+        id:
+          row.shopify_product_id,
+        title:
+          String(
+            draft.title ??
+            row.title
+          )
+            .trim()
+            .toUpperCase(),
+      };
+
+      if (
+        draft.descriptionHtml !==
+        undefined
+      ) {
+        productInput.descriptionHtml =
+          String(
+            draft.descriptionHtml ??
+            ""
+          );
+      }
+
+      const vendor =
+        draft.vendor ??
+        draft.brand;
+
+      if (
+        vendor !== undefined
+      ) {
+        productInput.vendor =
+          String(vendor ?? "");
+      }
+
+      const productType =
+        draft.productType ??
+        draft.category;
+
+      if (
+        productType !== undefined
+      ) {
+        productInput.productType =
+          String(
+            productType ?? ""
+          );
+      }
+
+      if (
+        Array.isArray(
+          draft.tags
+        )
+      ) {
+        productInput.tags =
+          draft.tags
+            .map((tag: unknown) =>
+              String(tag).trim()
+            )
+            .filter(Boolean);
+      }
+
+      if (
+        draft.seoTitle !==
+          undefined ||
+        draft.seoDescription !==
+          undefined
+      ) {
+        productInput.seo = {
+          title:
+            String(
+              draft.seoTitle ??
+              ""
+            ),
+          description:
+            String(
+              draft.seoDescription ??
+              ""
+            ),
+        };
+      }
+
+      const metafields =
+        buildShopifyProductMetafields(
+          draft
+        );
+
+      if (metafields.length) {
+        productInput.metafields =
+          metafields;
+      }
+
+      const updated =
+        await shopifyGraphql(
+          `
+            mutation AloSyncProduct(
+              $product: ProductUpdateInput!
+            ) {
+              productUpdate(
+                product: $product
+              ) {
+                product {
+                  id
+                  title
+                  status
+                  vendor
+                  productType
+                }
+
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          {
+            product:
+              productInput,
+          }
+        );
+
+      const productPayload =
+        updated?.productUpdate;
+
+      if (
+        productPayload?.userErrors
+          ?.length
+      ) {
+        throw new Error(
+          productPayload.userErrors
+            .map(
+              (error: any) =>
+                error.message
+            )
+            .join(" · ")
+        );
+      }
+
+      const shopifyProduct =
+        productPayload?.product;
+
+      if (
+        !shopifyProduct?.id
+      ) {
+        throw new Error(
+          "Shopify hat kein aktualisiertes Produkt zurückgegeben."
+        );
+      }
+
+      let variant:
+        | {
+            id: string;
+            barcode?: string | null;
+            price?: string | null;
+            inventoryItem?: {
+              id?: string | null;
+            } | null;
+          }
+        | undefined;
+
+      if (
+        row.shopify_variant_id
+      ) {
+        const variantInput: any = {
+          id:
+            row.shopify_variant_id,
+        };
+
+        const barcode =
+          normalizeBarcode(
+            row.barcode
+          );
+
+        variantInput.barcode =
+          barcode || null;
+
+        const possiblePrice =
+          Number(
+            draft?.commerce
+              ?.sellingPrice ??
+            draft?.sellingPrice ??
+            NaN
+          );
+
+        if (
+          Number.isFinite(
+            possiblePrice
+          ) &&
+          possiblePrice >= 0
+        ) {
+          variantInput.price =
+            possiblePrice.toFixed(
+              2
+            );
+        }
+
+        const variantUpdate =
+          await shopifyGraphql(
+            `
+              mutation AloSyncVariant(
+                $productId: ID!,
+                $variants:
+                  [ProductVariantsBulkInput!]!
+              ) {
+                productVariantsBulkUpdate(
+                  productId:
+                    $productId,
+                  variants:
+                    $variants
+                ) {
+                  productVariants {
+                    id
+                    barcode
+                    price
+
+                    inventoryItem {
+                      id
+                    }
+                  }
+
+                  userErrors {
+                    field
+                    message
+                  }
+                }
+              }
+            `,
+            {
+              productId:
+                row.shopify_product_id,
+              variants: [
+                variantInput,
+              ],
+            }
+          );
+
+        const variantPayload =
+          variantUpdate
+            ?.productVariantsBulkUpdate;
+
+        if (
+          variantPayload
+            ?.userErrors
+            ?.length
+        ) {
+          throw new Error(
+            variantPayload.userErrors
+              .map(
+                (error: any) =>
+                  error.message
+              )
+              .join(" · ")
+          );
+        }
+
+        variant =
+          variantPayload
+            ?.productVariants?.[0];
+      }
+
+      const finalVariantId =
+        variant?.id ??
+        row.shopify_variant_id ??
+        null;
+
+      const finalInventoryId =
+        variant?.inventoryItem?.id ??
+        row.shopify_inventory_item_id ??
+        null;
+
+      const nextShopifyData = {
+        ...(
+          draft.shopify ??
+          {}
+        ),
+        productId:
+          shopifyProduct.id,
+        variantId:
+          finalVariantId,
+        inventoryItemId:
+          finalInventoryId,
+        status:
+          shopifyProduct.status ??
+          row.shopify_status,
+        originalTitle:
+          shopifyProduct.title,
+      };
+
+      await db.query(
+        `
+          UPDATE products
+          SET
+            title = $2,
+            shopify_status = $3,
+            shopify_variant_id = $4,
+            shopify_inventory_item_id = $5,
+            product_data =
+              COALESCE(
+                product_data,
+                '{}'::jsonb
+              )
+              || jsonb_build_object(
+                'shopify',
+                $6::jsonb
+              ),
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          req.params.id,
+          String(
+            shopifyProduct.title
+          ).toUpperCase(),
+          shopifyProduct.status ??
+            row.shopify_status ??
+            "LINKED",
+          finalVariantId,
+          finalInventoryId,
+          JSON.stringify(
+            nextShopifyData
+          ),
+        ]
+      );
+
+      res.json({
+        ok: true,
+        synced: true,
+        productId:
+          req.params.id,
+        shopifyProductId:
+          shopifyProduct.id,
+        shopifyVariantId:
+          finalVariantId,
+        title:
+          shopifyProduct.title,
+        status:
+          shopifyProduct.status,
+        barcode:
+          variant?.barcode ??
+          row.barcode ??
+          null,
+        price:
+          variant?.price ??
+          null,
+      });
+    } catch (error) {
+      console.error(
+        "Shopify product sync error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Produkt konnte nicht mit Shopify synchronisiert werden.",
+      });
+    }
+  }
+);
 
 router.post(
   "/api/product-master/:id/shopify-draft",
