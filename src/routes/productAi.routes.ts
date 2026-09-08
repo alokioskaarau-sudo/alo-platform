@@ -1006,4 +1006,181 @@ Führe jetzt den Online-Abgleich durch.
   }
 );
 
+
+router.post(
+  "/api/ai/product-image-studio",
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      const file = req.file;
+
+      if (!file) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Produktfoto fehlt.",
+        });
+        return;
+      }
+
+      const title =
+        typeof req.body?.title ===
+        "string"
+          ? req.body.title.trim()
+          : "";
+
+      const brand =
+        typeof req.body?.brand ===
+        "string"
+          ? req.body.brand.trim()
+          : "";
+
+      const unitSize =
+        typeof req.body?.unitSize ===
+        "string"
+          ? req.body.unitSize.trim()
+          : "";
+
+      const referenceImage =
+        await toFile(
+          file.buffer,
+          file.originalname ||
+            "alo-product-reference.jpg",
+          {
+            type:
+              file.mimetype ||
+              "image/jpeg",
+          }
+        );
+
+      const prompt = `
+Create a professional e-commerce studio product image
+using the supplied photograph as the STRICT visual reference.
+
+PRODUCT HINTS:
+Title: ${title || "unknown"}
+Brand: ${brand || "unknown"}
+Pack size: ${unitSize || "unknown"}
+
+PRIMARY RULE:
+Preserve the exact real product identity from the input image.
+
+The actual packaging must remain faithful to the reference:
+- exact product type and package shape
+- exact brand identity
+- exact visible logo
+- exact label design
+- exact colors
+- exact flavor / variant
+- exact visible typography and wording
+- exact cap, lid, bottle, can, bag or box structure
+- exact visible quantity / size markings when readable
+
+DO NOT:
+- redesign the package
+- create a new label
+- invent text
+- correct or rewrite existing branding
+- add promotional stickers
+- add fruit, ingredients, ice, splashes or decorative props
+- add hands or people
+- add other products
+- create a lifestyle scene
+- change the product variant
+- change the package color
+- remove important visible packaging details
+
+COMPOSITION:
+- one single product only
+- product fully visible
+- upright and front-facing
+- centered precisely
+- generous but efficient margin around the product
+- square 1:1 composition
+- clean pure white or extremely light neutral studio background
+- professional softbox lighting
+- balanced exposure
+- crisp product edges
+- realistic material texture
+- subtle natural contact shadow beneath the product
+- no dramatic reflections hiding label information
+- no perspective distortion
+- no cropping of the product
+
+The result must look like a premium Swiss online-shop
+catalog product photo.
+
+Faithfulness to the real package is more important than
+beautification.
+
+If any tiny text cannot be reproduced reliably,
+do not invent replacement wording.
+Keep the visual appearance as faithful as possible
+to the supplied reference.
+`;
+
+      const result =
+        await openai.images.edit({
+          model:
+            "gpt-image-2",
+          image:
+            referenceImage,
+          prompt,
+          size:
+            "1024x1024",
+          quality:
+            "medium",
+          background:
+            "opaque",
+        });
+
+      const base64 =
+        result.data?.[0]
+          ?.b64_json;
+
+      if (!base64) {
+        throw new Error(
+          "OpenAI hat kein Produktbild geliefert."
+        );
+      }
+
+      const output =
+        Buffer.from(
+          base64,
+          "base64"
+        );
+
+      res.setHeader(
+        "Content-Type",
+        "image/png"
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "no-store"
+      );
+
+      res.setHeader(
+        "Content-Length",
+        String(output.length)
+      );
+
+      res.send(output);
+    } catch (error) {
+      console.error(
+        "[ALO AI STUDIO IMAGE]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Studio-Produktbild konnte nicht erstellt werden.",
+      });
+    }
+  }
+);
+
 export default router;
