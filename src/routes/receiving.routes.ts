@@ -6,7 +6,16 @@ import {
 
 const router = Router();
 
-type StoreId = "aarau" | "olten";
+type StoreId =
+  | "aarau"
+  | "olten"
+  | "online";
+
+type ReceivingAllocation = {
+  aarau?: number | null;
+  olten?: number | null;
+  online?: number | null;
+};
 
 class ReceivingValidationError extends Error {
   statusCode = 422;
@@ -31,6 +40,7 @@ type ReceivingLineInput = {
   totalPrice?: number | null;
   expiry?: string | null;
   batch?: string | null;
+  allocations?: ReceivingAllocation | null;
 };
 
 function cleanBarcode(value: unknown): string {
@@ -224,6 +234,67 @@ function validateReceivingPackaging(
   }
 }
 
+function resolveAllocations(
+  input: ReceivingLineInput,
+  quantity: number,
+  position: number
+): Record<StoreId, number> {
+  const raw =
+    input.allocations &&
+    typeof input.allocations === "object"
+      ? input.allocations
+      : null;
+
+  if (!raw) {
+    throw new ReceivingValidationError(
+      `Position ${position}: Verteilung auf Aarau, Olten und Online fehlt.`
+    );
+  }
+
+  const parseAllocation = (
+    store: StoreId
+  ): number => {
+    const value =
+      raw[store] === null ||
+      raw[store] === undefined
+        ? 0
+        : Number(raw[store]);
+
+    if (
+      !Number.isInteger(value) ||
+      value < 0
+    ) {
+      throw new ReceivingValidationError(
+        `Position ${position}: Ungültige Menge für ${store}.`
+      );
+    }
+
+    return value;
+  };
+
+  const allocations: Record<
+    StoreId,
+    number
+  > = {
+    aarau: parseAllocation("aarau"),
+    olten: parseAllocation("olten"),
+    online: parseAllocation("online"),
+  };
+
+  const allocated =
+    allocations.aarau +
+    allocations.olten +
+    allocations.online;
+
+  if (allocated !== quantity) {
+    throw new ReceivingValidationError(
+      `Position ${position}: ${quantity} Stück geliefert, aber ${allocated} Stück verteilt.`
+    );
+  }
+
+  return allocations;
+}
+
 function calculateUnitCost(
   quantity: number,
   purchasePrice: number | null,
@@ -323,6 +394,35 @@ async function ensureReceivingSchema() {
   `);
 
   await db.query(`
+    CREATE TABLE IF NOT EXISTS
+      receiving_allocations (
+        id BIGSERIAL PRIMARY KEY,
+        receiving_line_id BIGINT
+          NOT NULL
+          REFERENCES receiving_lines(id)
+          ON DELETE CASCADE,
+        store_id TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        created_at TIMESTAMPTZ
+          NOT NULL
+          DEFAULT NOW(),
+        UNIQUE(
+          receiving_line_id,
+          store_id
+        )
+      )
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      receiving_allocations_line_idx
+    ON receiving_allocations(
+      receiving_line_id,
+      store_id
+    )
+  `);
+
+  await db.query(`
     CREATE TABLE IF NOT EXISTS stock_movements (
       id BIGSERIAL PRIMARY KEY,
       product_id BIGINT NOT NULL
@@ -385,22 +485,10 @@ router.post(
       await ensureReceivingSchema();
 
       const {
-        store,
         supplier,
         deliveryNote,
         lines,
       } = req.body ?? {};
-
-      if (
-        store !== "aarau" &&
-        store !== "olten"
-      ) {
-        res.status(400).json({
-          ok: false,
-          error: "Ungültiger Standort.",
-        });
-        return;
-      }
 
       if (!cleanText(supplier)) {
         res.status(400).json({
@@ -778,7 +866,7 @@ router.post(
       res.json({
         ok: true,
         preview: true,
-        store,
+        store: "distribution",
         supplier:
           cleanText(supplier),
         deliveryNote:
@@ -842,18 +930,6 @@ router.post(
         lines,
       } = req.body ?? {};
 
-      if (
-        store !== "aarau" &&
-        store !== "olten"
-      ) {
-        res.status(400).json({
-          ok: false,
-          error:
-            "Ungültiger Standort.",
-        });
-        return;
-      }
-
       if (!cleanText(supplier)) {
         res.status(400).json({
           ok: false,
@@ -904,7 +980,7 @@ router.post(
             RETURNING *
           `,
           [
-            store,
+            "distribution",
             cleanText(supplier),
             cleanText(deliveryNote),
             documentDate || null,
@@ -941,6 +1017,13 @@ router.post(
         const quantity =
           resolveReceivedQuantity(
             input,
+            index + 1
+          );
+
+        const allocations =
+          resolveAllocations(
+            input,
+            quantity,
             index + 1
           );
 
@@ -1233,162 +1316,219 @@ router.post(
         const receivingLineId =
           lineResult.rows[0].id;
 
-        await client.query(
-          `
-            INSERT INTO stock_movements (
-              product_id,
-              store_id,
-              movement_type,
-              quantity_delta,
-              reference_type,
-              reference_id,
-              note,
-              created_by
-            )
-            VALUES (
-              $1,
-              $2,
-              'RECEIVING',
-              $3,
-              'DELIVERY',
-              $4,
-              $5,
-              $6
-            )
-          `,
-          [
-            product.id,
-            store,
-            quantity,
-            String(delivery.id),
-            `Warenannahme · ${cleanText(
-              supplier
-            )} · LS ${cleanText(
-              deliveryNote
-            )}`,
-            cleanText(receivedBy) ||
-              "ALO STAFF",
-          ]
-        );
+        const stockResults: Array<{
+          store: StoreId;
+          quantity: number;
+          previousQuantity: number;
+          newQuantity: number;
+        }> = [];
 
-        await client.query(
-          `
-            INSERT INTO product_stock_snapshots (
-              product_id,
-              store_id,
-              exact_quantity,
-              stock_level,
-              note,
-              updated_by,
-              updated_at
-            )
-            VALUES (
-              $1,
-              $2,
-              0,
-              'out',
-              $3,
-              $4,
-              NOW()
-            )
-            ON CONFLICT (
-              product_id,
-              store_id
-            )
-            DO NOTHING
-          `,
-          [
-            product.id,
-            store,
-            `LS ${cleanText(
-              deliveryNote
-            )}`,
-            cleanText(receivedBy) ||
-              "ALO STAFF",
-          ]
-        );
+        const allocationEntries =
+          Object.entries(
+            allocations
+          ) as Array<
+            [StoreId, number]
+          >;
 
-        const lockedStock =
+        for (
+          const [
+            allocationStore,
+            allocationQuantity,
+          ] of allocationEntries
+        ) {
+          if (allocationQuantity <= 0) {
+            continue;
+          }
+
           await client.query(
             `
-              SELECT exact_quantity
-              FROM product_stock_snapshots
+              INSERT INTO
+                receiving_allocations (
+                  receiving_line_id,
+                  store_id,
+                  quantity
+                )
+              VALUES (
+                $1,
+                $2,
+                $3
+              )
+            `,
+            [
+              receivingLineId,
+              allocationStore,
+              allocationQuantity,
+            ]
+          );
+
+          await client.query(
+            `
+              INSERT INTO stock_movements (
+                product_id,
+                store_id,
+                movement_type,
+                quantity_delta,
+                reference_type,
+                reference_id,
+                note,
+                created_by
+              )
+              VALUES (
+                $1,
+                $2,
+                'RECEIVING',
+                $3,
+                'DELIVERY',
+                $4,
+                $5,
+                $6
+              )
+            `,
+            [
+              product.id,
+              allocationStore,
+              allocationQuantity,
+              String(delivery.id),
+              `Warenannahme · ${cleanText(
+                supplier
+              )} · LS ${cleanText(
+                deliveryNote
+              )}`,
+              cleanText(receivedBy) ||
+                "ALO STAFF",
+            ]
+          );
+
+          await client.query(
+            `
+              INSERT INTO
+                product_stock_snapshots (
+                  product_id,
+                  store_id,
+                  exact_quantity,
+                  stock_level,
+                  note,
+                  updated_by,
+                  updated_at
+                )
+              VALUES (
+                $1,
+                $2,
+                0,
+                'empty',
+                $3,
+                $4,
+                NOW()
+              )
+              ON CONFLICT (
+                product_id,
+                store_id
+              )
+              DO NOTHING
+            `,
+            [
+              product.id,
+              allocationStore,
+              `LS ${cleanText(
+                deliveryNote
+              )}`,
+              cleanText(receivedBy) ||
+                "ALO STAFF",
+            ]
+          );
+
+          const lockedStock =
+            await client.query(
+              `
+                SELECT exact_quantity
+                FROM product_stock_snapshots
+                WHERE
+                  product_id = $1
+                  AND store_id = $2
+                FOR UPDATE
+              `,
+              [
+                product.id,
+                allocationStore,
+              ]
+            );
+
+          const previousQuantity =
+            Number(
+              lockedStock.rows[0]
+                ?.exact_quantity ?? 0
+            );
+
+          const nextQuantity =
+            previousQuantity +
+            allocationQuantity;
+
+          await client.query(
+            `
+              UPDATE product_stock_snapshots
+              SET
+                exact_quantity = $3,
+                stock_level = $4,
+                note = $5,
+                updated_by = $6,
+                updated_at = NOW()
               WHERE
                 product_id = $1
                 AND store_id = $2
-              FOR UPDATE
             `,
             [
               product.id,
-              store,
+              allocationStore,
+              nextQuantity,
+              stockLevelForQuantity(
+                nextQuantity
+              ),
+              `LS ${cleanText(
+                deliveryNote
+              )}`,
+              cleanText(receivedBy) ||
+                "ALO STAFF",
             ]
           );
 
-        const previousQuantity =
-          Number(
-            lockedStock.rows[0]
-              ?.exact_quantity ?? 0
-          );
+          if (
+            input.expiry ||
+            cleanText(input.batch)
+          ) {
+            await client.query(
+              `
+                INSERT INTO product_batches (
+                  product_id,
+                  store_id,
+                  quantity,
+                  expiry,
+                  batch,
+                  receiving_line_id
+                )
+                VALUES (
+                  $1, $2, $3, $4, $5, $6
+                )
+              `,
+              [
+                product.id,
+                allocationStore,
+                allocationQuantity,
+                input.expiry || null,
+                cleanText(input.batch) ||
+                  null,
+                receivingLineId,
+              ]
+            );
+          }
 
-        const nextQuantity =
-          previousQuantity + quantity;
-
-        await client.query(
-          `
-            UPDATE product_stock_snapshots
-            SET
-              exact_quantity = $3,
-              stock_level = $4,
-              note = $5,
-              updated_by = $6,
-              updated_at = NOW()
-            WHERE
-              product_id = $1
-              AND store_id = $2
-          `,
-          [
-            product.id,
-            store,
-            nextQuantity,
-            stockLevelForQuantity(
-              nextQuantity
-            ),
-            `LS ${cleanText(
-              deliveryNote
-            )}`,
-            cleanText(receivedBy) ||
-              "ALO STAFF",
-          ]
-        );
-
-        if (
-          input.expiry ||
-          cleanText(input.batch)
-        ) {
-          await client.query(
-            `
-              INSERT INTO product_batches (
-                product_id,
-                store_id,
-                quantity,
-                expiry,
-                batch,
-                receiving_line_id
-              )
-              VALUES (
-                $1, $2, $3, $4, $5, $6
-              )
-            `,
-            [
-              product.id,
-              store,
-              quantity,
-              input.expiry || null,
-              cleanText(input.batch) ||
-                null,
-              receivingLineId,
-            ]
-          );
+          stockResults.push({
+            store: allocationStore,
+            quantity:
+              allocationQuantity,
+            previousQuantity,
+            newQuantity:
+              nextQuantity,
+          });
         }
 
         results.push({
@@ -1399,9 +1539,8 @@ router.post(
           barcode,
           product: productName,
           quantity,
-          previousQuantity,
-          newQuantity:
-            nextQuantity,
+          allocations,
+          stock: stockResults,
           unitPurchaseCost:
             unitCost,
           createdProduct,
