@@ -843,18 +843,74 @@ DEINE AUFGABE:
 1. Identifiziere zuerst exakt das Produkt.
 2. Recherchiere aktuelle und belastbare
    Produktinformationen im Web.
-3. Verwende vorzugsweise:
-   - offizielle Herstellerseiten
-   - offizielle Markenwebseiten
-   - offizielle Produktdaten
-4. Seriöse Händler oder Produktdatenbanken nur
-   ergänzend verwenden.
+3. Recherchiere systematisch in dieser Reihenfolge:
+
+   A) SWEETS.CH
+   - Suche zuerst gezielt nach dem exakten Produkt
+     auf sweets.ch.
+   - Suche nach Barcode/EAN sowie nach
+     Marke + Produkt + Geschmack + Packungsgrösse.
+   - Wenn dort die exakte Variante gefunden wird,
+     nutze die Seite als wichtige Schweizer
+     Handelsquelle.
+
+   B) HERSTELLER / MARKE
+   - Suche danach auf offiziellen Herstellerseiten,
+     offiziellen Markenwebseiten und offiziellen
+     Produktdatenquellen.
+   - Diese Quellen haben für Rezeptur und
+     Produktidentität hohe Priorität.
+
+   C) SCHWEIZER QUELLEN
+   - Seriöse Schweizer Händler und
+     Produktdatenbanken ergänzend prüfen.
+   - Bevorzuge Seiten, welche exakt dieselbe
+     EAN, Variante und Packungsgrösse führen.
+
+   D) INTERNATIONALE QUELLEN
+   - Nur verwenden, wenn es nachweislich dieselbe
+     Produkt- und Marktvariante ist.
+   - US-, EU-, UK-, Japan- oder andere Varianten
+     dürfen NICHT miteinander vermischt werden.
+
+4. Verwende mehrere Quellen, wenn verfügbar.
+   Übernimm Food Data nicht allein deshalb,
+   weil irgendeine Seite einen passenden Namen hat.
+
 5. Barcode/EAN ist das stärkste Identitätsmerkmal.
-6. Zusätzlich Marke, Produktname, Geschmack und
-   Packungsgrösse abgleichen.
-7. Wenn Packungsgrösse, Variante oder Barcode
-   nicht zusammenpassen, darf die Quelle NICHT
-   blind für Food Data verwendet werden.
+
+6. Zusätzlich müssen soweit verfügbar abgeglichen
+   werden:
+   - Marke
+   - Produktname
+   - Geschmack / Variante
+   - Packungsgrösse
+   - Verpackungsart
+   - Markt-/Ländervariante
+
+7. Eine Quelle darf für Food Data nur verwendet
+   werden, wenn sie mit der identifizierten
+   Produktvariante kompatibel ist.
+
+8. Wenn Packungsgrösse, Variante, Marktversion
+   oder Barcode widersprechen, darf die Quelle
+   NICHT zur automatischen Befüllung verwendet
+   werden.
+
+9. Wenn mehrere belastbare Quellen vorhanden sind,
+   vergleiche sie aktiv miteinander.
+
+10. Bei Widersprüchen gilt:
+    - sichtbare Originalverpackung ist die stärkste
+      Quelle für genau das physisch gescannte Produkt
+    - exakte EAN + exakte Variante + exakte Grösse
+      haben Vorrang vor bloßer Namensähnlichkeit
+    - offizielle Herstellerdaten haben Vorrang vor
+      allgemeinen Händlertexten, sofern dieselbe
+      Marktvariante gemeint ist
+    - Konflikte müssen in conflicts gemeldet werden
+    - widersprüchliche Food Data niemals raten oder
+      zu einem Mischdatensatz kombinieren
 
 WICHTIGE REGELN:
 
@@ -900,6 +956,46 @@ verifiedDraft wiederholt werden.
 
 Neue Food-Daten nur eintragen, wenn sie durch
 die gefundenen Quellen belastbar sind.
+
+Versuche für das exakt identifizierte Produkt
+insbesondere vollständig zu ermitteln:
+
+- ingredients
+- allergens
+- traces
+- nutritionPer100.basis
+- nutritionPer100.energyKj
+- nutritionPer100.energyKcal
+- nutritionPer100.fat
+- nutritionPer100.saturatedFat
+- nutritionPer100.carbohydrates
+- nutritionPer100.sugars
+- nutritionPer100.protein
+- nutritionPer100.fiber
+- nutritionPer100.salt
+- servingSize
+- country
+- manufacturer
+- unitSize
+- netWeight
+- flavor
+- category
+- subcategory
+
+Prüfe jedes dieser Felder einzeln.
+
+Fehlt ein einzelner Nährwert online, lasse genau
+dieses Feld null, statt andere Nährwerte zu
+verwerfen oder einen Wert zu schätzen.
+
+Allergene nur übernehmen, wenn sie explizit aus
+Verpackung oder belastbarer Quelle hervorgehen.
+
+traces ausschließlich bei expliziten
+May-contain-/Kann-Spuren-enthalten-Angaben.
+
+Zutatenlisten unterschiedlicher Länder- oder
+Packungsvarianten niemals miteinander mischen.
 
 QUELLEN:
 
