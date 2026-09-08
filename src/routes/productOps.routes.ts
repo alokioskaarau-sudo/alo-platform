@@ -2113,24 +2113,31 @@ router.post(
             .filter(Boolean);
       }
 
+      const seoTitle =
+        aloText(
+          draft.seoTitle
+        );
+
+      const seoDescription =
+        aloText(
+          draft.seoDescription
+        );
+
       if (
-        draft.seoTitle !==
-          undefined ||
-        draft.seoDescription !==
-          undefined
+        seoTitle ||
+        seoDescription
       ) {
-        productInput.seo = {
-          title:
-            String(
-              draft.seoTitle ??
-              ""
-            ),
-          description:
-            String(
-              draft.seoDescription ??
-              ""
-            ),
-        };
+        productInput.seo = {};
+
+        if (seoTitle) {
+          productInput.seo.title =
+            seoTitle;
+        }
+
+        if (seoDescription) {
+          productInput.seo.description =
+            seoDescription;
+        }
       }
 
       const metafields =
