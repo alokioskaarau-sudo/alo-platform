@@ -992,6 +992,66 @@ router.get(
 );
 
 router.get(
+  "/api/product-master/:id",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(req.params.id || "").trim();
+
+      if (!productId) {
+        res.status(400).json({
+          ok: false,
+          error: "Product Master ID fehlt.",
+        });
+        return;
+      }
+
+      const row =
+        await getProduct(productId);
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      const [stock, signals] =
+        await Promise.all([
+          getProductStock(productId),
+          getProductSignals(productId),
+        ]);
+
+      res.json({
+        ok: true,
+        found: true,
+        product: toApiProduct(
+          row,
+          stock,
+          signals
+        ),
+      });
+    } catch (error) {
+      console.error(
+        "Product Master get by id error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Produkt konnte nicht geladen werden.",
+      });
+    }
+  }
+);
+
+router.get(
   "/api/product-master",
   async (_req, res) => {
     try {
