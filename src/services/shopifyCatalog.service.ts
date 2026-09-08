@@ -26,6 +26,7 @@ type ShopifyCatalogProduct = {
   productType: string | null;
   handle: string | null;
   imageUrl: string | null;
+  metafields: Record<string, string>;
   variants: ShopifyVariant[];
   variantsTruncated: boolean;
 };
@@ -116,6 +117,18 @@ async function loadShopifyCatalog(): Promise<
                   }
                 }
               }
+
+              metafields(
+                first: 50
+                namespace: "custom"
+              ) {
+                nodes {
+                  namespace
+                  key
+                  value
+                }
+              }
+
               variants(first: 100) {
                 nodes {
                   id
@@ -190,6 +203,30 @@ async function loadShopifyCatalog(): Promise<
                 node.featuredMedia.preview.image.url
               )
             : null,
+
+        metafields:
+          Object.fromEntries(
+            (
+              Array.isArray(
+                node?.metafields?.nodes
+              )
+                ? node.metafields.nodes
+                : []
+            )
+              .filter(
+                (field: any) =>
+                  field?.key &&
+                  field?.value !== undefined &&
+                  field?.value !== null
+              )
+              .map(
+                (field: any) => [
+                  String(field.key),
+                  String(field.value),
+                ]
+              )
+          ),
+
         variants,
         variantsTruncated: Boolean(
           node?.variants?.pageInfo?.hasNextPage
@@ -227,6 +264,194 @@ async function loadProductMaster(): Promise<
     ...row,
     id: String(row.id),
   }));
+}
+
+function shopifyText(
+  product: ShopifyCatalogProduct,
+  key: string
+): string | null {
+  const value =
+    product.metafields?.[key];
+
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return null;
+  }
+
+  const text =
+    String(value).trim();
+
+  return text || null;
+}
+
+function splitAllergens(
+  value: string | null
+) {
+  if (!value) {
+    return {
+      allergens: [] as string[],
+      traces: [] as string[],
+    };
+  }
+
+  const marker =
+    /kann\s+spuren\s+enthalten\s*:/i;
+
+  const parts =
+    value.split(marker);
+
+  const toList = (text: string) =>
+    text
+      .split(/[,;\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  return {
+    allergens:
+      toList(parts[0] ?? ""),
+    traces:
+      toList(parts.slice(1).join(" ")),
+  };
+}
+
+function parseEnergy(
+  value: string | null
+) {
+  if (!value) {
+    return {
+      energyKj: null,
+      energyKcal: null,
+    };
+  }
+
+  const kj =
+    value.match(
+      /(\d+(?:[.,]\d+)?)\s*kJ/i
+    );
+
+  const kcal =
+    value.match(
+      /(\d+(?:[.,]\d+)?)\s*kcal/i
+    );
+
+  return {
+    energyKj:
+      kj ? `${kj[1]} kJ` : null,
+    energyKcal:
+      kcal ? `${kcal[1]} kcal` : null,
+  };
+}
+
+function buildShopifyFoodData(
+  product: ShopifyCatalogProduct
+) {
+  const allergenData =
+    splitAllergens(
+      shopifyText(
+        product,
+        "allergene"
+      )
+    );
+
+  const energy =
+    parseEnergy(
+      shopifyText(
+        product,
+        "energie"
+      )
+    );
+
+  return {
+    country:
+      shopifyText(
+        product,
+        "herkunft"
+      ),
+
+    unitSize:
+      shopifyText(
+        product,
+        "inhalt"
+      ),
+
+    flavor:
+      shopifyText(
+        product,
+        "geschmack"
+      ),
+
+    ingredients:
+      shopifyText(
+        product,
+        "zutaten"
+      ),
+
+    allergens:
+      allergenData.allergens,
+
+    traces:
+      allergenData.traces,
+
+    servingRecommendation:
+      shopifyText(
+        product,
+        "servierempfehlung"
+      ),
+
+    nutritionPer100: {
+      basis: "100 g/ml",
+
+      energyKj:
+        energy.energyKj,
+
+      energyKcal:
+        energy.energyKcal,
+
+      fat:
+        shopifyText(
+          product,
+          "fett"
+        ),
+
+      saturatedFat:
+        shopifyText(
+          product,
+          "gesaettigte_fettsaeuren"
+        ),
+
+      carbohydrates:
+        shopifyText(
+          product,
+          "kohlenhydrate"
+        ),
+
+      sugars:
+        shopifyText(
+          product,
+          "zucker"
+        ),
+
+      protein:
+        shopifyText(
+          product,
+          "eiweiss"
+        ),
+
+      fiber:
+        shopifyText(
+          product,
+          "nahrungsfasern"
+        ),
+
+      salt:
+        shopifyText(
+          product,
+          "salz"
+        ),
+    },
+  };
 }
 
 function masterSize(row: ProductMasterRow) {
@@ -514,6 +739,100 @@ export async function buildShopifyCatalogPreview() {
 }
 
 
+function buildShopifyProductData(
+  shopifyProduct: ShopifyCatalogProduct,
+  variant: ShopifyVariant
+) {
+  const barcode =
+    normalizeProductBarcode(
+      variant.barcode
+    ) || null;
+
+  const normalizedTitle =
+    String(shopifyProduct.title ?? "")
+      .trim()
+      .toUpperCase();
+
+  const shopifyFoodData =
+    buildShopifyFoodData(
+      shopifyProduct
+    );
+
+  return {
+    title: normalizedTitle,
+    barcode,
+
+    vendor:
+      shopifyProduct.vendor,
+
+    brand:
+      shopifyProduct.vendor,
+
+    productType:
+      shopifyProduct.productType,
+
+    unitSize:
+      shopifyFoodData.unitSize ??
+      extractProductSize(
+        shopifyProduct.title
+      ),
+
+    country:
+      shopifyFoodData.country,
+
+    flavor:
+      shopifyFoodData.flavor,
+
+    ingredients:
+      shopifyFoodData.ingredients,
+
+    allergens:
+      shopifyFoodData.allergens,
+
+    traces:
+      shopifyFoodData.traces,
+
+    nutritionPer100:
+      shopifyFoodData.nutritionPer100,
+
+    sellingPrice:
+      variant.price,
+
+    commerce: {
+      sellingPrice:
+        variant.price,
+    },
+
+    shopify: {
+      productId:
+        shopifyProduct.id,
+
+      variantId:
+        variant.id,
+
+      inventoryItemId:
+        variant.inventoryItemId,
+
+      handle:
+        shopifyProduct.handle,
+
+      status:
+        shopifyProduct.status,
+
+      imageUrl:
+        shopifyProduct.imageUrl,
+
+      originalTitle:
+        shopifyProduct.title,
+    },
+
+    warnings: barcode
+      ? []
+      : ["BARCODE_MISSING"],
+  };
+}
+
+
 async function importShopifyCatalogProductFromSnapshot(
   shopifyProduct: ShopifyCatalogProduct,
   productMaster: ProductMasterRow[]
@@ -757,6 +1076,11 @@ async function importShopifyCatalogProductFromSnapshot(
     }
   }
 
+  const shopifyFoodData =
+    buildShopifyFoodData(
+      shopifyProduct
+    );
+
   const productData = {
     title: normalizedTitle,
     barcode,
@@ -764,7 +1088,9 @@ async function importShopifyCatalogProductFromSnapshot(
     brand: shopifyProduct.vendor,
     productType:
       shopifyProduct.productType,
+    ...shopifyFoodData,
     unitSize:
+      shopifyFoodData.unitSize ??
       extractProductSize(
         shopifyProduct.title
       ),
@@ -1181,10 +1507,68 @@ export async function importShopifyProductToProductMaster(
   }
 
   if (existingLinks.length === 1) {
+    const existing =
+      existingLinks[0];
+
+    if (
+      shopifyProduct.variantsTruncated ||
+      shopifyProduct.variants.length !== 1
+    ) {
+      throw new Error(
+        "Verknüpftes Shopify-Produkt hat mehrere Varianten und benötigt manuelle Prüfung."
+      );
+    }
+
+    const variant =
+      shopifyProduct.variants[0];
+
+    const shopifyData =
+      buildShopifyProductData(
+        shopifyProduct,
+        variant
+      );
+
+    const result = await db.query(
+      `
+        UPDATE products
+        SET
+          shopify_status = $2,
+          shopify_variant_id = $3,
+          shopify_inventory_item_id = $4,
+          product_data =
+            COALESCE(product_data, '{}'::jsonb)
+            || $5::jsonb,
+          updated_at = NOW()
+        WHERE id = $1
+        RETURNING
+          id,
+          barcode,
+          title,
+          product_data,
+          source_type,
+          review_status,
+          shopify_status,
+          shopify_product_id,
+          shopify_variant_id,
+          shopify_inventory_item_id,
+          updated_at
+      `,
+      [
+        existing.id,
+        shopifyProduct.status ??
+          existing.shopify_status ??
+          "LINKED",
+        variant.id,
+        variant.inventoryItemId,
+        JSON.stringify(shopifyData),
+      ]
+    );
+
     return {
       imported: false,
       alreadyLinked: true,
-      productMaster: existingLinks[0],
+      refreshed: true,
+      productMaster: result.rows[0],
       shopifyProduct,
     };
   }
@@ -1403,6 +1787,11 @@ export async function importShopifyProductToProductMaster(
     }
   }
 
+  const shopifyFoodData =
+    buildShopifyFoodData(
+      shopifyProduct
+    );
+
   const productData = {
     title: normalizedTitle,
     barcode,
@@ -1410,7 +1799,9 @@ export async function importShopifyProductToProductMaster(
     brand: shopifyProduct.vendor,
     productType:
       shopifyProduct.productType,
+    ...shopifyFoodData,
     unitSize:
+      shopifyFoodData.unitSize ??
       extractProductSize(
         shopifyProduct.title
       ),
