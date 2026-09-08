@@ -833,12 +833,81 @@ router.put(
         }
       }
 
-      const mergedData = {
-        ...(existing.product_data ?? {}),
-        ...draft,
-        barcode,
-        title,
-      };
+      function mergeProductDataSafely(
+        current: any,
+        incoming: any
+      ): any {
+        if (
+          incoming === undefined ||
+          incoming === null
+        ) {
+          return current;
+        }
+
+        if (
+          typeof incoming === "string" &&
+          !incoming.trim()
+        ) {
+          return current;
+        }
+
+        if (Array.isArray(incoming)) {
+          return incoming.length
+            ? incoming
+            : current;
+        }
+
+        if (
+          typeof incoming === "object" &&
+          !Array.isArray(incoming)
+        ) {
+          const base =
+            current &&
+            typeof current === "object" &&
+            !Array.isArray(current)
+              ? current
+              : {};
+
+          const result: any = {
+            ...base,
+          };
+
+          for (
+            const [key, value]
+            of Object.entries(incoming)
+          ) {
+            result[key] =
+              mergeProductDataSafely(
+                base[key],
+                value
+              );
+          }
+
+          return result;
+        }
+
+        return incoming;
+      }
+
+      const safeBarcode =
+        barcode ||
+        normalizeBarcode(
+          existing.barcode
+        ) ||
+        null;
+
+      const mergedData =
+        mergeProductDataSafely(
+          existing.product_data ?? {},
+          draft ?? {}
+        );
+
+      mergedData.barcode =
+        safeBarcode;
+
+      mergedData.title =
+        title ||
+        existing.title;
 
       const reviewedBy =
         String(
@@ -874,8 +943,8 @@ router.put(
           `,
           [
             productId,
-            barcode,
-            title,
+            safeBarcode,
+            title || existing.title,
             JSON.stringify(mergedData),
             reviewedBy,
           ]

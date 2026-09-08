@@ -1029,11 +1029,70 @@ async function importShopifyCatalogProductFromSnapshot(
   }
 
   if (existingLinks.length === 1) {
+    const existing =
+      existingLinks[0];
+
+    if (
+      shopifyProduct.variantsTruncated ||
+      shopifyProduct.variants.length !== 1
+    ) {
+      throw new Error(
+        "Verknüpftes Shopify-Produkt hat mehrere Varianten und benötigt manuelle Prüfung."
+      );
+    }
+
+    const variant =
+      shopifyProduct.variants[0];
+
+    const shopifyData =
+      mergeShopifyProductData(
+        existing.product_data,
+        shopifyProduct,
+        variant
+      );
+
+    const result =
+      await db.query(
+        `
+          UPDATE products
+          SET
+            shopify_status = $2,
+            shopify_variant_id = $3,
+            shopify_inventory_item_id = $4,
+            product_data = $5::jsonb,
+            updated_at = NOW()
+          WHERE id = $1
+          RETURNING
+            id,
+            barcode,
+            title,
+            product_data,
+            source_type,
+            review_status,
+            shopify_status,
+            shopify_product_id,
+            shopify_variant_id,
+            shopify_inventory_item_id,
+            updated_at
+        `,
+        [
+          existing.id,
+          shopifyProduct.status ??
+            existing.shopify_status ??
+            "LINKED",
+          variant.id,
+          variant.inventoryItemId,
+          JSON.stringify(shopifyData),
+        ]
+      );
+
     return {
       imported: false,
       alreadyLinked: true,
-      linkedExisting: false,
-      productMaster: existingLinks[0],
+      linkedExisting: true,
+      refreshedExisting: true,
+      productMaster:
+        result.rows[0],
       shopifyProduct,
     };
   }
@@ -1084,55 +1143,49 @@ async function importShopifyCatalogProductFromSnapshot(
         );
       }
 
-      const result = await db.query(
-        `
-          UPDATE products
-          SET
-            shopify_status = $2,
-            shopify_product_id = $3,
-            shopify_variant_id = $4,
-            shopify_inventory_item_id = $5,
-            product_data =
-              COALESCE(product_data, '{}'::jsonb)
-              || jsonb_build_object(
-                'shopify',
-                jsonb_build_object(
-                  'productId', $3::text,
-                  'variantId', $4::text,
-                  'inventoryItemId', $5::text,
-                  'handle', $6::text,
-                  'status', $2::text,
-                  'imageUrl', $7::text,
-                  'originalTitle', $8::text
-                )
-              ),
-            updated_at = NOW()
-          WHERE id = $1
-          RETURNING
-            id,
-            barcode,
-            title,
-            product_data,
-            source_type,
-            review_status,
-            shopify_status,
-            shopify_product_id,
-            shopify_variant_id,
-            shopify_inventory_item_id,
-            updated_at
-        `,
-        [
-          existing.id,
-          shopifyProduct.status ??
-            "LINKED",
-          shopifyProduct.id,
-          variant.id,
-          variant.inventoryItemId,
-          shopifyProduct.handle,
-          shopifyProduct.imageUrl,
-          shopifyProduct.title,
-        ]
-      );
+      const shopifyData =
+        mergeShopifyProductData(
+          existing.product_data,
+          shopifyProduct,
+          variant
+        );
+
+      const result =
+        await db.query(
+          `
+            UPDATE products
+            SET
+              shopify_status = $2,
+              shopify_product_id = $3,
+              shopify_variant_id = $4,
+              shopify_inventory_item_id = $5,
+              product_data = $6::jsonb,
+              updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+              id,
+              barcode,
+              title,
+              product_data,
+              source_type,
+              review_status,
+              shopify_status,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id,
+              updated_at
+          `,
+          [
+            existing.id,
+            shopifyProduct.status ??
+              existing.shopify_status ??
+              "LINKED",
+            shopifyProduct.id,
+            variant.id,
+            variant.inventoryItemId,
+            JSON.stringify(shopifyData),
+          ]
+        );
 
       const updated =
         result.rows[0] as ProductMasterRow;
@@ -1190,55 +1243,49 @@ async function importShopifyCatalogProductFromSnapshot(
         );
       }
 
-      const result = await db.query(
-        `
-          UPDATE products
-          SET
-            shopify_status = $2,
-            shopify_product_id = $3,
-            shopify_variant_id = $4,
-            shopify_inventory_item_id = $5,
-            product_data =
-              COALESCE(product_data, '{}'::jsonb)
-              || jsonb_build_object(
-                'shopify',
-                jsonb_build_object(
-                  'productId', $3::text,
-                  'variantId', $4::text,
-                  'inventoryItemId', $5::text,
-                  'handle', $6::text,
-                  'status', $2::text,
-                  'imageUrl', $7::text,
-                  'originalTitle', $8::text
-                )
-              ),
-            updated_at = NOW()
-          WHERE id = $1
-          RETURNING
-            id,
-            barcode,
-            title,
-            product_data,
-            source_type,
-            review_status,
-            shopify_status,
-            shopify_product_id,
-            shopify_variant_id,
-            shopify_inventory_item_id,
-            updated_at
-        `,
-        [
-          existing.id,
-          shopifyProduct.status ??
-            "LINKED",
-          shopifyProduct.id,
-          variant.id,
-          variant.inventoryItemId,
-          shopifyProduct.handle,
-          shopifyProduct.imageUrl,
-          shopifyProduct.title,
-        ]
-      );
+      const shopifyData =
+        mergeShopifyProductData(
+          existing.product_data,
+          shopifyProduct,
+          variant
+        );
+
+      const result =
+        await db.query(
+          `
+            UPDATE products
+            SET
+              shopify_status = $2,
+              shopify_product_id = $3,
+              shopify_variant_id = $4,
+              shopify_inventory_item_id = $5,
+              product_data = $6::jsonb,
+              updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+              id,
+              barcode,
+              title,
+              product_data,
+              source_type,
+              review_status,
+              shopify_status,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id,
+              updated_at
+          `,
+          [
+            existing.id,
+            shopifyProduct.status ??
+              existing.shopify_status ??
+              "LINKED",
+            shopifyProduct.id,
+            variant.id,
+            variant.inventoryItemId,
+            JSON.stringify(shopifyData),
+          ]
+        );
 
       const updated =
         result.rows[0] as ProductMasterRow;
@@ -1254,54 +1301,27 @@ async function importShopifyCatalogProductFromSnapshot(
     }
   }
 
-  const shopifyFoodData =
-    buildShopifyFoodData(
-      shopifyProduct
+  const productData =
+    buildShopifyProductData(
+      shopifyProduct,
+      variant
     );
 
-  const productData = {
-    title: normalizedTitle,
-    barcode,
-    vendor: shopifyProduct.vendor,
-    brand: null,
-    productType:
-      shopifyProduct.productType,
-    ...shopifyFoodData,
-    unitSize:
-      shopifyFoodData.unitSize ??
-      extractProductSize(
-        shopifyProduct.title
-      ),
-    sellingPrice:
-      variant.price,
-    commerce: {
-      sellingPrice:
-        variant.price,
-    },
-    shopify: {
-      productId:
-        shopifyProduct.id,
-      variantId:
-        variant.id,
-      inventoryItemId:
-        variant.inventoryItemId,
-      handle:
-        shopifyProduct.handle,
-      status:
-        shopifyProduct.status,
-      imageUrl:
-        shopifyProduct.imageUrl,
-      originalTitle:
-        shopifyProduct.title,
-    },
-    warnings: barcode
-      ? []
-      : ["BARCODE_MISSING"],
-  };
+  productData.title =
+    normalizedTitle;
 
-  const reviewStatus = barcode
-    ? "REVIEWED"
-    : "NEEDS_REVIEW";
+  productData.barcode =
+    barcode;
+
+  productData.warnings =
+    barcode
+      ? []
+      : ["BARCODE_MISSING"];
+
+  const reviewStatus =
+    barcode
+      ? "REVIEWED"
+      : "NEEDS_REVIEW";
 
   const result = await db.query(
     `
