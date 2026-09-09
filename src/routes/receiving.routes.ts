@@ -673,18 +673,79 @@ router.post(
                 input.unitSize ?? null,
             });
 
-          if (
-            conflict.status === "MATCH"
-          ) {
+          const normalizedBarcode =
+            String(barcode ?? "").trim();
+
+          const exactBarcodeConflict =
+            normalizedBarcode
+              ? conflict.status === "MATCH"
+                ? String(
+                    conflict.product?.barcode ??
+                      ""
+                  ).trim() ===
+                  normalizedBarcode
+                : conflict.status ===
+                    "AMBIGUOUS"
+                  ? conflict.matches.some(
+                      (match) =>
+                        String(
+                          match.product
+                            ?.barcode ?? ""
+                        ).trim() ===
+                        normalizedBarcode
+                    )
+                  : false
+              : false;
+
+          if (exactBarcodeConflict) {
+            const matches =
+              conflict.status === "MATCH"
+                ? [
+                    {
+                      productMasterId:
+                        String(
+                          conflict.product.id
+                        ),
+                      title:
+                        conflict.product.title,
+                      confidence:
+                        conflict.confidence,
+                    },
+                  ]
+                : conflict.status ===
+                    "AMBIGUOUS"
+                  ? conflict.matches
+                      .filter(
+                        (match) =>
+                          String(
+                            match.product
+                              ?.barcode ?? ""
+                          ).trim() ===
+                          normalizedBarcode
+                      )
+                      .map((match) => ({
+                        productMasterId:
+                          String(
+                            match.product.id
+                          ),
+                        title:
+                          match.product.title,
+                        confidence:
+                          match.confidence,
+                      }))
+                  : [];
+
             previewLines.push({
               position: index + 1,
               classification: "REVIEW",
               reason:
-                "MANUAL_NEW_EXISTING_CONFLICT",
+                "MANUAL_NEW_EXACT_BARCODE_CONFLICT",
               product: productName,
-              barcode: barcode || null,
+              barcode:
+                barcode || null,
               quantity,
-              cases: input.cases ?? null,
+              cases:
+                input.cases ?? null,
               unitsPerCase:
                 input.unitsPerCase ?? null,
               unitSize:
@@ -698,62 +759,7 @@ router.post(
               batch:
                 input.batch ?? null,
               productMasterId: null,
-              matches: [
-                {
-                  productMasterId:
-                    String(
-                      conflict.product.id
-                    ),
-                  title:
-                    conflict.product.title,
-                  confidence:
-                    conflict.confidence,
-                },
-              ],
-            });
-
-            continue;
-          }
-
-          if (
-            conflict.status ===
-            "AMBIGUOUS"
-          ) {
-            previewLines.push({
-              position: index + 1,
-              classification: "REVIEW",
-              reason:
-                "MANUAL_NEW_AMBIGUOUS_CONFLICT",
-              product: productName,
-              barcode: barcode || null,
-              quantity,
-              cases: input.cases ?? null,
-              unitsPerCase:
-                input.unitsPerCase ?? null,
-              unitSize:
-                input.unitSize ?? null,
-              purchasePrice:
-                input.purchasePrice ?? null,
-              totalPrice:
-                input.totalPrice ?? null,
-              expiry:
-                input.expiry ?? null,
-              batch:
-                input.batch ?? null,
-              productMasterId: null,
-              matches:
-                conflict.matches.map(
-                  (match) => ({
-                    productMasterId:
-                      String(
-                        match.product.id
-                      ),
-                    title:
-                      match.product.title,
-                    confidence:
-                      match.confidence,
-                  })
-                ),
+              matches,
             });
 
             continue;
@@ -764,9 +770,11 @@ router.post(
             classification: "NEW",
             reason: "MANUAL_NEW",
             product: productName,
-            barcode: barcode || null,
+            barcode:
+              barcode || null,
             quantity,
-            cases: input.cases ?? null,
+            cases:
+              input.cases ?? null,
             unitsPerCase:
               input.unitsPerCase ?? null,
             unitSize:
@@ -1400,14 +1408,35 @@ router.post(
                 client
               );
 
-        if (
-          manualNew &&
-          productMasterResolution?.status !==
-            "NO_MATCH"
-        ) {
-          throw new ReceivingValidationError(
-            `${productName}: kann nicht als neues Produkt angelegt werden, weil bereits ein möglicher Product Master existiert. Bitte bestehenden Artikel zuordnen.`
-          );
+        if (manualNew && barcode) {
+          const normalizedBarcode =
+            String(barcode).trim();
+
+          const exactBarcodeConflict =
+            productMasterResolution?.status ===
+            "MATCH"
+              ? String(
+                  productMasterResolution
+                    .product?.barcode ?? ""
+                ).trim() ===
+                normalizedBarcode
+              : productMasterResolution
+                    ?.status === "AMBIGUOUS"
+                ? productMasterResolution.matches.some(
+                    (match) =>
+                      String(
+                        match.product
+                          ?.barcode ?? ""
+                      ).trim() ===
+                      normalizedBarcode
+                  )
+                : false;
+
+          if (exactBarcodeConflict) {
+            throw new ReceivingValidationError(
+              `${productName}: dieser Barcode ist bereits einem Product Master zugeordnet. Bitte bestehenden Artikel verwenden.`
+            );
+          }
         }
 
         if (
