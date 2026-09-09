@@ -48,11 +48,13 @@ const GENERIC_WORDS = new Set([
   "stk",
   "stuck",
   "stück",
+  "controller",
 ]);
 
 const TOKEN_ALIASES: Record<string, string> = {
   salz: "salt",
   salted: "salt",
+  chili: "chilli",
 };
 
 function normalizeSupplier(
@@ -86,6 +88,43 @@ function titleTokens(
             !GENERIC_WORDS.has(token)
         )
     )
+  );
+}
+
+function isSafeTitleContainment(
+  source: unknown,
+  candidate: unknown
+): boolean {
+  const sourceTokens = titleTokens(source);
+  const candidateTokens =
+    titleTokens(candidate);
+
+  if (
+    sourceTokens.length === 0 ||
+    candidateTokens.length === 0
+  ) {
+    return false;
+  }
+
+  const sourceSet =
+    new Set(sourceTokens);
+
+  const candidateSet =
+    new Set(candidateTokens);
+
+  const allSourceTokensPresent =
+    sourceTokens.every((token) =>
+      candidateSet.has(token)
+    );
+
+  const meaningfulCandidateExtras =
+    candidateTokens.filter(
+      (token) => !sourceSet.has(token)
+    );
+
+  return (
+    allSourceTokensPresent &&
+    meaningfulCandidateExtras.length === 0
   );
 }
 
@@ -381,8 +420,15 @@ export async function resolveReceivingProductMaster(
    * -> XBOX SALT CONTROLLER ... 90G
    * soll hier durchkommen.
    */
+  const safeTitleMatch =
+    isSafeTitleContainment(
+      sourceTitle,
+      candidateTitle(best.product)
+    );
+
   if (
     best.confidence >= 0.82 &&
+    safeTitleMatch &&
     (
       !second ||
       best.confidence -
