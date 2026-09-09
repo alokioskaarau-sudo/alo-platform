@@ -447,6 +447,32 @@ async function ensureReceivingSchema() {
   `);
 
   await db.query(`
+    CREATE TABLE IF NOT EXISTS receiving_drafts (
+      id BIGSERIAL PRIMARY KEY,
+      employee_name TEXT,
+      supplier TEXT,
+      delivery_note TEXT,
+      document_date DATE,
+      currency TEXT,
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'DRAFT',
+      draft_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      receiving_drafts_status_updated_idx
+    ON receiving_drafts(
+      status,
+      updated_at DESC
+    )
+  `);
+
+
+  await db.query(`
     CREATE TABLE IF NOT EXISTS receiving_lines (
       id BIGSERIAL PRIMARY KEY,
       delivery_id BIGINT NOT NULL
@@ -614,6 +640,398 @@ async function ensureReceivingSchema() {
     )
   `);
 }
+
+
+/*
+ * =========================================================
+ * RECEIVING WORK DRAFTS
+ *
+ * Persistenter Arbeitsstand VOR EXPECTED.
+ *
+ * Dadurch darf ALO STAFF geschlossen / neu geladen werden,
+ * ohne dass eine große Warenannahme verloren geht.
+ * =========================================================
+ */
+
+router.post(
+  "/drafts",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const {
+        employeeName,
+        supplier,
+        deliveryNote,
+        documentDate,
+        currency,
+        note,
+        data,
+      } = req.body ?? {};
+
+      const result = await db.query(
+        `
+          INSERT INTO receiving_drafts (
+            employee_name,
+            supplier,
+            delivery_note,
+            document_date,
+            currency,
+            note,
+            draft_data
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7::jsonb
+          )
+          RETURNING *
+        `,
+        [
+          cleanText(employeeName) || null,
+          cleanText(supplier) || null,
+          cleanText(deliveryNote) || null,
+          documentDate || null,
+          cleanText(currency) || null,
+          cleanText(note) || null,
+          JSON.stringify(
+            data &&
+            typeof data === "object"
+              ? data
+              : {}
+          ),
+        ]
+      );
+
+      const draft = result.rows[0];
+
+      res.json({
+        ok: true,
+        draft: {
+          id: String(draft.id),
+          status: draft.status,
+          employeeName:
+            draft.employee_name,
+          supplier: draft.supplier,
+          deliveryNote:
+            draft.delivery_note,
+          documentDate:
+            draft.document_date,
+          currency: draft.currency,
+          note: draft.note,
+          data: draft.draft_data,
+          createdAt: draft.created_at,
+          updatedAt: draft.updated_at,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING DRAFT CREATE]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme-Draft konnte nicht erstellt werden.",
+      });
+    }
+  }
+);
+
+
+router.get(
+  "/drafts",
+  async (_req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const result = await db.query(
+        `
+          SELECT *
+          FROM receiving_drafts
+          WHERE status = 'DRAFT'
+          ORDER BY updated_at DESC
+          LIMIT 100
+        `
+      );
+
+      res.json({
+        ok: true,
+        count: result.rows.length,
+        drafts: result.rows.map(
+          (draft: any) => ({
+            id: String(draft.id),
+            status: draft.status,
+            employeeName:
+              draft.employee_name,
+            supplier: draft.supplier,
+            deliveryNote:
+              draft.delivery_note,
+            documentDate:
+              draft.document_date,
+            currency: draft.currency,
+            note: draft.note,
+            data: draft.draft_data,
+            createdAt:
+              draft.created_at,
+            updatedAt:
+              draft.updated_at,
+          })
+        ),
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING DRAFT LIST]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme-Drafts konnten nicht geladen werden.",
+      });
+    }
+  }
+);
+
+
+router.get(
+  "/drafts/:draftId",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const draftId =
+        String(
+          req.params.draftId ?? ""
+        ).trim();
+
+      if (!/^\d+$/.test(draftId)) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültige Draft-ID.",
+        });
+        return;
+      }
+
+      const result = await db.query(
+        `
+          SELECT *
+          FROM receiving_drafts
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [draftId]
+      );
+
+      const draft = result.rows[0];
+
+      if (!draft) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Warenannahme-Draft wurde nicht gefunden.",
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        draft: {
+          id: String(draft.id),
+          status: draft.status,
+          employeeName:
+            draft.employee_name,
+          supplier: draft.supplier,
+          deliveryNote:
+            draft.delivery_note,
+          documentDate:
+            draft.document_date,
+          currency: draft.currency,
+          note: draft.note,
+          data: draft.draft_data,
+          createdAt: draft.created_at,
+          updatedAt: draft.updated_at,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING DRAFT GET]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme-Draft konnte nicht geladen werden.",
+      });
+    }
+  }
+);
+
+
+router.patch(
+  "/drafts/:draftId",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const draftId =
+        String(
+          req.params.draftId ?? ""
+        ).trim();
+
+      if (!/^\d+$/.test(draftId)) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültige Draft-ID.",
+        });
+        return;
+      }
+
+      const {
+        employeeName,
+        supplier,
+        deliveryNote,
+        documentDate,
+        currency,
+        note,
+        data,
+      } = req.body ?? {};
+
+      const result = await db.query(
+        `
+          UPDATE receiving_drafts
+          SET
+            employee_name = $2,
+            supplier = $3,
+            delivery_note = $4,
+            document_date = $5,
+            currency = $6,
+            note = $7,
+            draft_data = $8::jsonb,
+            updated_at = NOW()
+          WHERE
+            id = $1
+            AND status = 'DRAFT'
+          RETURNING *
+        `,
+        [
+          draftId,
+          cleanText(employeeName) || null,
+          cleanText(supplier) || null,
+          cleanText(deliveryNote) || null,
+          documentDate || null,
+          cleanText(currency) || null,
+          cleanText(note) || null,
+          JSON.stringify(
+            data &&
+            typeof data === "object"
+              ? data
+              : {}
+          ),
+        ]
+      );
+
+      const draft = result.rows[0];
+
+      if (!draft) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Aktiver Warenannahme-Draft wurde nicht gefunden.",
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        draft: {
+          id: String(draft.id),
+          status: draft.status,
+          updatedAt:
+            draft.updated_at,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING DRAFT UPDATE]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme-Draft konnte nicht gespeichert werden.",
+      });
+    }
+  }
+);
+
+
+router.delete(
+  "/drafts/:draftId",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const draftId =
+        String(
+          req.params.draftId ?? ""
+        ).trim();
+
+      if (!/^\d+$/.test(draftId)) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültige Draft-ID.",
+        });
+        return;
+      }
+
+      const result = await db.query(
+        `
+          UPDATE receiving_drafts
+          SET
+            status = 'CANCELLED',
+            updated_at = NOW()
+          WHERE
+            id = $1
+            AND status = 'DRAFT'
+          RETURNING id
+        `,
+        [draftId]
+      );
+
+      res.json({
+        ok: true,
+        cancelled:
+          result.rowCount === 1,
+        draftId,
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING DRAFT DELETE]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme-Draft konnte nicht gelöscht werden.",
+      });
+    }
+  }
+);
+
 
 
 router.post(
@@ -2079,12 +2497,31 @@ router.get(
 
           WHERE
             a.store_id = $1
-            AND a.status <> 'ACCEPTED'
+            AND (
+              a.status <> 'ACCEPTED'
+              OR (
+                a.store_id = 'online'
+                AND a.status = 'ACCEPTED'
+                AND a.shopify_sync_status IN (
+                  'PENDING',
+                  'FAILED'
+                )
+              )
+            )
 
           ORDER BY
-            CASE a.status
-              WHEN 'ARRIVED' THEN 0
-              ELSE 1
+            CASE
+              WHEN
+                a.status = 'ACCEPTED'
+                AND a.shopify_sync_status = 'FAILED'
+                THEN 0
+              WHEN
+                a.status = 'ACCEPTED'
+                AND a.shopify_sync_status = 'PENDING'
+                THEN 1
+              WHEN a.status = 'ARRIVED'
+                THEN 2
+              ELSE 3
             END,
             d.created_at ASC,
             rl.id ASC
