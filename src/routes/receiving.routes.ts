@@ -434,9 +434,16 @@ async function ensureReceivingSchema() {
       received_by TEXT,
       note TEXT,
       source_type TEXT NOT NULL DEFAULT 'ALO_STAFF',
+      status TEXT NOT NULL DEFAULT 'EXPECTED',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(store_id, supplier, delivery_note)
     )
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_deliveries
+    ADD COLUMN IF NOT EXISTS
+      status TEXT NOT NULL DEFAULT 'EXPECTED'
   `);
 
   await db.query(`
@@ -485,6 +492,13 @@ async function ensureReceivingSchema() {
           ON DELETE CASCADE,
         store_id TEXT NOT NULL,
         quantity INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'EXPECTED',
+        accepted_quantity INTEGER NOT NULL DEFAULT 0,
+        accepted_at TIMESTAMPTZ,
+        accepted_by TEXT,
+        shopify_sync_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED',
+        shopify_sync_error TEXT,
+        shopify_synced_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ
           NOT NULL
           DEFAULT NOW(),
@@ -493,6 +507,48 @@ async function ensureReceivingSchema() {
           store_id
         )
       )
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      status TEXT NOT NULL DEFAULT 'EXPECTED'
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      accepted_quantity INTEGER NOT NULL DEFAULT 0
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      accepted_at TIMESTAMPTZ
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      accepted_by TEXT
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      shopify_sync_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED'
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      shopify_sync_error TEXT
+  `);
+
+  await db.query(`
+    ALTER TABLE receiving_allocations
+    ADD COLUMN IF NOT EXISTS
+      shopify_synced_at TIMESTAMPTZ
   `);
 
   await db.query(`
@@ -1712,6 +1768,7 @@ router.post(
           quantity: number;
           previousQuantity: number;
           newQuantity: number;
+          status: "EXPECTED";
         }> = [];
 
         const allocationEntries =
@@ -1752,175 +1809,13 @@ router.post(
             ]
           );
 
-          await client.query(
-            `
-              INSERT INTO stock_movements (
-                product_id,
-                store_id,
-                movement_type,
-                quantity_delta,
-                reference_type,
-                reference_id,
-                note,
-                created_by
-              )
-              VALUES (
-                $1,
-                $2,
-                'RECEIVING',
-                $3,
-                'DELIVERY',
-                $4,
-                $5,
-                $6
-              )
-            `,
-            [
-              product.id,
-              allocationStore,
-              allocationQuantity,
-              String(delivery.id),
-              `Warenannahme · ${cleanText(
-                supplier
-              )} · LS ${cleanText(
-                deliveryNote
-              )}`,
-              cleanText(receivedBy) ||
-                "ALO STAFF",
-            ]
-          );
-
-          await client.query(
-            `
-              INSERT INTO
-                product_stock_snapshots (
-                  product_id,
-                  store_id,
-                  exact_quantity,
-                  stock_level,
-                  note,
-                  updated_by,
-                  updated_at
-                )
-              VALUES (
-                $1,
-                $2,
-                0,
-                'empty',
-                $3,
-                $4,
-                NOW()
-              )
-              ON CONFLICT (
-                product_id,
-                store_id
-              )
-              DO NOTHING
-            `,
-            [
-              product.id,
-              allocationStore,
-              `LS ${cleanText(
-                deliveryNote
-              )}`,
-              cleanText(receivedBy) ||
-                "ALO STAFF",
-            ]
-          );
-
-          const lockedStock =
-            await client.query(
-              `
-                SELECT exact_quantity
-                FROM product_stock_snapshots
-                WHERE
-                  product_id = $1
-                  AND store_id = $2
-                FOR UPDATE
-              `,
-              [
-                product.id,
-                allocationStore,
-              ]
-            );
-
-          const previousQuantity =
-            Number(
-              lockedStock.rows[0]
-                ?.exact_quantity ?? 0
-            );
-
-          const nextQuantity =
-            previousQuantity +
-            allocationQuantity;
-
-          await client.query(
-            `
-              UPDATE product_stock_snapshots
-              SET
-                exact_quantity = $3,
-                stock_level = $4,
-                note = $5,
-                updated_by = $6,
-                updated_at = NOW()
-              WHERE
-                product_id = $1
-                AND store_id = $2
-            `,
-            [
-              product.id,
-              allocationStore,
-              nextQuantity,
-              stockLevelForQuantity(
-                nextQuantity
-              ),
-              `LS ${cleanText(
-                deliveryNote
-              )}`,
-              cleanText(receivedBy) ||
-                "ALO STAFF",
-            ]
-          );
-
-          if (
-            input.expiry ||
-            cleanText(input.batch)
-          ) {
-            await client.query(
-              `
-                INSERT INTO product_batches (
-                  product_id,
-                  store_id,
-                  quantity,
-                  expiry,
-                  batch,
-                  receiving_line_id
-                )
-                VALUES (
-                  $1, $2, $3, $4, $5, $6
-                )
-              `,
-              [
-                product.id,
-                allocationStore,
-                allocationQuantity,
-                input.expiry || null,
-                cleanText(input.batch) ||
-                  null,
-                receivingLineId,
-              ]
-            );
-          }
-
           stockResults.push({
             store: allocationStore,
-            quantity:
-              allocationQuantity,
-            previousQuantity,
-            newQuantity:
-              nextQuantity,
-          });
-        }
+            quantity: allocationQuantity,
+            previousQuantity: 0,
+            newQuantity: 0,
+            status: "EXPECTED",
+          });        }
 
         results.push({
           lineId:
@@ -1932,6 +1827,7 @@ router.post(
           quantity,
           allocations,
           stock: stockResults,
+          receivingStatus: "EXPECTED",
           unitPurchaseCost:
             unitCost,
           createdProduct,
@@ -2018,75 +1914,10 @@ router.post(
           };
         }
 
-        const onlineStock =
-          Array.isArray(line.stock)
-            ? line.stock.find(
-                (entry: any) =>
-                  entry.store === "online"
-              )
-            : null;
-
-        if (!onlineStock) {
-          line.shopifyInventorySync = {
-            status: "NOT_REQUESTED",
-          };
-          continue;
-        }
-
-        if (
-          !line.shopifyInventoryItemId
-        ) {
-          line.shopifyInventorySync = {
-            status: "SKIPPED",
-            reason:
-              "NO_SHOPIFY_INVENTORY_ITEM",
-          };
-          continue;
-        }
-
-        try {
-          const sync =
-            await setShopifyOnlineInventory({
-              inventoryItemId:
-                line.shopifyInventoryItemId,
-              quantity:
-                onlineStock.newQuantity,
-              reference:
-                `${delivery.id}-${line.lineId}`,
-            });
-
-          line.shopifyInventorySync = {
-            status: "SYNCED",
-            locationId:
-              sync.locationId,
-            quantity:
-              sync.quantity,
-          };
-        } catch (syncError) {
-          console.error(
-            "[ALO RECEIVING SHOPIFY INVENTORY]",
-            {
-              deliveryId:
-                String(delivery.id),
-              lineId:
-                line.lineId,
-              productId:
-                line.productId,
-              error:
-                syncError instanceof Error
-                  ? syncError.message
-                  : syncError,
-            }
-          );
-
-          line.shopifyInventorySync = {
-            status: "FAILED",
-            error:
-              syncError instanceof Error
-                ? syncError.message
-                : "Shopify-Bestand konnte nicht synchronisiert werden.",
-          };
-        }
+        line.shopifyInventorySync = {
+          status: "NOT_REQUESTED",
+          reason: "WAITING_FOR_ACCEPTANCE",
+        };
       }
 
       res.json({
@@ -2171,5 +2002,1460 @@ router.post(
     }
   }
 );
+
+
+/* =========================================================
+   STAGED RECEIVING V3
+   EXPECTED -> ARRIVED -> ACCEPTED
+========================================================= */
+
+router.get(
+  "/pending",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const store =
+        cleanText(req.query.store);
+
+      if (
+        !store ||
+        !["aarau", "olten", "online"].includes(
+          store
+        )
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Gültiger Standort erforderlich: aarau, olten oder online.",
+        });
+        return;
+      }
+
+      const result = await db.query(
+        `
+          SELECT
+            a.id AS allocation_id,
+            a.store_id,
+            a.quantity,
+            a.status,
+            a.accepted_quantity,
+            a.accepted_at,
+            a.accepted_by,
+            a.shopify_sync_status,
+            a.shopify_sync_error,
+
+            rl.id AS line_id,
+            rl.product_id,
+            rl.product_name,
+            rl.barcode,
+            rl.article_number,
+            rl.unit_size,
+            rl.expiry,
+            rl.batch,
+
+            d.id AS delivery_id,
+            d.supplier,
+            d.delivery_note,
+            d.document_date,
+            d.status AS delivery_status,
+            d.created_at,
+
+            p.shopify_inventory_item_id
+
+          FROM receiving_allocations a
+
+          JOIN receiving_lines rl
+            ON rl.id =
+              a.receiving_line_id
+
+          JOIN receiving_deliveries d
+            ON d.id =
+              rl.delivery_id
+
+          LEFT JOIN products p
+            ON p.id =
+              rl.product_id
+
+          WHERE
+            a.store_id = $1
+            AND a.status <> 'ACCEPTED'
+
+          ORDER BY
+            CASE a.status
+              WHEN 'ARRIVED' THEN 0
+              ELSE 1
+            END,
+            d.created_at ASC,
+            rl.id ASC
+        `,
+        [store]
+      );
+
+      res.json({
+        ok: true,
+        store,
+        count:
+          result.rows.length,
+        allocations:
+          result.rows.map(
+            (row: any) => ({
+              allocationId:
+                String(
+                  row.allocation_id
+                ),
+              deliveryId:
+                String(
+                  row.delivery_id
+                ),
+              lineId:
+                String(row.line_id),
+
+              store:
+                row.store_id,
+              status:
+                row.status,
+
+              quantity:
+                Number(row.quantity),
+              acceptedQuantity:
+                Number(
+                  row.accepted_quantity ??
+                    0
+                ),
+
+              supplier:
+                row.supplier,
+              deliveryNote:
+                row.delivery_note,
+              documentDate:
+                row.document_date,
+
+              productId:
+                row.product_id
+                  ? String(
+                      row.product_id
+                    )
+                  : null,
+
+              product:
+                row.product_name,
+              barcode:
+                row.barcode,
+              articleNumber:
+                row.article_number,
+              unitSize:
+                row.unit_size,
+              expiry:
+                row.expiry,
+              batch:
+                row.batch,
+
+              acceptedAt:
+                row.accepted_at,
+              acceptedBy:
+                row.accepted_by,
+
+              shopifyInventorySync: {
+                status:
+                  row.shopify_sync_status,
+                error:
+                  row.shopify_sync_error,
+              },
+            })
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING PENDING]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Offene Warenannahmen konnten nicht geladen werden.",
+      });
+    }
+  }
+);
+
+
+router.post(
+  "/allocations/:allocationId/arrive",
+  async (req, res) => {
+    const client =
+      await db.connect();
+
+    try {
+      await ensureReceivingSchema();
+
+      const allocationId =
+        String(
+          req.params.allocationId ??
+            ""
+        ).trim();
+
+      if (
+        !/^\d+$/.test(
+          allocationId
+        )
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Ungültige Warenannahme-ID.",
+        });
+        return;
+      }
+
+      await client.query(
+        "BEGIN"
+      );
+
+      const locked =
+        await client.query(
+          `
+            SELECT
+              a.id,
+              a.status,
+              a.quantity,
+              a.store_id,
+              rl.delivery_id
+            FROM receiving_allocations a
+
+            JOIN receiving_lines rl
+              ON rl.id =
+                a.receiving_line_id
+
+            WHERE a.id = $1
+
+            FOR UPDATE OF a
+          `,
+          [allocationId]
+        );
+
+      if (
+        locked.rows.length === 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        res.status(404).json({
+          ok: false,
+          error:
+            "Warenannahme nicht gefunden.",
+        });
+        return;
+      }
+
+      const allocation =
+        locked.rows[0];
+
+      if (
+        allocation.status ===
+        "ACCEPTED"
+      ) {
+        await client.query(
+          "COMMIT"
+        );
+
+        res.json({
+          ok: true,
+          allocationId,
+          status: "ACCEPTED",
+          alreadyAccepted: true,
+        });
+        return;
+      }
+
+      await client.query(
+        `
+          UPDATE receiving_allocations
+          SET status = 'ARRIVED'
+          WHERE id = $1
+        `,
+        [allocationId]
+      );
+
+      await client.query(
+        `
+          UPDATE receiving_deliveries
+          SET status = 'ARRIVED'
+          WHERE
+            id = $1
+            AND status = 'EXPECTED'
+        `,
+        [
+          allocation.delivery_id,
+        ]
+      );
+
+      await client.query(
+        "COMMIT"
+      );
+
+      res.json({
+        ok: true,
+        allocationId,
+        store:
+          allocation.store_id,
+        quantity:
+          Number(
+            allocation.quantity
+          ),
+        status: "ARRIVED",
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "[ALO RECEIVING ARRIVE]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Ware konnte nicht als eingetroffen markiert werden.",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+
+router.post(
+  "/allocations/:allocationId/accept",
+  async (req, res) => {
+    const client =
+      await db.connect();
+
+    let onlineSync:
+      | {
+          allocationId: string;
+          inventoryItemId: string;
+          quantity: number;
+          reference: string;
+        }
+      | null = null;
+
+    let responseData: any =
+      null;
+
+    try {
+      await ensureReceivingSchema();
+
+      const allocationId =
+        String(
+          req.params.allocationId ??
+            ""
+        ).trim();
+
+      const acceptedBy =
+        cleanText(
+          req.body?.acceptedBy
+        ) || "ALO STAFF";
+
+      if (
+        !/^\d+$/.test(
+          allocationId
+        )
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Ungültige Warenannahme-ID.",
+        });
+        return;
+      }
+
+      await client.query(
+        "BEGIN"
+      );
+
+      const locked =
+        await client.query(
+          `
+            SELECT
+              a.id,
+              a.store_id,
+              a.quantity,
+              a.status,
+              a.accepted_quantity,
+
+              rl.id AS line_id,
+              rl.delivery_id,
+              rl.product_id,
+              rl.product_name,
+              rl.expiry,
+              rl.batch,
+
+              d.supplier,
+              d.delivery_note,
+
+              p.shopify_inventory_item_id
+
+            FROM receiving_allocations a
+
+            JOIN receiving_lines rl
+              ON rl.id =
+                a.receiving_line_id
+
+            JOIN receiving_deliveries d
+              ON d.id =
+                rl.delivery_id
+
+            JOIN products p
+              ON p.id =
+                rl.product_id
+
+            WHERE a.id = $1
+
+            FOR UPDATE OF a
+          `,
+          [allocationId]
+        );
+
+      if (
+        locked.rows.length === 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        res.status(404).json({
+          ok: false,
+          error:
+            "Warenannahme nicht gefunden.",
+        });
+        return;
+      }
+
+      const row =
+        locked.rows[0];
+
+      if (
+        row.status ===
+        "ACCEPTED"
+      ) {
+        await client.query(
+          "COMMIT"
+        );
+
+        res.json({
+          ok: true,
+          allocationId,
+          status: "ACCEPTED",
+          alreadyAccepted: true,
+          quantity:
+            Number(
+              row.accepted_quantity ??
+                row.quantity
+            ),
+        });
+        return;
+      }
+
+      const quantity =
+        Number(row.quantity);
+
+      if (
+        !Number.isInteger(
+          quantity
+        ) ||
+        quantity <= 0
+      ) {
+        throw new Error(
+          "Ungültige Annahmemenge."
+        );
+      }
+
+      /* -----------------------------------------
+         Stock Snapshot sicher anlegen
+      ----------------------------------------- */
+
+      await client.query(
+        `
+          INSERT INTO
+            product_stock_snapshots (
+              product_id,
+              store_id,
+              exact_quantity,
+              stock_level,
+              note,
+              updated_by,
+              updated_at
+            )
+
+          VALUES (
+            $1,
+            $2,
+            0,
+            'empty',
+            $3,
+            $4,
+            NOW()
+          )
+
+          ON CONFLICT (
+            product_id,
+            store_id
+          )
+
+          DO NOTHING
+        `,
+        [
+          row.product_id,
+          row.store_id,
+          `LS ${row.delivery_note}`,
+          acceptedBy,
+        ]
+      );
+
+      const lockedStock =
+        await client.query(
+          `
+            SELECT
+              exact_quantity
+            FROM
+              product_stock_snapshots
+
+            WHERE
+              product_id = $1
+              AND store_id = $2
+
+            FOR UPDATE
+          `,
+          [
+            row.product_id,
+            row.store_id,
+          ]
+        );
+
+      const previousQuantity =
+        Number(
+          lockedStock.rows[0]
+            ?.exact_quantity ?? 0
+        );
+
+      const newQuantity =
+        previousQuantity +
+        quantity;
+
+      /* -----------------------------------------
+         Audit Movement
+      ----------------------------------------- */
+
+      await client.query(
+        `
+          INSERT INTO stock_movements (
+            product_id,
+            store_id,
+            movement_type,
+            quantity_delta,
+            reference_type,
+            reference_id,
+            note,
+            created_by
+          )
+
+          VALUES (
+            $1,
+            $2,
+            'RECEIVING',
+            $3,
+            'RECEIVING_ALLOCATION',
+            $4,
+            $5,
+            $6
+          )
+        `,
+        [
+          row.product_id,
+          row.store_id,
+          quantity,
+          allocationId,
+          `Warenannahme · ${row.supplier} · LS ${row.delivery_note}`,
+          acceptedBy,
+        ]
+      );
+
+      /* -----------------------------------------
+         Bestand aktualisieren
+      ----------------------------------------- */
+
+      await client.query(
+        `
+          UPDATE
+            product_stock_snapshots
+
+          SET
+            exact_quantity = $3,
+            stock_level = $4,
+            note = $5,
+            updated_by = $6,
+            updated_at = NOW()
+
+          WHERE
+            product_id = $1
+            AND store_id = $2
+        `,
+        [
+          row.product_id,
+          row.store_id,
+          newQuantity,
+          stockLevelForQuantity(
+            newQuantity
+          ),
+          `LS ${row.delivery_note}`,
+          acceptedBy,
+        ]
+      );
+
+      /* -----------------------------------------
+         MHD / Batch erst JETZT
+      ----------------------------------------- */
+
+      if (
+        row.expiry ||
+        cleanText(row.batch)
+      ) {
+        await client.query(
+          `
+            INSERT INTO product_batches (
+              product_id,
+              store_id,
+              quantity,
+              expiry,
+              batch,
+              receiving_line_id
+            )
+
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6
+            )
+          `,
+          [
+            row.product_id,
+            row.store_id,
+            quantity,
+            row.expiry || null,
+            cleanText(row.batch) ||
+              null,
+            row.line_id,
+          ]
+        );
+      }
+
+      /* -----------------------------------------
+         Allocation final übernehmen
+      ----------------------------------------- */
+
+      const shopifyStatus =
+        row.store_id ===
+        "online"
+          ? "PENDING"
+          : "NOT_REQUIRED";
+
+      await client.query(
+        `
+          UPDATE receiving_allocations
+
+          SET
+            status = 'ACCEPTED',
+            accepted_quantity = $2,
+            accepted_at = NOW(),
+            accepted_by = $3,
+            shopify_sync_status = $4,
+            shopify_sync_error = NULL
+
+          WHERE id = $1
+        `,
+        [
+          allocationId,
+          quantity,
+          acceptedBy,
+          shopifyStatus,
+        ]
+      );
+
+      /* -----------------------------------------
+         Delivery Gesamtstatus
+      ----------------------------------------- */
+
+      const remaining =
+        await client.query(
+          `
+            SELECT COUNT(*)::int
+              AS remaining
+
+            FROM receiving_allocations a
+
+            JOIN receiving_lines rl
+              ON rl.id =
+                a.receiving_line_id
+
+            WHERE
+              rl.delivery_id = $1
+              AND a.status <>
+                'ACCEPTED'
+          `,
+          [row.delivery_id]
+        );
+
+      const remainingCount =
+        Number(
+          remaining.rows[0]
+            ?.remaining ?? 0
+        );
+
+      await client.query(
+        `
+          UPDATE receiving_deliveries
+          SET status = $2
+          WHERE id = $1
+        `,
+        [
+          row.delivery_id,
+          remainingCount === 0
+            ? "ACCEPTED"
+            : "ARRIVED",
+        ]
+      );
+
+      responseData = {
+        allocationId,
+        deliveryId:
+          String(
+            row.delivery_id
+          ),
+        lineId:
+          String(row.line_id),
+        productId:
+          String(
+            row.product_id
+          ),
+        product:
+          row.product_name,
+        store:
+          row.store_id,
+        quantity,
+        previousQuantity,
+        newQuantity,
+        status: "ACCEPTED",
+        deliveryStatus:
+          remainingCount === 0
+            ? "ACCEPTED"
+            : "ARRIVED",
+      };
+
+      if (
+        row.store_id ===
+        "online" &&
+        row.shopify_inventory_item_id
+      ) {
+        onlineSync = {
+          allocationId,
+          inventoryItemId:
+            String(
+              row.shopify_inventory_item_id
+            ),
+          quantity:
+            newQuantity,
+          reference:
+            `receiving-${allocationId}`,
+        };
+      }
+
+      await client.query(
+        "COMMIT"
+      );
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "[ALO RECEIVING ACCEPT]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Warenannahme konnte nicht übernommen werden.",
+      });
+
+      return;
+    } finally {
+      client.release();
+    }
+
+    /* -----------------------------------------
+       Shopify erst NACH erfolgreicher
+       interner Warenannahme
+    ----------------------------------------- */
+
+    if (onlineSync) {
+      try {
+        const sync =
+          await setShopifyOnlineInventory({
+            inventoryItemId:
+              onlineSync.inventoryItemId,
+            quantity:
+              onlineSync.quantity,
+            reference:
+              onlineSync.reference,
+          });
+
+        await db.query(
+          `
+            UPDATE receiving_allocations
+            SET
+              shopify_sync_status =
+                'SYNCED',
+              shopify_sync_error =
+                NULL,
+              shopify_synced_at =
+                NOW()
+
+            WHERE id = $1
+          `,
+          [
+            onlineSync.allocationId,
+          ]
+        );
+
+        responseData.shopifyInventorySync = {
+          status: "SYNCED",
+          locationId:
+            sync.locationId,
+          quantity:
+            sync.quantity,
+        };
+      } catch (syncError) {
+        const message =
+          syncError instanceof Error
+            ? syncError.message
+            : "Shopify-Bestand konnte nicht synchronisiert werden.";
+
+        await db.query(
+          `
+            UPDATE receiving_allocations
+            SET
+              shopify_sync_status =
+                'FAILED',
+              shopify_sync_error =
+                $2
+
+            WHERE id = $1
+          `,
+          [
+            onlineSync.allocationId,
+            message,
+          ]
+        );
+
+        responseData.shopifyInventorySync = {
+          status: "FAILED",
+          error: message,
+        };
+      }
+    } else if (
+      responseData?.store ===
+      "online"
+    ) {
+      await db.query(
+        `
+          UPDATE receiving_allocations
+          SET
+            shopify_sync_status =
+              'FAILED',
+            shopify_sync_error =
+              'NO_SHOPIFY_INVENTORY_ITEM'
+
+          WHERE id = $1
+        `,
+        [
+          responseData.allocationId,
+        ]
+      );
+
+      responseData.shopifyInventorySync = {
+        status: "FAILED",
+        error:
+          "NO_SHOPIFY_INVENTORY_ITEM",
+      };
+    } else {
+      responseData.shopifyInventorySync = {
+        status: "NOT_REQUIRED",
+      };
+    }
+
+    res.json({
+      ok: true,
+      ...responseData,
+    });
+  }
+);
+
+
+
+/* =========================================================
+   RETRY SHOPIFY INVENTORY
+   Nur für bereits ACCEPTED Online-Ware.
+   KEINE interne Bestandsbuchung.
+========================================================= */
+
+router.post(
+  "/allocations/:allocationId/retry-shopify",
+  async (req, res) => {
+    try {
+      await ensureReceivingSchema();
+
+      const allocationId =
+        String(
+          req.params.allocationId ?? ""
+        ).trim();
+
+      if (!/^\d+$/.test(allocationId)) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültige Warenannahme-ID.",
+        });
+        return;
+      }
+
+      const result = await db.query(
+        `
+          SELECT
+            a.id,
+            a.status,
+            a.store_id,
+            a.shopify_sync_status,
+
+            rl.product_id,
+
+            p.shopify_inventory_item_id,
+
+            s.exact_quantity
+
+          FROM receiving_allocations a
+
+          JOIN receiving_lines rl
+            ON rl.id = a.receiving_line_id
+
+          JOIN products p
+            ON p.id = rl.product_id
+
+          LEFT JOIN product_stock_snapshots s
+            ON s.product_id = rl.product_id
+            AND s.store_id = 'online'
+
+          WHERE a.id = $1
+        `,
+        [allocationId]
+      );
+
+      if (result.rows.length === 0) {
+        res.status(404).json({
+          ok: false,
+          error: "Warenannahme nicht gefunden.",
+        });
+        return;
+      }
+
+      const row = result.rows[0];
+
+      if (row.store_id !== "online") {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Shopify-Sync ist nur für Online-Bestand verfügbar.",
+        });
+        return;
+      }
+
+      if (row.status !== "ACCEPTED") {
+        res.status(409).json({
+          ok: false,
+          error:
+            "Shopify darf erst nach der tatsächlichen Warenübernahme synchronisiert werden.",
+        });
+        return;
+      }
+
+      if (!row.shopify_inventory_item_id) {
+        await db.query(
+          `
+            UPDATE receiving_allocations
+            SET
+              shopify_sync_status = 'FAILED',
+              shopify_sync_error =
+                'NO_SHOPIFY_INVENTORY_ITEM'
+            WHERE id = $1
+          `,
+          [allocationId]
+        );
+
+        res.status(409).json({
+          ok: false,
+          error: "NO_SHOPIFY_INVENTORY_ITEM",
+        });
+        return;
+      }
+
+      const quantity =
+        Number(row.exact_quantity ?? 0);
+
+      try {
+        const sync =
+          await setShopifyOnlineInventory({
+            inventoryItemId:
+              String(
+                row.shopify_inventory_item_id
+              ),
+            quantity,
+            reference:
+              `receiving-${allocationId}-retry`,
+          });
+
+        await db.query(
+          `
+            UPDATE receiving_allocations
+            SET
+              shopify_sync_status = 'SYNCED',
+              shopify_sync_error = NULL,
+              shopify_synced_at = NOW()
+            WHERE id = $1
+          `,
+          [allocationId]
+        );
+
+        res.json({
+          ok: true,
+          allocationId,
+          status: "ACCEPTED",
+          internalStockChanged: false,
+          shopifyInventorySync: {
+            status: "SYNCED",
+            locationId: sync.locationId,
+            quantity: sync.quantity,
+          },
+        });
+      } catch (syncError) {
+        const message =
+          syncError instanceof Error
+            ? syncError.message
+            : "Shopify-Bestand konnte nicht synchronisiert werden.";
+
+        await db.query(
+          `
+            UPDATE receiving_allocations
+            SET
+              shopify_sync_status = 'FAILED',
+              shopify_sync_error = $2
+            WHERE id = $1
+          `,
+          [
+            allocationId,
+            message,
+          ]
+        );
+
+        res.status(502).json({
+          ok: false,
+          allocationId,
+          status: "ACCEPTED",
+          internalStockChanged: false,
+          shopifyInventorySync: {
+            status: "FAILED",
+            error: message,
+          },
+        });
+      }
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING SHOPIFY RETRY]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Shopify-Sync konnte nicht erneut ausgeführt werden.",
+      });
+    }
+  }
+);
+
+
+
+/* =========================================================
+   EDIT PLANNED RECEIVING DISTRIBUTION
+   Nur solange noch NICHTS ACCEPTED wurde.
+========================================================= */
+
+router.patch(
+  "/deliveries/:deliveryId/allocations",
+  async (req, res) => {
+    const client =
+      await db.connect();
+
+    try {
+      await ensureReceivingSchema();
+
+      const deliveryId =
+        String(
+          req.params.deliveryId ?? ""
+        ).trim();
+
+      const lines =
+        req.body?.lines;
+
+      if (!/^\d+$/.test(deliveryId)) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültige Lieferungs-ID.",
+        });
+        return;
+      }
+
+      if (
+        !Array.isArray(lines) ||
+        lines.length === 0
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Mindestens eine Lieferposition muss übergeben werden.",
+        });
+        return;
+      }
+
+      await client.query("BEGIN");
+
+      /* -----------------------------------------
+         Lieferung sperren
+      ----------------------------------------- */
+
+      const deliveryResult =
+        await client.query(
+          `
+            SELECT
+              id,
+              status,
+              supplier,
+              delivery_note
+
+            FROM receiving_deliveries
+
+            WHERE id = $1
+
+            FOR UPDATE
+          `,
+          [deliveryId]
+        );
+
+      if (
+        deliveryResult.rows.length === 0
+      ) {
+        await client.query("ROLLBACK");
+
+        res.status(404).json({
+          ok: false,
+          error: "Lieferung nicht gefunden.",
+        });
+        return;
+      }
+
+      /* -----------------------------------------
+         Sobald irgendetwas ACCEPTED ist:
+         keine Verteilung mehr verändern.
+      ----------------------------------------- */
+
+      const acceptedResult =
+        await client.query(
+          `
+            SELECT
+              a.id,
+              a.receiving_line_id,
+              a.store_id
+
+            FROM receiving_allocations a
+
+            JOIN receiving_lines rl
+              ON rl.id =
+                a.receiving_line_id
+
+            WHERE
+              rl.delivery_id = $1
+              AND a.status = 'ACCEPTED'
+
+            LIMIT 1
+
+            FOR UPDATE OF a
+          `,
+          [deliveryId]
+        );
+
+      if (
+        acceptedResult.rows.length > 0
+      ) {
+        await client.query("ROLLBACK");
+
+        res.status(409).json({
+          ok: false,
+          code:
+            "DELIVERY_ALREADY_PARTIALLY_ACCEPTED",
+          error:
+            "Die Verteilung kann nicht mehr geändert werden, weil bereits Ware übernommen wurde.",
+        });
+        return;
+      }
+
+      const updatedLines: any[] = [];
+
+      for (const input of lines) {
+        const lineId =
+          String(
+            input?.lineId ?? ""
+          ).trim();
+
+        if (!/^\d+$/.test(lineId)) {
+          throw new ReceivingValidationError(
+            "Ungültige Lieferpositions-ID."
+          );
+        }
+
+        const lineResult =
+          await client.query(
+            `
+              SELECT
+                id,
+                quantity,
+                product_id,
+                product_name
+
+              FROM receiving_lines
+
+              WHERE
+                id = $1
+                AND delivery_id = $2
+
+              FOR UPDATE
+            `,
+            [
+              lineId,
+              deliveryId,
+            ]
+          );
+
+        if (
+          lineResult.rows.length === 0
+        ) {
+          throw new ReceivingValidationError(
+            `Lieferposition ${lineId} gehört nicht zu dieser Lieferung.`
+          );
+        }
+
+        const line =
+          lineResult.rows[0];
+
+        const quantity =
+          Number(line.quantity);
+
+        const raw =
+          input?.allocations ?? {};
+
+        const allocations = {
+          aarau:
+            Number(raw.aarau ?? 0),
+          olten:
+            Number(raw.olten ?? 0),
+          online:
+            Number(raw.online ?? 0),
+        };
+
+        for (
+          const [store, value]
+          of Object.entries(allocations)
+        ) {
+          if (
+            !Number.isInteger(value) ||
+            value < 0
+          ) {
+            throw new ReceivingValidationError(
+              `Ungültige Menge für ${store}.`
+            );
+          }
+        }
+
+        const total =
+          allocations.aarau +
+          allocations.olten +
+          allocations.online;
+
+        if (total !== quantity) {
+          throw new ReceivingValidationError(
+            `${line.product_name}: Verteilung ${total} stimmt nicht mit Liefermenge ${quantity} überein.`
+          );
+        }
+
+        /* -----------------------------------------
+           Alte Planung dieser Position entfernen.
+           Noch nichts ACCEPTED -> sicher.
+        ----------------------------------------- */
+
+        await client.query(
+          `
+            DELETE FROM receiving_allocations
+            WHERE receiving_line_id = $1
+          `,
+          [lineId]
+        );
+
+        /* -----------------------------------------
+           Neue Planung speichern.
+           Geänderte Verteilung startet wieder
+           sauber als EXPECTED.
+        ----------------------------------------- */
+
+        for (
+          const store of [
+            "aarau",
+            "olten",
+            "online",
+          ] as const
+        ) {
+          const amount =
+            allocations[store];
+
+          if (amount <= 0) {
+            continue;
+          }
+
+          await client.query(
+            `
+              INSERT INTO receiving_allocations (
+                receiving_line_id,
+                store_id,
+                quantity,
+                status,
+                accepted_quantity,
+                shopify_sync_status
+              )
+
+              VALUES (
+                $1,
+                $2,
+                $3,
+                'EXPECTED',
+                0,
+                'NOT_REQUIRED'
+              )
+            `,
+            [
+              lineId,
+              store,
+              amount,
+            ]
+          );
+        }
+
+        updatedLines.push({
+          lineId,
+          productId:
+            line.product_id
+              ? String(
+                  line.product_id
+                )
+              : null,
+          product:
+            line.product_name,
+          quantity,
+          allocations,
+        });
+      }
+
+      /* -----------------------------------------
+         Lieferung nach Änderung wieder EXPECTED
+      ----------------------------------------- */
+
+      await client.query(
+        `
+          UPDATE receiving_deliveries
+          SET status = 'EXPECTED'
+          WHERE id = $1
+        `,
+        [deliveryId]
+      );
+
+      await client.query("COMMIT");
+
+      res.json({
+        ok: true,
+        deliveryId,
+        status: "EXPECTED",
+        lines: updatedLines,
+      });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
+
+      console.error(
+        "[ALO RECEIVING EDIT ALLOCATIONS]",
+        error
+      );
+
+      const validation =
+        error instanceof
+        ReceivingValidationError;
+
+      res
+        .status(
+          validation
+            ? error.statusCode
+            : 500
+        )
+        .json({
+          ok: false,
+          code: validation
+            ? "RECEIVING_VALIDATION_ERROR"
+            : "RECEIVING_INTERNAL_ERROR",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Verteilung konnte nicht geändert werden.",
+        });
+    } finally {
+      client.release();
+    }
+  }
+);
+
 
 export default router;
