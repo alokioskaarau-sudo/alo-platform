@@ -55,6 +55,7 @@ const TOKEN_ALIASES: Record<string, string> = {
   salz: "salt",
   salted: "salt",
   chili: "chilli",
+  kid: "kids",
 };
 
 function normalizeSupplier(
@@ -359,16 +360,16 @@ export async function resolveReceivingProductMaster(
        title IS NOT NULL
        AND (
          ${sourceTokens
-           .slice(0, 5)
+           .slice(0, 8)
            .map(
              (_, index) =>
                `LOWER(title) LIKE $${index + 1}`
            )
            .join(" OR ")}
        )
-     LIMIT 100`,
+     LIMIT 150`,
     sourceTokens
-      .slice(0, 5)
+      .slice(0, 8)
       .map((token) => `%${token}%`)
   );
 

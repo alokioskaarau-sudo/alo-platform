@@ -8,7 +8,7 @@ import { db } from '../database/db.js';
 const router = Router();
 
 const DELIVERY_PARSER_VERSION =
-  'delivery-v2';
+  'delivery-v3';
 
 let cacheTableReady:
   Promise<void> | null = null;
@@ -101,7 +101,7 @@ const deliverySchema = {
     deliveryNote: {
       type: ['string', 'null'],
       description:
-        'Die echte Lieferscheinnummer/Delivery-Note-Nummer exakt aus dem Dokument. Nicht mit Bestellnummer, Rechnungsnummer, Kundennummer oder Datum verwechseln.',
+        'Primäre Dokument-/Belegnummer dieser Warenlieferung. Bevorzugt echte Lieferscheinnummer. Falls keine solche vorhanden ist, darf eine eindeutig als Auftragsnummer/Order Number bezeichnete Nummer verwendet werden. Keine Rechnungsnummer, Kundennummer oder Datumswerte.',
     },
     documentDate: {
       type: ['string', 'null'],
@@ -335,17 +335,23 @@ router.post(
                   text: `
 Analysiere diesen Lieferschein für ALO Kiosk.
 
+Dateiname des hochgeladenen Dokuments:
+${req.file.originalname || 'unbekannt'}
+
+Der Dateiname darf als zusätzlicher Hinweis für die Dokument-/Auftragsnummer verwendet werden, aber nur wenn er eine plausible Nummer enthält und zum Dokument passt.
+
 Erstelle ausschließlich einen strukturierten JSON-Entwurf.
 
 WICHTIGE REGELN:
 - Nichts erfinden.
 - Lieferant nur übernehmen, wenn er im Dokument erkennbar ist.
-- deliveryNote ist ausschließlich die echte Lieferscheinnummer.
-- Suche dafür insbesondere nach Bezeichnungen wie "Lieferschein", "Lieferschein-Nr.", "Lieferscheinnummer", "Delivery Note", "Delivery Note No.", "Delivery No." oder eindeutig gleichbedeutenden Feldern.
-- Den zugehörigen Wert exakt übernehmen, inklusive Buchstaben, Bindestrichen, Schrägstrichen und führenden Nullen.
-- Bestellnummer, Order Number, Rechnungsnummer, Invoice Number, Kundennummer, Debitorennummer, Referenznummer oder Datum niemals als deliveryNote verwenden.
-- Wenn mehrere Nummern sichtbar sind, nur die Nummer übernehmen, die eindeutig dem Lieferschein selbst zugeordnet ist.
-- Wenn keine eindeutige Lieferscheinnummer erkennbar ist, deliveryNote=null setzen statt zu raten.
+- deliveryNote ist die primäre Dokument-/Belegnummer dieser Warenlieferung.
+- PRIORITÄT 1: echte Lieferscheinnummer, z.B. "Lieferschein", "Lieferschein-Nr.", "Lieferscheinnummer", "Delivery Note", "Delivery Note No.", "Delivery No.".
+- PRIORITÄT 2: falls keine echte Lieferscheinnummer vorhanden ist, darf eine eindeutig sichtbare Auftragsnummer / Order Number / Order No. als deliveryNote verwendet werden.
+- Rechnungsnummer, Invoice Number, Kundennummer, Debitorennummer oder Datum niemals als deliveryNote verwenden.
+- Den Wert exakt übernehmen, inklusive Buchstaben, Bindestrichen, Schrägstrichen und führenden Nullen.
+- Wenn mehrere mögliche Nummern vorhanden sind, die Nummer mit der höchsten obigen Priorität verwenden.
+- Wenn weder Lieferschein- noch eindeutige Auftragsnummer erkennbar ist, deliveryNote=null setzen statt zu raten.
 - Jede echte Produktposition einzeln erfassen.
 - Mengen exakt aus dem Dokument übernehmen.
 - quantity ist die im Dokument sichtbare Mengenangabe; nichts hineininterpretieren.
