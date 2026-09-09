@@ -167,14 +167,13 @@ export async function setShopifyOnlineInventory(
           reason: "correction",
           referenceDocumentUri:
             `alo://receiving/${input.reference}`,
-          ignoreCompareQuantity: true,
           quantities: [
             {
               inventoryItemId,
               locationId:
                 ALO_ONLINE_SHOP_LOCATION_ID,
               quantity,
-              compareQuantity: null,
+              changeFromQuantity: null,
             },
           ],
         },
