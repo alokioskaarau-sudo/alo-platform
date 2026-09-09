@@ -8,7 +8,7 @@ import { db } from '../database/db.js';
 const router = Router();
 
 const DELIVERY_PARSER_VERSION =
-  'delivery-v3';
+  'delivery-v4';
 
 let cacheTableReady:
   Promise<void> | null = null;
@@ -133,6 +133,8 @@ const deliverySchema = {
           },
           articleNumber: {
             type: ['string', 'null'],
+            description:
+              'Lieferanten-Artikelnummer dieser konkreten Produktposition. Muss aus derselben Produktzeile bzw. eindeutig dieser Position zugeordneten Spalte stammen. Nicht mit Lieferschein-, Auftrags-, Rechnungs-, Kunden- oder EAN/Barcode-Nummer verwechseln. Exakt übernehmen; wenn nicht sicher erkennbar, null.',
           },
           barcode: {
             type: ['string', 'null'],
@@ -353,6 +355,12 @@ WICHTIGE REGELN:
 - Wenn mehrere mögliche Nummern vorhanden sind, die Nummer mit der höchsten obigen Priorität verwenden.
 - Wenn weder Lieferschein- noch eindeutige Auftragsnummer erkennbar ist, deliveryNote=null setzen statt zu raten.
 - Jede echte Produktposition einzeln erfassen.
+- WICHTIG: articleNumber gehört IMMER zu genau einer Produktposition. Gemeint ist die Lieferanten-Artikelnummer / Artikel-Nr. / Art.-Nr. / Item No. / Item Number / Product No. / SKU, die in derselben Zeile oder eindeutig derselben Produktposition zugeordnet ist.
+- articleNumber ist NICHT deliveryNote. Eine Lieferschein-, Auftrags-, Bestell-, Rechnungs-, Kunden- oder Debitorennummer darf niemals als articleNumber einer Produktposition verwendet werden.
+- articleNumber ist ebenfalls NICHT automatisch der Barcode/EAN. Wenn das Dokument sowohl Artikelnummer als auch EAN/Barcode zeigt, beide getrennt übernehmen: articleNumber = Lieferanten-Artikelnummer und barcode = EAN/Barcode.
+- Hat jede Produktzeile eine eigene Artikelnummer-Spalte, die jeweilige Nummer exakt der jeweiligen Produktzeile zuordnen.
+- Artikelnummern exakt als Text übernehmen, inklusive Buchstaben, Bindestrichen, Punkten, Schrägstrichen und führenden Nullen.
+- Wenn bei einer Produktposition keine Lieferanten-Artikelnummer sicher erkennbar ist, articleNumber=null setzen. Niemals aus Produktname, EAN oder anderen Dokumentnummern erfinden.
 - Mengen exakt aus dem Dokument übernehmen.
 - quantity ist die im Dokument sichtbare Mengenangabe; nichts hineininterpretieren.
 - Wenn eine Position eindeutig z.B. 4 Kartons mit je 24 Verkaufseinheiten enthält: cases=4, unitsPerCase=24 und totalUnits=96.

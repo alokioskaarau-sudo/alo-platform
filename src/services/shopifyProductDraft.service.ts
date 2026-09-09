@@ -80,6 +80,85 @@ async function shopifyGraphql(
   return response.data?.data;
 }
 
+async function syncSupplierArticleMetafield(
+  shopifyProductId: string,
+  articleNumber: unknown
+): Promise<boolean> {
+  const value = aloText(articleNumber);
+
+  if (!shopifyProductId || !value) {
+    return false;
+  }
+
+  const result = await shopifyGraphql(
+    `
+      mutation AloSyncSupplierArticle(
+        $metafields: [MetafieldsSetInput!]!
+      ) {
+        metafieldsSet(
+          metafields: $metafields
+        ) {
+          metafields {
+            id
+            namespace
+            key
+            value
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      metafields: [
+        {
+          ownerId: shopifyProductId,
+          namespace: "alo",
+          key: "supplier_article_number",
+          type: "single_line_text_field",
+          value,
+        },
+      ],
+    }
+  );
+
+  const errors =
+    result?.metafieldsSet?.userErrors ?? [];
+
+  if (errors.length) {
+    throw new Error(
+      errors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  return true;
+}
+
+async function syncSupplierArticleMetafieldSafe(
+  shopifyProductId: string,
+  articleNumber: unknown
+): Promise<boolean> {
+  try {
+    return await syncSupplierArticleMetafield(
+      shopifyProductId,
+      articleNumber
+    );
+  } catch (error: any) {
+    console.warn(
+      "[Shopify] Lieferanten-Artikelnummer konnte nicht synchronisiert werden:",
+      error?.message ?? error
+    );
+    return false;
+  }
+}
+
 async function getProduct(
   id: string
 ) {
@@ -184,6 +263,14 @@ function buildShopifyProductMetafields(
       : 1;
 
   const metafields = [
+    {
+      namespace: "alo",
+      key: "supplier_article_number",
+      type: "single_line_text_field",
+      value: aloText(
+        draft?.receiving?.articleNumber
+      ),
+    },
     {
       namespace: "custom",
       key: "herkunft",
@@ -559,9 +646,16 @@ export async function createShopifyProductDraft(
     );
   }
 
+  const draft =
+    row.product_data ?? {};
+
   if (
     row.shopify_product_id
   ) {
+    await syncSupplierArticleMetafieldSafe(
+      row.shopify_product_id,
+      draft?.receiving?.articleNumber
+    );
     return {
       ok: true as const,
       alreadyExists: true,
@@ -577,9 +671,6 @@ export async function createShopifyProductDraft(
       imageUploaded: false,
     };
   }
-
-  const draft =
-    row.product_data ?? {};
 
   const identity =
     await resolveProductIdentity({
@@ -736,6 +827,11 @@ export async function createShopifyProductDraft(
         match.variantId,
         match.inventoryItemId,
       ]
+    );
+
+    await syncSupplierArticleMetafieldSafe(
+      match.productId,
+      draft?.receiving?.articleNumber
     );
 
     return {
