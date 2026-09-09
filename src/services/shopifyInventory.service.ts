@@ -98,6 +98,144 @@ async function shopifyGraphql(
   return response.data?.data;
 }
 
+
+async function ensureOnlineInventoryActivated(
+  inventoryItemId: string,
+  reference: string
+): Promise<{
+  activated: boolean;
+}> {
+  const lookup =
+    await shopifyGraphql(
+      `
+        query AloOnlineInventoryLevel(
+          $inventoryItemId: ID!,
+          $locationId: ID!
+        ) {
+          inventoryItem(
+            id: $inventoryItemId
+          ) {
+            id
+            inventoryLevel(
+              locationId: $locationId
+            ) {
+              id
+            }
+          }
+        }
+      `,
+      {
+        inventoryItemId,
+        locationId:
+          ALO_ONLINE_SHOP_LOCATION_ID,
+      }
+    );
+
+  if (!lookup?.inventoryItem) {
+    throw new Error(
+      "Shopify Inventory Item wurde nicht gefunden."
+    );
+  }
+
+  if (
+    lookup.inventoryItem.inventoryLevel
+  ) {
+    return {
+      activated: false,
+    };
+  }
+
+  const idempotencyKey =
+    createHash("sha256")
+      .update(
+        [
+          "ALO_INVENTORY_ACTIVATE",
+          inventoryItemId,
+          ALO_ONLINE_SHOP_LOCATION_ID,
+          reference,
+        ].join("|")
+      )
+      .digest("hex");
+
+  const activation =
+    await shopifyGraphql(
+      `
+        mutation AloActivateOnlineInventory(
+          $inventoryItemId: ID!,
+          $locationId: ID!,
+          $available: Int!,
+          $idempotencyKey: String!
+        ) {
+          inventoryActivate(
+            inventoryItemId:
+              $inventoryItemId
+            locationId:
+              $locationId
+            available:
+              $available
+          )
+          @idempotent(
+            key: $idempotencyKey
+          ) {
+            inventoryLevel {
+              id
+              location {
+                id
+              }
+              item {
+                id
+              }
+              quantities(
+                names: ["available"]
+              ) {
+                name
+                quantity
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        inventoryItemId,
+        locationId:
+          ALO_ONLINE_SHOP_LOCATION_ID,
+        available: 0,
+        idempotencyKey,
+      }
+    );
+
+  const payload =
+    activation?.inventoryActivate;
+
+  const userErrors =
+    payload?.userErrors ?? [];
+
+  if (userErrors.length) {
+    throw new Error(
+      userErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  if (!payload?.inventoryLevel) {
+    throw new Error(
+      "Shopify Online-Bestand konnte nicht aktiviert werden."
+    );
+  }
+
+  return {
+    activated: true,
+  };
+}
+
 export async function setShopifyOnlineInventory(
   input: {
     inventoryItemId: string;
@@ -121,6 +259,12 @@ export async function setShopifyOnlineInventory(
       "Ungültiger Shopify-Bestand."
     );
   }
+
+  const activation =
+    await ensureOnlineInventoryActivated(
+      inventoryItemId,
+      input.reference
+    );
 
   const idempotencyKey =
     buildIdempotencyKey(
@@ -203,6 +347,8 @@ export async function setShopifyOnlineInventory(
       ALO_ONLINE_SHOP_LOCATION_ID,
     inventoryItemId,
     quantity,
+    activated:
+      activation.activated,
     adjustment:
       payload?.inventoryAdjustmentGroup ??
       null,
