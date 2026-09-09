@@ -58,7 +58,10 @@ type ReceivingLineInput = {
    * Wird serverseitig validiert und schlägt nur den
    * automatischen Product-Master-Matcher.
    */
-  resolution?: "MANUAL_EXISTING" | null;
+  resolution?:
+    | "MANUAL_EXISTING"
+    | "MANUAL_NEW"
+    | null;
   productMasterId?: string | number | null;
 };
 
@@ -654,6 +657,136 @@ router.post(
           continue;
         }
 
+        const manualNew =
+          input.resolution ===
+          "MANUAL_NEW";
+
+        if (manualNew) {
+          const conflict =
+            await resolveReceivingProductMaster({
+              barcode,
+              supplier,
+              articleNumber:
+                input.articleNumber ?? null,
+              title: productName,
+              unitSize:
+                input.unitSize ?? null,
+            });
+
+          if (
+            conflict.status === "MATCH"
+          ) {
+            previewLines.push({
+              position: index + 1,
+              classification: "REVIEW",
+              reason:
+                "MANUAL_NEW_EXISTING_CONFLICT",
+              product: productName,
+              barcode: barcode || null,
+              quantity,
+              cases: input.cases ?? null,
+              unitsPerCase:
+                input.unitsPerCase ?? null,
+              unitSize:
+                input.unitSize ?? null,
+              purchasePrice:
+                input.purchasePrice ?? null,
+              totalPrice:
+                input.totalPrice ?? null,
+              expiry:
+                input.expiry ?? null,
+              batch:
+                input.batch ?? null,
+              productMasterId: null,
+              matches: [
+                {
+                  productMasterId:
+                    String(
+                      conflict.product.id
+                    ),
+                  title:
+                    conflict.product.title,
+                  confidence:
+                    conflict.confidence,
+                },
+              ],
+            });
+
+            continue;
+          }
+
+          if (
+            conflict.status ===
+            "AMBIGUOUS"
+          ) {
+            previewLines.push({
+              position: index + 1,
+              classification: "REVIEW",
+              reason:
+                "MANUAL_NEW_AMBIGUOUS_CONFLICT",
+              product: productName,
+              barcode: barcode || null,
+              quantity,
+              cases: input.cases ?? null,
+              unitsPerCase:
+                input.unitsPerCase ?? null,
+              unitSize:
+                input.unitSize ?? null,
+              purchasePrice:
+                input.purchasePrice ?? null,
+              totalPrice:
+                input.totalPrice ?? null,
+              expiry:
+                input.expiry ?? null,
+              batch:
+                input.batch ?? null,
+              productMasterId: null,
+              matches:
+                conflict.matches.map(
+                  (match) => ({
+                    productMasterId:
+                      String(
+                        match.product.id
+                      ),
+                    title:
+                      match.product.title,
+                    confidence:
+                      match.confidence,
+                  })
+                ),
+            });
+
+            continue;
+          }
+
+          previewLines.push({
+            position: index + 1,
+            classification: "NEW",
+            reason: "MANUAL_NEW",
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId: null,
+            matchedBy:
+              "MANUAL_NEW",
+          });
+
+          continue;
+        }
+
         const manualProductMaster =
           await resolveManualProductMaster(
             input,
@@ -1238,12 +1371,18 @@ router.post(
         let linkedExistingShopify = false;
         let resolvedShopifyMatch: any = null;
 
+        const manualNew =
+          input.resolution ===
+          "MANUAL_NEW";
+
         const manualProductMaster =
-          await resolveManualProductMaster(
-            input,
-            client,
-            index + 1
-          );
+          manualNew
+            ? null
+            : await resolveManualProductMaster(
+                input,
+                client,
+                index + 1
+              );
 
         const productMasterResolution =
           manualProductMaster
@@ -1262,6 +1401,17 @@ router.post(
               );
 
         if (
+          manualNew &&
+          productMasterResolution?.status !==
+            "NO_MATCH"
+        ) {
+          throw new ReceivingValidationError(
+            `${productName}: kann nicht als neues Produkt angelegt werden, weil bereits ein möglicher Product Master existiert. Bitte bestehenden Artikel zuordnen.`
+          );
+        }
+
+        if (
+          !manualNew &&
           productMasterResolution?.status ===
           "AMBIGUOUS"
         ) {
@@ -1274,6 +1424,7 @@ router.post(
           product =
             manualProductMaster;
         } else if (
+          !manualNew &&
           productMasterResolution?.status ===
           "MATCH"
         ) {
@@ -1313,11 +1464,15 @@ router.post(
           }
         }
 
-        if (!product && barcode) {
+        if (
+          !product &&
+          (barcode || manualNew)
+        ) {
           const draft = {
             title:
               productName.toUpperCase(),
-            barcode,
+            barcode:
+              barcode || null,
             productName,
             unitSize:
               input.unitSize ?? null,
@@ -1379,7 +1534,7 @@ router.post(
                   shopify_inventory_item_id
               `,
               [
-                barcode,
+                barcode || null,
                 productName.toUpperCase(),
                 JSON.stringify(draft),
                 resolvedShopifyMatch
