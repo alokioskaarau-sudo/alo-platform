@@ -9,6 +9,10 @@ import {
 import {
   automateReceivingProduct,
 } from "../services/receivingProductAutomation.service.js";
+import {
+  rememberSupplierArticle,
+  resolveReceivingProductMaster,
+} from "../services/receivingProductMatcher.service.js";
 
 const router = Router();
 
@@ -581,40 +585,82 @@ router.post(
           continue;
         }
 
-        let productMaster: any = null;
-
-        if (barcode) {
-          const existing =
-            await db.query(
-              `
-                SELECT
-                  id,
-                  barcode,
-                  title,
-                  product_data,
-                  review_status,
-                  shopify_status,
-                  shopify_product_id,
-                  shopify_variant_id,
-                  shopify_inventory_item_id
-                FROM products
-                WHERE barcode = $1
-                LIMIT 1
-              `,
-              [barcode]
-            );
-
-          productMaster =
-            existing.rows[0] ?? null;
-        }
+        const productMasterResolution =
+          await resolveReceivingProductMaster({
+            barcode,
+            supplier,
+            articleNumber:
+              input.articleNumber ?? null,
+            title: productName,
+            unitSize:
+              input.unitSize ?? null,
+          });
 
         if (
-          productMaster?.shopify_product_id
+          productMasterResolution.status ===
+          "AMBIGUOUS"
         ) {
           previewLines.push({
             position: index + 1,
+            classification: "REVIEW",
+            reason:
+              "AMBIGUOUS_PRODUCT_MASTER_MATCH",
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
+            unitSize:
+              input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId: null,
+            matches:
+              productMasterResolution.matches.map(
+                (match) => ({
+                  productMasterId:
+                    String(match.product.id),
+                  title:
+                    match.product.title,
+                  confidence:
+                    match.confidence,
+                })
+              ),
+          });
+          continue;
+        }
+
+        const productMaster =
+          productMasterResolution.status ===
+          "MATCH"
+            ? productMasterResolution.product
+            : null;
+
+        const productMasterMatchedBy =
+          productMasterResolution.status ===
+          "MATCH"
+            ? productMasterResolution.matchedBy
+            : null;
+
+        if (productMaster) {
+          previewLines.push({
+            position: index + 1,
             classification: "EXISTING",
-            reason: "PRODUCT_MASTER_LINK",
+            reason:
+              productMasterMatchedBy ===
+              "SUPPLIER_ARTICLE"
+                ? "SUPPLIER_ARTICLE"
+                : productMasterMatchedBy ===
+                  "TITLE_SIZE"
+                  ? "PRODUCT_MASTER_TITLE_SIZE"
+                  : "PRODUCT_MASTER_BARCODE",
             product: productName,
             barcode: barcode || null,
             quantity,
@@ -642,7 +688,8 @@ router.post(
             shopifyTitle:
               productMaster.title,
             matchedBy:
-              "PRODUCT_MASTER_LINK",
+              productMasterMatchedBy ??
+              "PRODUCT_MASTER",
           });
           continue;
         }
@@ -1070,28 +1117,35 @@ router.post(
         let linkedExistingShopify = false;
         let resolvedShopifyMatch: any = null;
 
-        if (barcode) {
-          const existing =
-            await client.query(
-              `
-                SELECT
-                  id,
-                  barcode,
-                  title,
-                  product_data,
-                  shopify_status,
-                  shopify_product_id,
-                  shopify_variant_id,
-                  shopify_inventory_item_id
-                FROM products
-                WHERE barcode = $1
-                LIMIT 1
-              `,
-              [barcode]
-            );
+        const productMasterResolution =
+          await resolveReceivingProductMaster(
+            {
+              barcode,
+              supplier,
+              articleNumber:
+                input.articleNumber ?? null,
+              title: productName,
+              unitSize:
+                input.unitSize ?? null,
+            },
+            client
+          );
 
+        if (
+          productMasterResolution.status ===
+          "AMBIGUOUS"
+        ) {
+          throw new ReceivingValidationError(
+            `${productName}: mehrere ähnliche Product-Master-Produkte gefunden. Bitte Position prüfen.`
+          );
+        }
+
+        if (
+          productMasterResolution.status ===
+          "MATCH"
+        ) {
           product =
-            existing.rows[0] ?? null;
+            productMasterResolution.product;
         }
 
         if (!product && barcode) {
@@ -1276,6 +1330,16 @@ router.post(
               receiving,
             }),
           ]
+        );
+
+        await rememberSupplierArticle(
+          {
+            productId: product.id,
+            supplier,
+            articleNumber:
+              input.articleNumber ?? null,
+          },
+          client
         );
 
         const lineResult =
