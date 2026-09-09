@@ -6,6 +6,9 @@ import {
 import {
   setShopifyOnlineInventory,
 } from "../services/shopifyInventory.service.js";
+import {
+  automateReceivingProduct,
+} from "../services/receivingProductAutomation.service.js";
 
 const router = Router();
 
@@ -1569,6 +1572,71 @@ router.post(
       await client.query("COMMIT");
 
       for (const line of results) {
+        if (line.createdProduct) {
+          try {
+            const automation =
+              await automateReceivingProduct(
+                line.productId
+              );
+
+            line.productAutomation =
+              automation;
+
+            if (
+              automation.status ===
+              "READY_FOR_REVIEW"
+            ) {
+              line.shopifyProductId =
+                automation.shopify
+                  .shopifyProductId;
+
+              line.shopifyVariantId =
+                automation.shopify
+                  .shopifyVariantId;
+
+              line.shopifyInventoryItemId =
+                automation.shopify
+                  .shopifyInventoryItemId;
+            }
+          } catch (
+            automationError
+          ) {
+            console.error(
+              "[ALO RECEIVING PRODUCT AUTOMATION]",
+              {
+                deliveryId:
+                  String(
+                    delivery.id
+                  ),
+                lineId:
+                  line.lineId,
+                productId:
+                  line.productId,
+                error:
+                  automationError instanceof Error
+                    ? automationError.message
+                    : automationError,
+              }
+            );
+
+            line.productAutomation = {
+              status:
+                "FAILED",
+              productId:
+                line.productId,
+              error:
+                automationError instanceof Error
+                  ? automationError.message
+                  : "Produkt-Automation fehlgeschlagen.",
+            };
+          }
+        } else {
+          line.productAutomation = {
+            status:
+              "NOT_REQUIRED",
+          };
+        }
+
         const onlineStock =
           Array.isArray(line.stock)
             ? line.stock.find(

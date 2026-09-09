@@ -667,6 +667,56 @@ export async function createShopifyProductDraft(
     const match =
       identity.match;
 
+    const existingProductMaster =
+      await db.query(
+        `
+          SELECT
+            id,
+            barcode,
+            title,
+            shopify_product_id
+          FROM products
+          WHERE
+            shopify_product_id = $1
+            AND id <> $2
+          LIMIT 1
+        `,
+        [
+          match.productId,
+          productId,
+        ]
+      );
+
+    if (
+      existingProductMaster
+        .rows.length > 0
+    ) {
+      const linked =
+        existingProductMaster
+          .rows[0];
+
+      throw new ShopifyProductDraftConflictError(
+        "SHOPIFY_ALREADY_LINKED_TO_OTHER_PRODUCT_MASTER",
+        "Das passende Shopify-Produkt ist bereits mit einem anderen Product Master verknüpft.",
+        {
+          matchedShopifyProductId:
+            match.productId,
+          matchedShopifyVariantId:
+            match.variantId,
+          matchedShopifyInventoryItemId:
+            match.inventoryItemId,
+          existingProductMasterId:
+            String(linked.id),
+          existingProductMasterBarcode:
+            linked.barcode ??
+            null,
+          existingProductMasterTitle:
+            linked.title ??
+            null,
+        }
+      );
+    }
+
     await db.query(
       `
         UPDATE products
