@@ -51,7 +51,76 @@ type ReceivingLineInput = {
   expiry?: string | null;
   batch?: string | null;
   allocations?: ReceivingAllocation | null;
+
+  /**
+   * Explizite Mitarbeiter-Zuordnung aus ALO STAFF.
+   *
+   * Wird serverseitig validiert und schlägt nur den
+   * automatischen Product-Master-Matcher.
+   */
+  resolution?: "MANUAL_EXISTING" | null;
+  productMasterId?: string | number | null;
 };
+
+async function resolveManualProductMaster(
+  input: ReceivingLineInput,
+  queryable: {
+    query: (
+      text: string,
+      values?: any[]
+    ) => Promise<any>;
+  },
+  position: number
+): Promise<any | null> {
+  if (
+    input.resolution !==
+    "MANUAL_EXISTING"
+  ) {
+    return null;
+  }
+
+  const productMasterId =
+    String(
+      input.productMasterId ?? ""
+    ).trim();
+
+  if (
+    !productMasterId ||
+    !/^\d+$/.test(productMasterId)
+  ) {
+    throw new ReceivingValidationError(
+      `Position ${position}: Für die manuelle Zuordnung fehlt ein gültiger Product Master.`
+    );
+  }
+
+  const result =
+    await queryable.query(
+      `
+        SELECT
+          id,
+          barcode,
+          title,
+          product_data,
+          review_status,
+          shopify_status,
+          shopify_product_id,
+          shopify_variant_id,
+          shopify_inventory_item_id
+        FROM products
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [productMasterId]
+    );
+
+  if (!result.rows[0]) {
+    throw new ReceivingValidationError(
+      `Position ${position}: Product Master ${productMasterId} wurde nicht gefunden.`
+    );
+  }
+
+  return result.rows[0];
+}
 
 function cleanBarcode(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, "").trim();
@@ -585,19 +654,71 @@ router.post(
           continue;
         }
 
+        const manualProductMaster =
+          await resolveManualProductMaster(
+            input,
+            db,
+            index + 1
+          );
+
         const productMasterResolution =
-          await resolveReceivingProductMaster({
-            barcode,
-            supplier,
-            articleNumber:
-              input.articleNumber ?? null,
-            title: productName,
+          manualProductMaster
+            ? null
+            : await resolveReceivingProductMaster({
+                barcode,
+                supplier,
+                articleNumber:
+                  input.articleNumber ?? null,
+                title: productName,
+                unitSize:
+                  input.unitSize ?? null,
+              });
+
+        if (manualProductMaster) {
+          previewLines.push({
+            position: index + 1,
+            classification: "EXISTING",
+            reason:
+              "MANUAL_PRODUCT_MASTER",
+            product: productName,
+            barcode: barcode || null,
+            quantity,
+            cases: input.cases ?? null,
+            unitsPerCase:
+              input.unitsPerCase ?? null,
             unitSize:
               input.unitSize ?? null,
+            purchasePrice:
+              input.purchasePrice ?? null,
+            totalPrice:
+              input.totalPrice ?? null,
+            expiry:
+              input.expiry ?? null,
+            batch:
+              input.batch ?? null,
+            productMasterId:
+              String(
+                manualProductMaster.id
+              ),
+            productMasterTitle:
+              manualProductMaster.title,
+            shopifyProductId:
+              manualProductMaster
+                .shopify_product_id,
+            shopifyVariantId:
+              manualProductMaster
+                .shopify_variant_id,
+            shopifyTitle:
+              manualProductMaster.title,
+            matchedBy:
+              "MANUAL_EXISTING",
           });
 
+          continue;
+        }
+
         if (
-          productMasterResolution.status ===
+          productMasterResolution?.status ===
           "AMBIGUOUS"
         ) {
           previewLines.push({
@@ -638,13 +759,13 @@ router.post(
         }
 
         const productMaster =
-          productMasterResolution.status ===
+          productMasterResolution?.status ===
           "MATCH"
             ? productMasterResolution.product
             : null;
 
         const productMasterMatchedBy =
-          productMasterResolution.status ===
+          productMasterResolution?.status ===
           "MATCH"
             ? productMasterResolution.matchedBy
             : null;
@@ -1117,22 +1238,31 @@ router.post(
         let linkedExistingShopify = false;
         let resolvedShopifyMatch: any = null;
 
-        const productMasterResolution =
-          await resolveReceivingProductMaster(
-            {
-              barcode,
-              supplier,
-              articleNumber:
-                input.articleNumber ?? null,
-              title: productName,
-              unitSize:
-                input.unitSize ?? null,
-            },
-            client
+        const manualProductMaster =
+          await resolveManualProductMaster(
+            input,
+            client,
+            index + 1
           );
 
+        const productMasterResolution =
+          manualProductMaster
+            ? null
+            : await resolveReceivingProductMaster(
+                {
+                  barcode,
+                  supplier,
+                  articleNumber:
+                    input.articleNumber ?? null,
+                  title: productName,
+                  unitSize:
+                    input.unitSize ?? null,
+                },
+                client
+              );
+
         if (
-          productMasterResolution.status ===
+          productMasterResolution?.status ===
           "AMBIGUOUS"
         ) {
           throw new ReceivingValidationError(
@@ -1140,8 +1270,11 @@ router.post(
           );
         }
 
-        if (
-          productMasterResolution.status ===
+        if (manualProductMaster) {
+          product =
+            manualProductMaster;
+        } else if (
+          productMasterResolution?.status ===
           "MATCH"
         ) {
           product =
