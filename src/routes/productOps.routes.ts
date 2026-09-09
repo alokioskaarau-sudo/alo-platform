@@ -12,6 +12,10 @@ import {
   resolveProductIdentity,
 } from "../services/productIdentity.service.js";
 import {
+  createShopifyProductDraft,
+  ShopifyProductDraftConflictError,
+} from "../services/shopifyProductDraft.service.js";
+import {
   buildShopifyCatalogPreview,
   importShopifyCatalogBatch,
   importShopifyProductToProductMaster,
@@ -2581,493 +2585,47 @@ router.post(
     try {
       await ensureSchema();
 
-      const row =
-        await getProduct(
+      const result =
+        await createShopifyProductDraft(
           req.params.id
         );
 
-      if (!row) {
-        res.status(404).json({
-          ok: false,
-          error:
-            "Produkt nicht gefunden.",
-        });
-        return;
-      }
-
-      if (
-        row.shopify_product_id
-      ) {
-        res.json({
-          ok: true,
-          alreadyExists: true,
-          shopifyProductId:
-            row.shopify_product_id,
-          shopifyVariantId:
-            row.shopify_variant_id,
-          status:
-            row.shopify_status,
-        });
-        return;
-      }
-
-      const draft =
-        row.product_data ?? {};
-
-      const identity =
-        await resolveProductIdentity({
-          barcode: row.barcode,
-          title:
-            draft?.title ??
-            row.title,
-          unitSize:
-            draft?.unitSize,
-          netWeight:
-            draft?.netWeight,
-        });
-
-      if (
-        identity.status ===
-        "MULTIPLE_BARCODE_MATCHES"
-      ) {
-        res.status(409).json({
-          ok: false,
-          conflict: true,
-          reason:
-            "MULTIPLE_SHOPIFY_BARCODE_MATCHES",
-          barcode:
-            identity.barcode,
-          matches:
-            identity.matches.map(
-              (match) => ({
-                shopifyProductId:
-                  match.productId,
-                shopifyVariantId:
-                  match.variantId,
-                shopifyInventoryItemId:
-                  match.inventoryItemId,
-                title:
-                  match.productTitle,
-                status:
-                  match.productStatus,
-              })
-            ),
-          error:
-            `EAN ${identity.barcode} existiert mehrfach in Shopify. Manuelle Prüfung erforderlich.`,
-        });
-        return;
-      }
-
-      if (
-        identity.status ===
-        "MULTIPLE_IDENTITY_MATCHES"
-      ) {
-        res.status(409).json({
-          ok: false,
-          conflict: true,
-          reason:
-            "MULTIPLE_SHOPIFY_IDENTITY_MATCHES",
-          barcode:
-            identity.barcode,
-          sourceTitle:
-            identity.sourceTitle,
-          matches:
-            identity.matches.map(
-              (match) => ({
-                shopifyProductId:
-                  match.productId,
-                shopifyVariantId:
-                  match.variantId,
-                shopifyInventoryItemId:
-                  match.inventoryItemId,
-                title:
-                  match.productTitle,
-                status:
-                  match.productStatus,
-                barcode:
-                  match.barcode,
-                size:
-                  match.size,
-              })
-            ),
-          error:
-            "Mehrere passende Shopify-Produkte gefunden. Manuelle Prüfung erforderlich.",
-        });
-        return;
-      }
-
-      if (
-        identity.status ===
-          "EXACT_BARCODE" ||
-        identity.status ===
-          "EXACT_TITLE_SIZE"
-      ) {
-        const match =
-          identity.match;
-
-        await db.query(
-          `
-            UPDATE products
-            SET
-              shopify_status = $2,
-              shopify_product_id = $3,
-              shopify_variant_id = $4,
-              shopify_inventory_item_id = $5,
-              updated_at = NOW()
-            WHERE id = $1
-          `,
-          [
-            req.params.id,
-            match.productStatus ||
-              "LINKED",
-            match.productId,
-            match.variantId,
-            match.inventoryItemId,
-          ]
-        );
-
-        res.json({
-          ok: true,
-          alreadyExists: true,
-          linkedExisting: true,
-          matchedBy:
-            identity.status ===
-            "EXACT_BARCODE"
-              ? "BARCODE"
-              : "TITLE_SIZE",
-          sourceTitle:
-            draft?.title ??
-            row.title,
-          shopifyTitle:
-            match.productTitle,
-          shopifyProductId:
-            match.productId,
-          shopifyVariantId:
-            match.variantId,
-          shopifyInventoryItemId:
-            match.inventoryItemId,
-          status:
-            match.productStatus ||
-            "LINKED",
-          barcode:
-            match.barcode,
-          size:
-            match.size,
-        });
-        return;
-      }
-
-      const productInput: any = {
-        title:
-          String(
-            row.title
-          ).toUpperCase(),
-        status: "DRAFT",
-      };
-
-      if (
-        draft.descriptionHtml
-      ) {
-        productInput.descriptionHtml =
-          draft.descriptionHtml;
-      }
-
-      if (draft.vendor) {
-        productInput.vendor =
-          draft.vendor;
-      } else if (draft.brand) {
-        productInput.vendor =
-          draft.brand;
-      }
-
-      if (
-        draft.productType
-      ) {
-        productInput.productType =
-          draft.productType;
-      } else if (
-        draft.category
-      ) {
-        productInput.productType =
-          draft.category;
-      }
-
-      if (
-        Array.isArray(
-          draft.tags
-        )
-      ) {
-        productInput.tags =
-          draft.tags;
-      }
-
-      if (
-        draft.seoTitle ||
-        draft.seoDescription
-      ) {
-        productInput.seo = {};
-
-        if (
-          draft.seoTitle
-        ) {
-          productInput.seo.title =
-            draft.seoTitle;
-        }
-
-        if (
-          draft.seoDescription
-        ) {
-          productInput.seo.description =
-            draft.seoDescription;
-        }
-      }
-
-      const productMetafields =
-        buildShopifyProductMetafields(
-          draft
-        );
-
-      if (
-        productMetafields.length
-      ) {
-        productInput.metafields =
-          productMetafields;
-      }
-
-      const stagedImage =
-        await stageProductImage(
-          req.params.id
-        );
-
-      const media =
-        stagedImage
-          ? [
-              {
-                originalSource:
-                  stagedImage.source,
-                alt:
-                  draft.title ||
-                  row.title,
-                mediaContentType:
-                  "IMAGE",
-              },
-            ]
-          : [];
-
-      const created =
-        await shopifyGraphql(
-          `
-            mutation AloCreateProduct(
-              $product: ProductCreateInput!,
-              $media: [CreateMediaInput!]
-            ) {
-              productCreate(
-                product: $product,
-                media: $media
-              ) {
-                product {
-                  id
-                  title
-                  status
-
-                  variants(first: 1) {
-                    nodes {
-                      id
-
-                      inventoryItem {
-                        id
-                      }
-                    }
-                  }
-                }
-
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }
-          `,
-          {
-            product:
-              productInput,
-            media,
-          }
-        );
-
-      const payload =
-        created?.productCreate;
-
-      if (
-        payload?.userErrors
-          ?.length
-      ) {
-        throw new Error(
-          payload.userErrors
-            .map(
-              (error: any) =>
-                error.message
-            )
-            .join(" · ")
-        );
-      }
-
-      const product =
-        payload?.product;
-
-      if (!product?.id) {
-        throw new Error(
-          "Shopify Produkt-ID fehlt."
-        );
-      }
-
-      const variant =
-        product.variants
-          ?.nodes?.[0];
-
-      if (variant?.id) {
-        const variantInput: any = {
-          id: variant.id,
-        };
-
-        const barcode =
-          normalizeBarcode(
-            row.barcode
-          );
-
-        if (barcode) {
-          variantInput.barcode =
-            barcode;
-        }
-
-        const possiblePrice =
-          Number(
-            draft?.commerce
-              ?.sellingPrice ??
-              draft?.sellingPrice ??
-              NaN
-          );
-
-        if (
-          Number.isFinite(
-            possiblePrice
-          ) &&
-          possiblePrice > 0
-        ) {
-          variantInput.price =
-            possiblePrice.toFixed(
-              2
-            );
-        }
-
-        const variantUpdate =
-          await shopifyGraphql(
-            `
-              mutation AloUpdateVariant(
-                $productId: ID!,
-                $variants:
-                  [ProductVariantsBulkInput!]!
-              ) {
-                productVariantsBulkUpdate(
-                  productId:
-                    $productId,
-                  variants:
-                    $variants
-                ) {
-                  productVariants {
-                    id
-                    barcode
-                    price
-
-                    inventoryItem {
-                      id
-                    }
-                  }
-
-                  userErrors {
-                    field
-                    message
-                  }
-                }
-              }
-            `,
-            {
-              productId:
-                product.id,
-              variants: [
-                variantInput,
-              ],
-            }
-          );
-
-        const errors =
-          variantUpdate
-            ?.productVariantsBulkUpdate
-            ?.userErrors;
-
-        if (
-          errors?.length
-        ) {
-          throw new Error(
-            errors
-              .map(
-                (error: any) =>
-                  error.message
-              )
-              .join(" · ")
-          );
-        }
-      }
-
-      await db.query(
-        `
-          UPDATE products
-          SET
-            shopify_status =
-              'DRAFT',
-            shopify_product_id =
-              $2,
-            shopify_variant_id =
-              $3,
-            shopify_inventory_item_id =
-              $4,
-            updated_at =
-              NOW()
-          WHERE id = $1
-        `,
-        [
-          req.params.id,
-          product.id,
-          variant?.id ?? null,
-          variant?.inventoryItem
-            ?.id ?? null,
-        ]
-      );
-
-      res.json({
-        ok: true,
-        shopifyProductId:
-          product.id,
-        shopifyVariantId:
-          variant?.id ?? null,
-        status: "DRAFT",
-        imageUploaded:
-          Boolean(
-            stagedImage
-          ),
-      });
+      res.json(result);
     } catch (error) {
       console.error(
         "Shopify product draft error:",
         error
       );
 
-      res.status(500).json({
+      if (
+        error instanceof
+        ShopifyProductDraftConflictError
+      ) {
+        res.status(409).json({
+          ok: false,
+          conflict: true,
+          reason:
+            error.reason,
+          ...(error.details ?? {}),
+          error:
+            error.message,
+        });
+        return;
+      }
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Shopify Draft konnte nicht erstellt werden.";
+
+      res.status(
+        message ===
+          "Produkt nicht gefunden."
+          ? 404
+          : 500
+      ).json({
         ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Shopify Draft konnte nicht erstellt werden.",
+        error: message,
       });
     }
   }
