@@ -1249,23 +1249,37 @@ router.post(
           SET
             draft_data =
               jsonb_set(
-                COALESCE(
-                  draft_data,
-                  '{}'::jsonb
-                ) ||
-                jsonb_build_object(
-                  'preparationByLine',
+                jsonb_set(
                   COALESCE(
-                    draft_data
-                      -> 'preparationByLine',
+                    draft_data,
                     '{}'::jsonb
-                  )
+                  ) ||
+                  jsonb_build_object(
+                    'preparationByLine',
+                    COALESCE(
+                      draft_data
+                        -> 'preparationByLine',
+                      '{}'::jsonb
+                    ),
+                    'manualResolutions',
+                    COALESCE(
+                      draft_data
+                        -> 'manualResolutions',
+                      '{}'::jsonb
+                    )
+                  ),
+                  ARRAY[
+                    'preparationByLine',
+                    $3
+                  ],
+                  $2::jsonb,
+                  true
                 ),
                 ARRAY[
-                  'preparationByLine',
+                  'manualResolutions',
                   $3
                 ],
-                $2::jsonb,
+                $4::jsonb,
                 true
               ),
             updated_at = NOW()
@@ -1275,10 +1289,19 @@ router.post(
         `,
         [
           draftId,
+
           JSON.stringify(
             preparation
           ),
+
           lineId,
+
+          JSON.stringify({
+            resolution:
+              "MANUAL_EXISTING",
+            productMasterId:
+              result.productId,
+          }),
         ]
       );
 
