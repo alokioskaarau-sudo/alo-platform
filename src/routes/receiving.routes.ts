@@ -1,8 +1,13 @@
 import { Router } from "express";
+import type { PoolClient } from "pg";
 import { db } from "../database/db.js";
 import {
   resolveProductIdentity,
 } from "../services/productIdentity.service.js";
+import {
+  prepareReceivingNewProduct,
+} from "../services/receivingProductPreparation.service.js";
+
 import {
   setShopifyOnlineInventory,
 } from "../services/shopifyInventory.service.js";
@@ -914,7 +919,12 @@ router.patch(
             document_date = $5,
             currency = $6,
             note = $7,
-            draft_data = $8::jsonb,
+            draft_data =
+              COALESCE(
+                draft_data,
+                '{}'::jsonb
+              ) ||
+              $8::jsonb,
             updated_at = NOW()
           WHERE
             id = $1
@@ -971,6 +981,349 @@ router.patch(
             ? error.message
             : "Warenannahme-Draft konnte nicht gespeichert werden.",
       });
+    }
+  }
+);
+
+
+router.post(
+  "/drafts/:draftId/prepare-product",
+  async (req, res) => {
+    let preparationLockClient:
+      PoolClient | null = null;
+
+    let preparationLockKey:
+      string | null = null;
+
+    try {
+      await ensureReceivingSchema();
+
+      const draftId =
+        String(
+          req.params.draftId ?? ""
+        ).trim();
+
+      if (!/^\d+$/.test(draftId)) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Ungültige Draft-ID.",
+        });
+        return;
+      }
+
+      const lineId =
+        String(
+          req.body?.lineId ?? ""
+        ).trim();
+
+      if (!lineId) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Draft-Positions-ID fehlt.",
+        });
+        return;
+      }
+
+      /*
+       * CONCURRENCY LOCK
+       *
+       * Zwei fast gleichzeitige Requests derselben
+       * Draft-Position dürfen niemals parallel einen
+       * Product Master erzeugen.
+       *
+       * Der zweite Request wartet hier und liest
+       * anschliessend den bereits aktualisierten Draft.
+       */
+      preparationLockClient =
+        await db.connect();
+
+      preparationLockKey =
+        `receiving-draft:${draftId}:line:${lineId}`;
+
+      await preparationLockClient.query(
+        `
+          SELECT pg_advisory_lock(
+            hashtext($1)
+          )
+        `,
+        [preparationLockKey]
+      );
+
+      /*
+       * Draft ERST NACH dem Lock lesen.
+       *
+       * Die Position selbst besitzt eine
+       * stabile line.id aus ALO STAFF.
+       */
+      const draftResult =
+        await db.query(
+          `
+            SELECT
+              id,
+              supplier,
+              status,
+              draft_data
+            FROM receiving_drafts
+            WHERE
+              id = $1
+              AND status = 'DRAFT'
+            LIMIT 1
+          `,
+          [draftId]
+        );
+
+      if (
+        draftResult.rows.length === 0
+      ) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Offene Warenannahme wurde nicht gefunden.",
+        });
+        return;
+      }
+
+      const draft =
+        draftResult.rows[0];
+
+      const data =
+        draft.draft_data &&
+        typeof draft.draft_data ===
+          "object"
+          ? draft.draft_data
+          : {};
+
+      const lines =
+        Array.isArray(data.lines)
+          ? data.lines
+          : [];
+
+      const line =
+        lines.find(
+          (entry: any) =>
+            String(
+              entry?.id ?? ""
+            ) === lineId
+        );
+
+      if (!line) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Lieferposition wurde im Draft nicht gefunden.",
+        });
+        return;
+      }
+
+      /*
+       * preparationByLine ist die dauerhafte
+       * Idempotenz-Marke.
+       *
+       * Sobald eine Product-Master-ID hier
+       * steht, darf diese Position niemals
+       * blind nochmals neu angelegt werden.
+       */
+      const preparationByLine =
+        data.preparationByLine &&
+        typeof data.preparationByLine ===
+          "object"
+          ? {
+              ...data.preparationByLine,
+            }
+          : {};
+
+      const previous =
+        preparationByLine[lineId] &&
+        typeof preparationByLine[
+          lineId
+        ] === "object"
+          ? preparationByLine[lineId]
+          : {};
+
+      const previousProductMasterId =
+        String(
+          previous.productMasterId ??
+            ""
+        ).trim();
+
+      const supplier =
+        String(
+          draft.supplier ?? ""
+        ).trim();
+
+      if (!supplier) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Lieferant fehlt im Draft.",
+        });
+        return;
+      }
+
+      /*
+       * WICHTIG:
+       * Dieser Endpunkt wird nur aufgerufen,
+       * nachdem ALO CORE die Position als
+       * NEW bestätigt hat.
+       *
+       * REVIEW wird vom Frontend niemals
+       * automatisch hierher geschickt.
+       */
+      const result =
+        await prepareReceivingNewProduct({
+          supplier,
+          product:
+            String(
+              line.product ?? ""
+            ).trim(),
+          barcode:
+            line.barcode ?? null,
+          articleNumber:
+            line.articleNumber ??
+            null,
+          unitSize:
+            line.unitSize ??
+            null,
+          unitCost:
+            line.purchasePrice ??
+            null,
+          productMasterId:
+            previousProductMasterId ||
+            null,
+        });
+
+      /*
+       * Nach erfolgreicher Preparation sofort
+       * Product-Master-ID dauerhaft im
+       * Server-Draft speichern.
+       */
+      preparationByLine[lineId] = {
+        status:
+          result.automation.status,
+        productMasterId:
+          result.productId,
+        created:
+          result.created,
+        reused:
+          result.reused,
+        linkedExistingShopify:
+          result.linkedExistingShopify,
+        automationStatus:
+          result.automation.status,
+        preparedAt:
+          new Date().toISOString(),
+      };
+
+      const preparation =
+        preparationByLine[lineId];
+
+      await db.query(
+        `
+          UPDATE receiving_drafts
+          SET
+            draft_data =
+              jsonb_set(
+                COALESCE(
+                  draft_data,
+                  '{}'::jsonb
+                ) ||
+                jsonb_build_object(
+                  'preparationByLine',
+                  COALESCE(
+                    draft_data
+                      -> 'preparationByLine',
+                    '{}'::jsonb
+                  )
+                ),
+                ARRAY[
+                  'preparationByLine',
+                  $3
+                ],
+                $2::jsonb,
+                true
+              ),
+            updated_at = NOW()
+          WHERE
+            id = $1
+            AND status = 'DRAFT'
+        `,
+        [
+          draftId,
+          JSON.stringify(
+            preparation
+          ),
+          lineId,
+        ]
+      );
+
+      res.json({
+        ok: true,
+        draftId,
+        lineId,
+        preparation,
+      });
+    } catch (error) {
+      console.error(
+        "[ALO RECEIVING PREPARE PRODUCT]",
+        error
+      );
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Produkt konnte nicht vorbereitet werden.";
+
+      /*
+       * Konflikte werden bewusst nicht als
+       * generischer Serverfehler behandelt.
+       */
+      if (
+        message ===
+          "EXACT_BARCODE_CONFLICT" ||
+        message ===
+          "SHOPIFY_MATCH_AMBIGUOUS"
+      ) {
+        res.status(409).json({
+          ok: false,
+          code: message,
+          error:
+            message ===
+            "EXACT_BARCODE_CONFLICT"
+              ? "Der Barcode gehört bereits zu einem bestehenden Product Master."
+              : "Shopify enthält mehrere mögliche Treffer. Produkt muss geprüft werden.",
+        });
+        return;
+      }
+
+      res.status(500).json({
+        ok: false,
+        error: message,
+      });
+    } finally {
+      if (
+        preparationLockClient &&
+        preparationLockKey
+      ) {
+        try {
+          await preparationLockClient.query(
+            `
+              SELECT pg_advisory_unlock(
+                hashtext($1)
+              )
+            `,
+            [preparationLockKey]
+          );
+        } catch (unlockError) {
+          console.error(
+            "[ALO RECEIVING PREPARE PRODUCT UNLOCK]",
+            unlockError
+          );
+        } finally {
+          preparationLockClient.release();
+        }
+      }
     }
   }
 );
@@ -2426,6 +2779,186 @@ router.post(
    STAGED RECEIVING V3
    EXPECTED -> ARRIVED -> ACCEPTED
 ========================================================= */
+
+router.delete(
+  "/deliveries/:deliveryId",
+  async (req, res) => {
+    const client =
+      await db.connect();
+
+    try {
+      await ensureReceivingSchema();
+
+      const deliveryId =
+        String(
+          req.params.deliveryId ?? ""
+        ).trim();
+
+      if (!/^\d+$/.test(deliveryId)) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Ungültige Lieferungs-ID.",
+        });
+        return;
+      }
+
+      await client.query("BEGIN");
+
+      /*
+       * Ganze Lieferung sperren.
+       */
+      const deliveryResult =
+        await client.query(
+          `
+            SELECT
+              id,
+              supplier,
+              delivery_note,
+              status
+            FROM receiving_deliveries
+            WHERE id = $1
+            FOR UPDATE
+          `,
+          [deliveryId]
+        );
+
+      if (
+        deliveryResult.rows.length === 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        res.status(404).json({
+          ok: false,
+          error:
+            "Lieferung nicht gefunden.",
+        });
+        return;
+      }
+
+      /*
+       * Harte Sicherheitsregel:
+       *
+       * Sobald auch nur EINE Allocation
+       * ACCEPTED ist, darf die Lieferung
+       * niemals gelöscht werden.
+       */
+      const acceptedResult =
+        await client.query(
+          `
+            SELECT
+              a.id,
+              a.store_id
+            FROM receiving_allocations a
+            JOIN receiving_lines rl
+              ON rl.id =
+                a.receiving_line_id
+            WHERE
+              rl.delivery_id = $1
+              AND a.status = 'ACCEPTED'
+            LIMIT 1
+            FOR UPDATE OF a
+          `,
+          [deliveryId]
+        );
+
+      if (
+        acceptedResult.rows.length > 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        res.status(409).json({
+          ok: false,
+          code:
+            "DELIVERY_ALREADY_ACCEPTED",
+          error:
+            "Diese Lieferung kann nicht entfernt werden, weil bereits Ware angenommen und Bestand gebucht wurde.",
+        });
+        return;
+      }
+
+      /*
+       * Zusätzlich alle noch vorhandenen
+       * Allocations sperren, damit während
+       * des Löschens kein ARRIVE/ACCEPT
+       * parallel laufen kann.
+       */
+      await client.query(
+        `
+          SELECT
+            a.id
+          FROM receiving_allocations a
+          JOIN receiving_lines rl
+            ON rl.id =
+              a.receiving_line_id
+          WHERE rl.delivery_id = $1
+          FOR UPDATE OF a
+        `,
+        [deliveryId]
+      );
+
+      const delivery =
+        deliveryResult.rows[0];
+
+      /*
+       * receiving_lines:
+       *   ON DELETE CASCADE
+       *
+       * receiving_allocations:
+       *   ON DELETE CASCADE
+       *
+       * Kein ACCEPTED vorhanden =>
+       * kein realer Bestand muss
+       * rückgängig gemacht werden.
+       */
+      await client.query(
+        `
+          DELETE FROM receiving_deliveries
+          WHERE id = $1
+        `,
+        [deliveryId]
+      );
+
+      await client.query("COMMIT");
+
+      res.json({
+        ok: true,
+        removed: true,
+        deliveryId,
+        supplier:
+          delivery.supplier,
+        deliveryNote:
+          delivery.delivery_note,
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "[ALO RECEIVING DELETE DELIVERY]",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Lieferung konnte nicht entfernt werden.",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
 
 router.get(
   "/pending",
