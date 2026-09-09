@@ -1026,6 +1026,27 @@ router.post(
         return;
       }
 
+      const mode =
+        String(
+          req.body?.mode ??
+            "AUTO_NEW"
+        )
+          .trim()
+          .toUpperCase();
+
+      if (
+        mode !== "AUTO_NEW" &&
+        mode !== "MANUAL_NEW"
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Ungültiger Preparation-Modus.",
+        });
+
+        return;
+      }
+
       /*
        * CONCURRENCY LOCK
        *
@@ -1189,6 +1210,9 @@ router.post(
           unitCost:
             line.purchasePrice ??
             null,
+          manualOverride:
+            mode === "MANUAL_NEW",
+
           productMasterId:
             previousProductMasterId ||
             null,
@@ -1283,7 +1307,9 @@ router.post(
         message ===
           "EXACT_BARCODE_CONFLICT" ||
         message ===
-          "SHOPIFY_MATCH_AMBIGUOUS"
+          "SHOPIFY_MATCH_AMBIGUOUS" ||
+        message ===
+          "PRODUCT_MATCH_REQUIRES_REVIEW"
       ) {
         res.status(409).json({
           ok: false,

@@ -37,6 +37,20 @@ export type PrepareReceivingNewProductInput = {
   unitCost?: number | null;
 
   /**
+   * false = AUTO_NEW
+   *   Nur NO_MATCH darf neu angelegt werden.
+   *
+   * true = MANUAL_NEW
+   *   Mitarbeiter hat bewusst "wirklich neu"
+   *   bestätigt. Fuzzy-/Titel-Matches dürfen
+   *   überschrieben werden.
+   *
+   * Exakte Barcode-Konflikte bleiben IMMER
+   * gesperrt.
+   */
+  manualOverride?: boolean;
+
+  /**
    * Falls diese Draft-Position bereits
    * vorbereitet wurde, wird derselbe
    * Product Master wiederverwendet.
@@ -109,6 +123,9 @@ export async function prepareReceivingNewProduct(
 
   const unitSize =
     cleanText(input.unitSize);
+
+  const manualOverride =
+    input.manualOverride === true;
 
   if (!supplier) {
     throw new Error(
@@ -217,6 +234,17 @@ export async function prepareReceivingNewProduct(
         "EXACT_BARCODE_CONFLICT"
       );
     }
+
+    /*
+     * AUTO_NEW darf auch einen sicheren
+     * Titel-/Supplier-/Size-Match niemals
+     * als neues Produkt überschreiben.
+     */
+    if (!manualOverride) {
+      throw new Error(
+        "PRODUCT_MATCH_REQUIRES_REVIEW"
+      );
+    }
   }
 
   if (
@@ -238,6 +266,22 @@ export async function prepareReceivingNewProduct(
         "EXACT_BARCODE_CONFLICT"
       );
     }
+  }
+
+  /*
+   * Auch AMBIGUOUS ohne exakten Barcode
+   * darf nur durch eine bewusste
+   * MANUAL_NEW-Entscheidung überschrieben
+   * werden.
+   */
+  if (
+    resolution.status ===
+      "AMBIGUOUS" &&
+    !manualOverride
+  ) {
+    throw new Error(
+      "PRODUCT_MATCH_REQUIRES_REVIEW"
+    );
   }
 
   /*
