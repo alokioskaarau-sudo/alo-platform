@@ -1,8 +1,67 @@
+import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import multer from 'multer';
 import OpenAI, { toFile } from 'openai';
 
+import { db } from '../database/db.js';
+
 const router = Router();
+
+const DELIVERY_PARSER_VERSION =
+  'delivery-v2';
+
+let cacheTableReady:
+  Promise<void> | null = null;
+
+function ensureDeliveryAiCache() {
+  if (!cacheTableReady) {
+    cacheTableReady = (async () => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS
+          delivery_ai_cache (
+            id BIGSERIAL PRIMARY KEY,
+            file_hash TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            original_name TEXT,
+            mime_type TEXT,
+            file_size BIGINT,
+            result_json JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL
+              DEFAULT NOW(),
+            last_used_at TIMESTAMPTZ NOT NULL
+              DEFAULT NOW(),
+            hit_count INTEGER NOT NULL
+              DEFAULT 0,
+            UNIQUE (
+              file_hash,
+              parser_version
+            )
+          )
+      `);
+
+      await db.query(`
+        CREATE INDEX IF NOT EXISTS
+          delivery_ai_cache_last_used_idx
+        ON delivery_ai_cache (
+          last_used_at DESC
+        )
+      `);
+    })().catch((error) => {
+      cacheTableReady = null;
+      throw error;
+    });
+  }
+
+  return cacheTableReady;
+}
+
+function hashDeliveryFile(
+  buffer: Buffer
+) {
+  return createHash('sha256')
+    .update(buffer)
+    .digest('hex');
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -41,6 +100,8 @@ const deliverySchema = {
     },
     deliveryNote: {
       type: ['string', 'null'],
+      description:
+        'Die echte Lieferscheinnummer/Delivery-Note-Nummer exakt aus dem Dokument. Nicht mit Bestellnummer, Rechnungsnummer, Kundennummer oder Datum verwechseln.',
     },
     documentDate: {
       type: ['string', 'null'],
@@ -170,20 +231,70 @@ router.post(
     let uploadedFileId: string | null = null;
 
     try {
-      if (!process.env.OPENAI_API_KEY) {
-        res.status(500).json({
-          ok: false,
-          error:
-            'OPENAI_API_KEY ist auf dem Server nicht gesetzt.',
-        });
-        return;
-      }
-
       if (!req.file) {
         res.status(400).json({
           ok: false,
           error:
             'Keine Lieferschein-Datei empfangen.',
+        });
+        return;
+      }
+
+      const fileHash =
+        hashDeliveryFile(req.file.buffer);
+
+      await ensureDeliveryAiCache();
+
+      const cached =
+        await db.query<{
+          result_json: unknown;
+        }>(
+          `
+            UPDATE delivery_ai_cache
+            SET
+              last_used_at = NOW(),
+              hit_count = hit_count + 1
+            WHERE
+              file_hash = $1
+              AND parser_version = $2
+            RETURNING result_json
+          `,
+          [
+            fileHash,
+            DELIVERY_PARSER_VERSION,
+          ]
+        );
+
+      if (cached.rows[0]) {
+        console.log(
+          '[ALO DELIVERY AI CACHE HIT]',
+          fileHash.slice(0, 12)
+        );
+
+        res.json({
+          ok: true,
+          draft:
+            cached.rows[0].result_json,
+          cache: {
+            hit: true,
+            parserVersion:
+              DELIVERY_PARSER_VERSION,
+          },
+        });
+
+        return;
+      }
+
+      console.log(
+        '[ALO DELIVERY AI CACHE MISS]',
+        fileHash.slice(0, 12)
+      );
+
+      if (!process.env.OPENAI_API_KEY) {
+        res.status(500).json({
+          ok: false,
+          error:
+            'OPENAI_API_KEY ist auf dem Server nicht gesetzt.',
         });
         return;
       }
@@ -229,7 +340,12 @@ Erstelle ausschließlich einen strukturierten JSON-Entwurf.
 WICHTIGE REGELN:
 - Nichts erfinden.
 - Lieferant nur übernehmen, wenn er im Dokument erkennbar ist.
-- Lieferscheinnummer möglichst exakt übernehmen.
+- deliveryNote ist ausschließlich die echte Lieferscheinnummer.
+- Suche dafür insbesondere nach Bezeichnungen wie "Lieferschein", "Lieferschein-Nr.", "Lieferscheinnummer", "Delivery Note", "Delivery Note No.", "Delivery No." oder eindeutig gleichbedeutenden Feldern.
+- Den zugehörigen Wert exakt übernehmen, inklusive Buchstaben, Bindestrichen, Schrägstrichen und führenden Nullen.
+- Bestellnummer, Order Number, Rechnungsnummer, Invoice Number, Kundennummer, Debitorennummer, Referenznummer oder Datum niemals als deliveryNote verwenden.
+- Wenn mehrere Nummern sichtbar sind, nur die Nummer übernehmen, die eindeutig dem Lieferschein selbst zugeordnet ist.
+- Wenn keine eindeutige Lieferscheinnummer erkennbar ist, deliveryNote=null setzen statt zu raten.
 - Jede echte Produktposition einzeln erfassen.
 - Mengen exakt aus dem Dokument übernehmen.
 - quantity ist die im Dokument sichtbare Mengenangabe; nichts hineininterpretieren.
@@ -285,9 +401,62 @@ WICHTIGE REGELN:
         response.output_text
       );
 
+      await db.query(
+        `
+          INSERT INTO delivery_ai_cache (
+            file_hash,
+            parser_version,
+            original_name,
+            mime_type,
+            file_size,
+            result_json
+          )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6::jsonb
+          )
+          ON CONFLICT (
+            file_hash,
+            parser_version
+          )
+          DO UPDATE SET
+            result_json =
+              EXCLUDED.result_json,
+            original_name =
+              EXCLUDED.original_name,
+            mime_type =
+              EXCLUDED.mime_type,
+            file_size =
+              EXCLUDED.file_size,
+            last_used_at = NOW()
+        `,
+        [
+          fileHash,
+          DELIVERY_PARSER_VERSION,
+          req.file.originalname || null,
+          req.file.mimetype || null,
+          req.file.size,
+          JSON.stringify(parsed),
+        ]
+      );
+
+      console.log(
+        '[ALO DELIVERY AI CACHE SAVED]',
+        fileHash.slice(0, 12)
+      );
+
       res.json({
         ok: true,
         draft: parsed,
+        cache: {
+          hit: false,
+          parserVersion:
+            DELIVERY_PARSER_VERSION,
+        },
       });
     } catch (error) {
       console.error(
