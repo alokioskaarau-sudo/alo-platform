@@ -3,6 +3,9 @@ import { db } from "../database/db.js";
 import {
   resolveProductIdentity,
 } from "../services/productIdentity.service.js";
+import {
+  setShopifyOnlineInventory,
+} from "../services/shopifyInventory.service.js";
 
 const router = Router();
 
@@ -1179,7 +1182,11 @@ router.post(
                   id,
                   barcode,
                   title,
-                  product_data
+                  product_data,
+                  shopify_status,
+                  shopify_product_id,
+                  shopify_variant_id,
+                  shopify_inventory_item_id
               `,
               [
                 barcode,
@@ -1551,12 +1558,87 @@ router.post(
           shopifyVariantId:
             product.shopify_variant_id ??
             null,
+          shopifyInventoryItemId:
+            product.shopify_inventory_item_id ??
+            null,
           needsReview:
             createdProduct,
         });
       }
 
       await client.query("COMMIT");
+
+      for (const line of results) {
+        const onlineStock =
+          Array.isArray(line.stock)
+            ? line.stock.find(
+                (entry: any) =>
+                  entry.store === "online"
+              )
+            : null;
+
+        if (!onlineStock) {
+          line.shopifyInventorySync = {
+            status: "NOT_REQUESTED",
+          };
+          continue;
+        }
+
+        if (
+          !line.shopifyInventoryItemId
+        ) {
+          line.shopifyInventorySync = {
+            status: "SKIPPED",
+            reason:
+              "NO_SHOPIFY_INVENTORY_ITEM",
+          };
+          continue;
+        }
+
+        try {
+          const sync =
+            await setShopifyOnlineInventory({
+              inventoryItemId:
+                line.shopifyInventoryItemId,
+              quantity:
+                onlineStock.newQuantity,
+              reference:
+                `${delivery.id}-${line.lineId}`,
+            });
+
+          line.shopifyInventorySync = {
+            status: "SYNCED",
+            locationId:
+              sync.locationId,
+            quantity:
+              sync.quantity,
+          };
+        } catch (syncError) {
+          console.error(
+            "[ALO RECEIVING SHOPIFY INVENTORY]",
+            {
+              deliveryId:
+                String(delivery.id),
+              lineId:
+                line.lineId,
+              productId:
+                line.productId,
+              error:
+                syncError instanceof Error
+                  ? syncError.message
+                  : syncError,
+            }
+          );
+
+          line.shopifyInventorySync = {
+            status: "FAILED",
+            error:
+              syncError instanceof Error
+                ? syncError.message
+                : "Shopify-Bestand konnte nicht synchronisiert werden.",
+          };
+        }
+      }
 
       res.json({
         ok: true,
