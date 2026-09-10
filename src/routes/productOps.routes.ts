@@ -1,6 +1,12 @@
+import {
+  normalizeAloSeoDescription,
+  normalizeAloSeoTitle,
+} from "../utils/aloSeo.js";
+
 import { Router } from "express";
 import multer from "multer";
 import { removeBackground } from "@imgly/background-removal-node";
+import sharp from "sharp";
 import axios from "axios";
 
 import { db } from "../database/db.js";
@@ -1211,8 +1217,64 @@ router.post(
       const arrayBuffer =
         await result.arrayBuffer();
 
-      const output =
+      const cutout =
         Buffer.from(arrayBuffer);
+
+      /*
+       * ALO SHOP IMAGE STANDARD
+       *
+       * 1. Transparente Leerfläche um das Produkt entfernen.
+       * 2. Produkt proportional skalieren.
+       * 3. Auf transparente 1200 x 1200 Canvas setzen.
+       * 4. Verpackung selbst niemals verzerren.
+       *
+       * Maximale Produktfläche:
+       * 1040 x 1040 px = ca. 86,7 % der Canvas.
+       */
+      const trimmed =
+        await sharp(cutout)
+          .trim({
+            background: {
+              r: 0,
+              g: 0,
+              b: 0,
+              alpha: 0,
+            },
+          })
+          .png()
+          .toBuffer();
+
+      const output =
+        await sharp(trimmed)
+          .resize({
+            width: 1040,
+            height: 1040,
+            fit: "contain",
+            position: "centre",
+            background: {
+              r: 0,
+              g: 0,
+              b: 0,
+              alpha: 0,
+            },
+            withoutEnlargement: false,
+          })
+          .extend({
+            top: 80,
+            bottom: 80,
+            left: 80,
+            right: 80,
+            background: {
+              r: 0,
+              g: 0,
+              b: 0,
+              alpha: 0,
+            },
+          })
+          .png({
+            compressionLevel: 9,
+          })
+          .toBuffer();
 
       res.setHeader(
         "Content-Type",
@@ -2184,31 +2246,24 @@ router.post(
       }
 
       const seoTitle =
-        aloText(
-          draft.seoTitle
+        normalizeAloSeoTitle(
+          draft.seoTitle,
+          draft.title ??
+            row.title
         );
 
       const seoDescription =
-        aloText(
-          draft.seoDescription
+        normalizeAloSeoDescription(
+          draft.seoDescription,
+          draft.title ??
+            row.title
         );
 
-      if (
-        seoTitle ||
-        seoDescription
-      ) {
-        productInput.seo = {};
-
-        if (seoTitle) {
-          productInput.seo.title =
-            seoTitle;
-        }
-
-        if (seoDescription) {
-          productInput.seo.description =
-            seoDescription;
-        }
-      }
+      productInput.seo = {
+        title: seoTitle,
+        description:
+          seoDescription,
+      };
 
       const metafields =
         buildShopifyProductMetafields(

@@ -11,7 +11,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 12 * 1024 * 1024,
-    files: 2,
+    files: 3,
   },
   fileFilter: (_req, file, cb) => {
     const allowed = new Set([
@@ -270,7 +270,11 @@ router.post(
       maxCount: 1,
     },
     {
-      name: 'back',
+      name: 'ingredients',
+      maxCount: 1,
+    },
+    {
+      name: 'nutrition',
       maxCount: 1,
     },
   ]),
@@ -279,7 +283,11 @@ router.post(
       | string
       | null = null;
 
-    let backFileId:
+    let ingredientsFileId:
+      | string
+      | null = null;
+
+    let nutritionFileId:
       | string
       | null = null;
 
@@ -309,8 +317,11 @@ router.post(
       const front =
         files?.front?.[0];
 
-      const back =
-        files?.back?.[0];
+      const ingredients =
+        files?.ingredients?.[0];
+
+      const nutrition =
+        files?.nutrition?.[0];
 
       if (!front) {
         res.status(400).json({
@@ -345,24 +356,44 @@ router.post(
       frontFileId =
         uploadedFront.id;
 
-      if (back) {
-        const uploadedBack =
+      if (ingredients) {
+        const uploadedIngredients =
           await openai.files.create({
             file: await toFile(
-              back.buffer,
-              back.originalname ||
-                'product-back.jpg',
+              ingredients.buffer,
+              ingredients.originalname ||
+                'product-ingredients.jpg',
               {
                 type:
-                  back.mimetype,
+                  ingredients.mimetype,
               }
             ),
             purpose:
               'user_data',
           });
 
-        backFileId =
-          uploadedBack.id;
+        ingredientsFileId =
+          uploadedIngredients.id;
+      }
+
+      if (nutrition) {
+        const uploadedNutrition =
+          await openai.files.create({
+            file: await toFile(
+              nutrition.buffer,
+              nutrition.originalname ||
+                'product-nutrition.jpg',
+              {
+                type:
+                  nutrition.mimetype,
+              }
+            ),
+            purpose:
+              'user_data',
+          });
+
+        nutritionFileId =
+          uploadedNutrition.id;
       }
 
       const content: any[] = [
@@ -378,11 +409,14 @@ ${barcode || 'Keiner übergeben'}
 
 PRIORITÄT DER INFORMATIONEN:
 
-1. Sichtbare Originalverpackung ist die primäre Faktenquelle.
-2. Ein vom ALO Scanner übergebener Barcode hat Vorrang vor einem unsicher gelesenen Barcode.
-3. Markenname, Produktname, Geschmack, Größe und Herkunft exakt erfassen.
-4. Zutaten, Allergene, Spuren und Nährwerte niemals erfinden.
-5. Shop-Content und SEO dürfen aus bestätigten Produktfakten optimiert formuliert werden.
+1. Das VORDERSEITENBILD ist primär für Produktidentität, Marke, Produktname, Variante, Geschmack und Packungsgrösse.
+2. Das ZUTATENBILD ist die primäre Quelle für ingredients, allergens und traces.
+3. Das NÄHRWERTBILD ist die primäre Quelle für nutritionPer100.
+4. Ein vom ALO Scanner übergebener Barcode hat Vorrang vor einem unsicher gelesenen Barcode.
+5. Zutaten, Allergene, Spuren und Nährwerte niemals erfinden.
+6. Wenn Zutaten auf Englisch oder einer anderen Sprache lesbar sind, übersetze sie vollständig und sinngenau ins Deutsche. E-Nummern, Prozentwerte, Klammern, Mengen und fachliche Angaben unverändert erhalten.
+7. Allergene und Spuren ebenfalls auf Deutsch ausgeben.
+8. Shop-Content und SEO dürfen aus bestätigten Produktfakten optimiert formuliert werden.
 
 TITEL:
 - MUSS IN GROSSBUCHSTABEN sein.
@@ -410,9 +444,12 @@ Eistee
 Wasser
 
 FOOD DATA:
-- ingredients möglichst originalgetreu von der Verpackung.
-- allergens als einzelne strukturierte Allergene.
-- traces nur bei expliziten Spuren-/May-contain-Angaben.
+- ingredients möglichst vollständig von der Verpackung übernehmen.
+- Fremdsprachige Zutatenlisten vollständig und fachlich korrekt ins Deutsche übersetzen.
+- E-Nummern, Prozentwerte, Mengen, Klammerstrukturen und deklarierte Zusatzstoffe erhalten.
+- Keine Zutaten ergänzen, die nicht sichtbar oder sicher belegt sind.
+- allergens als einzelne strukturierte Allergene auf Deutsch.
+- traces nur bei expliziten Spuren-/May-contain-Angaben und ebenfalls auf Deutsch.
 - Keine Allergene aus allgemeinem Wissen ergänzen.
 - Ist Text nicht zuverlässig lesbar, Feld leer/null lassen und warning erzeugen.
 
@@ -510,12 +547,36 @@ Erfinde keine Fakten.
         },
       ];
 
-      if (backFileId) {
+      if (ingredientsFileId) {
+        content.push({
+          type:
+            'input_text',
+          text:
+            'Das folgende Bild ist speziell für ZUTATEN / ALLERGENE / SPUREN bestimmt.',
+        });
+
         content.push({
           type:
             'input_image',
           file_id:
-            backFileId,
+            ingredientsFileId,
+          detail: 'high',
+        });
+      }
+
+      if (nutritionFileId) {
+        content.push({
+          type:
+            'input_text',
+          text:
+            'Das folgende Bild ist speziell für NÄHRWERTE bestimmt.',
+        });
+
+        content.push({
+          type:
+            'input_image',
+          file_id:
+            nutritionFileId,
           detail: 'high',
         });
       }
@@ -560,6 +621,9 @@ PRODUKTDATEN:
 - Volumen niemals in Gewicht umrechnen. Aus "355 ml" darf nicht "355 g" entstehen.
 - Wenn kein echtes Gewicht zuverlässig sichtbar oder angegeben ist, setze netWeight auf null.
 - Zutaten, Allergene, Spuren und Nährwerte niemals erraten.
+- Zutaten müssen auf Deutsch ausgegeben werden. Wenn die Verpackung Englisch oder eine andere Sprache verwendet, übersetze die lesbare Zutatenliste vollständig und sinngenau ins Deutsche.
+- Dabei E-Nummern, Prozentangaben, Mengen, Klammern und technische Deklarationen erhalten.
+- Allergene und traces ebenfalls auf Deutsch ausgeben.
 - Nicht sichtbare oder nicht sicher lesbare Lebensmittelangaben bleiben null bzw. leere Arrays.
 - title soll ein sauberer verkaufsfähiger Produkttitel sein und wird später automatisch grossgeschrieben.
 - productName darf intern ausgefüllt werden, soll aber nicht künstlich den Markennamen duplizieren.
@@ -653,10 +717,18 @@ Das Ergebnis muss exakt dem vorgegebenen JSON-Schema entsprechen.`,
         } catch {}
       }
 
-      if (backFileId) {
+      if (ingredientsFileId) {
         try {
           await openai.files.delete(
-            backFileId
+            ingredientsFileId
+          );
+        } catch {}
+      }
+
+      if (nutritionFileId) {
+        try {
+          await openai.files.delete(
+            nutritionFileId
           );
         } catch {}
       }

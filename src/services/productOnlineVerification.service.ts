@@ -515,6 +515,41 @@ verifiedDraft wiederholt werden.
 Neue Food-Daten nur eintragen, wenn sie durch
 die gefundenen Quellen belastbar sind.
 
+SPRACHE / ZUTATEN:
+
+- ingredients im verifiedDraft immer auf Deutsch ausgeben.
+
+- Wenn eine belastbare Zutatenliste nur auf Englisch
+  oder in einer anderen Sprache verfügbar ist,
+  vollständig und sinngenau ins Deutsche übersetzen.
+
+- Den sachlichen Inhalt dabei niemals ergänzen,
+  verkürzen oder verändern.
+
+- E-Nummern, Prozentangaben, Mengenangaben,
+  Zusatzstoffnummern und Klammerstrukturen erhalten.
+
+- Marken- und Produktnamen nicht unnötig übersetzen.
+
+- allergens auf Deutsch ausgeben.
+
+- traces auf Deutsch ausgeben.
+
+- Eine Übersetzung darf niemals verwendet werden,
+  um fehlende Zutaten oder Allergene herzuleiten.
+
+- Wenn für exakt diese Produktvariante keine
+  belastbare Zutatenliste gefunden wird,
+  ingredients null lassen.
+
+- Fehlt ingredients im aktuellen Draft,
+  gezielt nach Zutaten suchen.
+
+- Dafür zuerst SWEETS.CH prüfen,
+  danach Hersteller-/Markenquelle
+  und anschließend weitere belastbare Quellen
+  derselben Produktvariante.
+
 Versuche für das exakt identifizierte Produkt
 insbesondere vollständig zu ermitteln:
 

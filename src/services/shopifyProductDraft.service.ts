@@ -1,3 +1,8 @@
+import {
+  normalizeAloSeoDescription,
+  normalizeAloSeoTitle,
+} from "../utils/aloSeo.js";
+
 import axios from "axios";
 
 import { db } from "../database/db.js";
@@ -909,24 +914,25 @@ export async function createShopifyProductDraft(
       draft.tags;
   }
 
-  if (
-    draft.seoTitle ||
-    draft.seoDescription
-  ) {
-    productInput.seo = {};
+  const seoTitle =
+    normalizeAloSeoTitle(
+      draft.seoTitle,
+      draft.title ??
+        row.title
+    );
 
-    if (draft.seoTitle) {
-      productInput.seo.title =
-        draft.seoTitle;
-    }
+  const seoDescription =
+    normalizeAloSeoDescription(
+      draft.seoDescription,
+      draft.title ??
+        row.title
+    );
 
-    if (
-      draft.seoDescription
-    ) {
-      productInput.seo.description =
-        draft.seoDescription;
-    }
-  }
+  productInput.seo = {
+    title: seoTitle,
+    description:
+      seoDescription,
+  };
 
   const productMetafields =
     buildShopifyProductMetafields(
