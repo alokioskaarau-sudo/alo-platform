@@ -4337,7 +4337,23 @@ router.patch(
           allocations.olten +
           allocations.online;
 
-        if (total !== quantity) {
+        /*
+         * total === 0 bedeutet:
+         * Position bewusst aus der offenen
+         * Warenannahme entfernen.
+         *
+         * Die receiving_line bleibt als Historie
+         * bestehen, aber alle offenen Allocations
+         * werden entfernt. Dadurch kann daraus
+         * später kein Bestand gebucht werden.
+         */
+        const removePosition =
+          total === 0;
+
+        if (
+          !removePosition &&
+          total !== quantity
+        ) {
           throw new ReceivingValidationError(
             `${line.product_name}: Verteilung ${total} stimmt nicht mit Liefermenge ${quantity} überein.`
           );

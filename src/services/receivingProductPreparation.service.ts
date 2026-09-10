@@ -216,6 +216,60 @@ export async function prepareReceivingNewProduct(
         unitSize || null,
     });
 
+  /*
+   * Ein bereits gelernter Lieferantenartikel
+   * ist eine eindeutige Product-Master-Identität.
+   *
+   * AUTO_NEW kann hier entstehen, wenn die
+   * Preview/Client-Seite noch NEW angenommen hat.
+   * Statt zu blockieren verwenden wir den bereits
+   * bekannten Product Master wieder.
+   *
+   * Keine Neuanlage.
+   * Keine zweite Produkt-KI.
+   * Kein Shopify-Duplikat.
+   */
+  if (
+    resolution.status === "MATCH" &&
+    resolution.matchedBy === "SUPPLIER_ARTICLE" &&
+    !manualOverride
+  ) {
+    const matchedProductId =
+      String(
+        resolution.product?.id ?? ""
+      ).trim();
+
+    if (!/^\d+$/.test(matchedProductId)) {
+      throw new Error(
+        "Ungültiger Product Master beim Lieferantenartikel-Match."
+      );
+    }
+
+    await rememberSupplierArticle({
+      productId: matchedProductId,
+      supplier,
+      articleNumber:
+        articleNumber || null,
+    });
+
+    const automation =
+      await automateReceivingProduct(
+        matchedProductId
+      );
+
+    return {
+      productId: matchedProductId,
+      created: false,
+      reused: true,
+      linkedExistingShopify:
+        Boolean(
+          resolution.product
+            ?.shopify_product_id
+        ),
+      automation,
+    };
+  }
+
   if (
     resolution.status ===
     "MATCH"
