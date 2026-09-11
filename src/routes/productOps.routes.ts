@@ -675,22 +675,25 @@ router.post(
               NOW()
             )
 
+            /*
+             * EAN ist die primäre Produkt-Identität.
+             *
+             * Bei zwei oder mehreren gleichzeitigen Staff-Requests
+             * gewinnt der erste INSERT.
+             *
+             * Weitere Requests mit derselben EAN bekommen durch
+             * RETURNING dieselbe bestehende Product-Master-ID zurück,
+             * dürfen dessen bereits gespeicherte Produktdaten aber
+             * NICHT mit einem zweiten AI-Draft überschreiben.
+             *
+             * Die self-assignment UPDATE-Operation ist absichtlich
+             * minimal. Sie erlaubt ein atomisches RETURNING des
+             * bereits vorhandenen Datensatzes.
+             */
             ON CONFLICT (barcode)
             DO UPDATE SET
-              title =
-                EXCLUDED.title,
-              product_data =
-                EXCLUDED.product_data,
-              source_type =
-                EXCLUDED.source_type,
-              review_status =
-                'REVIEWED',
-              reviewed_by =
-                EXCLUDED.reviewed_by,
-              reviewed_at =
-                NOW(),
-              updated_at =
-                NOW()
+              barcode =
+                products.barcode
 
             RETURNING
               id,
@@ -776,6 +779,7 @@ router.put(
               product_data,
               source_type,
               review_status,
+              archived_at,
               shopify_status,
               shopify_product_id,
               shopify_variant_id,
@@ -795,6 +799,21 @@ router.put(
         res.status(404).json({
           ok: false,
           error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      /*
+       * Schutz vor veralteten Staff-Screens:
+       * Ein bereits archiviertes Produkt darf nicht
+       * über einen noch offenen Editor verändert werden.
+       */
+      if (existing.archived_at) {
+        res.status(409).json({
+          ok: false,
+          code: "PRODUCT_ARCHIVED",
+          error:
+            "Dieses Produkt wurde bereits archiviert. Bitte die Produktliste neu laden.",
         });
         return;
       }
