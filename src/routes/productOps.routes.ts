@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import sharp from "sharp";
 import { removeBackground } from "@imgly/background-removal-node";
 import axios from "axios";
 
@@ -1191,9 +1192,35 @@ router.post(
         return;
       }
 
+      /*
+       * Normalize the uploaded image before handing it to IMG.LY.
+       *
+       * Expo / multipart uploads can carry incomplete or misleading MIME
+       * information. IMG.LY was previously receiving the raw Node Buffer,
+       * which caused:
+       *
+       *   Unsupported format:
+       *
+       * Converting through sharp guarantees real PNG bytes and the typed
+       * Blob gives IMG.LY an explicit image/png content type.
+       */
+      const normalizedInput =
+        await sharp(file.buffer)
+          .rotate()
+          .png()
+          .toBuffer();
+
+      const inputBlob =
+        new Blob(
+          [new Uint8Array(normalizedInput)],
+          {
+            type: "image/png",
+          }
+        );
+
       const result =
         await removeBackground(
-          file.buffer,
+          inputBlob,
           {
             debug: false,
             model: "medium",

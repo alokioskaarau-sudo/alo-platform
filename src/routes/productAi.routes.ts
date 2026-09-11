@@ -8,7 +8,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 12 * 1024 * 1024,
-    files: 2,
+    files: 3,
   },
   fileFilter: (_req, file, cb) => {
     const allowed = new Set([
@@ -267,7 +267,11 @@ router.post(
       maxCount: 1,
     },
     {
-      name: 'back',
+      name: 'ingredients',
+      maxCount: 1,
+    },
+    {
+      name: 'nutrition',
       maxCount: 1,
     },
   ]),
@@ -276,7 +280,11 @@ router.post(
       | string
       | null = null;
 
-    let backFileId:
+    let ingredientsFileId:
+      | string
+      | null = null;
+
+    let nutritionFileId:
       | string
       | null = null;
 
@@ -306,8 +314,11 @@ router.post(
       const front =
         files?.front?.[0];
 
-      const back =
-        files?.back?.[0];
+      const ingredients =
+        files?.ingredients?.[0];
+
+      const nutrition =
+        files?.nutrition?.[0];
 
       if (!front) {
         res.status(400).json({
@@ -342,24 +353,46 @@ router.post(
       frontFileId =
         uploadedFront.id;
 
-      if (back) {
-        const uploadedBack =
+      if (ingredients) {
+        const uploadedIngredients =
           await openai.files.create({
             file: await toFile(
-              back.buffer,
-              back.originalname ||
-                'product-back.jpg',
+              ingredients.buffer,
+              ingredients.originalname ||
+                'product-ingredients.jpg',
               {
                 type:
-                  back.mimetype,
+                  ingredients.mimetype ||
+                  'image/jpeg',
               }
             ),
             purpose:
               'user_data',
           });
 
-        backFileId =
-          uploadedBack.id;
+        ingredientsFileId =
+          uploadedIngredients.id;
+      }
+
+      if (nutrition) {
+        const uploadedNutrition =
+          await openai.files.create({
+            file: await toFile(
+              nutrition.buffer,
+              nutrition.originalname ||
+                'product-nutrition.jpg',
+              {
+                type:
+                  nutrition.mimetype ||
+                  'image/jpeg',
+              }
+            ),
+            purpose:
+              'user_data',
+          });
+
+        nutritionFileId =
+          uploadedNutrition.id;
       }
 
       const content: any[] = [
@@ -507,12 +540,34 @@ Erfinde keine Fakten.
         },
       ];
 
-      if (backFileId) {
+      if (ingredientsFileId) {
+        content.push({
+          type: 'input_text',
+          text:
+            'Das folgende Bild ist speziell für ZUTATEN / ALLERGENE / SPUREN bestimmt.',
+        });
+
         content.push({
           type:
             'input_image',
           file_id:
-            backFileId,
+            ingredientsFileId,
+          detail: 'high',
+        });
+      }
+
+      if (nutritionFileId) {
+        content.push({
+          type: 'input_text',
+          text:
+            'Das folgende Bild ist speziell für NÄHRWERTE bestimmt.',
+        });
+
+        content.push({
+          type:
+            'input_image',
+          file_id:
+            nutritionFileId,
           detail: 'high',
         });
       }
@@ -650,10 +705,18 @@ Das Ergebnis muss exakt dem vorgegebenen JSON-Schema entsprechen.`,
         } catch {}
       }
 
-      if (backFileId) {
+      if (ingredientsFileId) {
         try {
           await openai.files.delete(
-            backFileId
+            ingredientsFileId
+          );
+        } catch {}
+      }
+
+      if (nutritionFileId) {
+        try {
+          await openai.files.delete(
+            nutritionFileId
           );
         } catch {}
       }
