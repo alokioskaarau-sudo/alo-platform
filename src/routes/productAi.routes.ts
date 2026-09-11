@@ -36,6 +36,196 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/*
+ * ALO AI Concurrency Gate
+ *
+ * Limitiert schwere AI-Aufrufe serverseitig.
+ * Weitere Requests warten FIFO auf einen freien Slot.
+ */
+function readConcurrencyLimit(
+  envName: string,
+  fallback: number
+): number {
+  const raw =
+    process.env[envName];
+
+  const parsed =
+    raw ? Number(raw) : NaN;
+
+  if (
+    Number.isInteger(parsed) &&
+    parsed > 0 &&
+    parsed <= 20
+  ) {
+    return parsed;
+  }
+
+  return fallback;
+}
+
+class ConcurrencyGate {
+  private active = 0;
+
+  private readonly queue: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+
+  constructor(
+    private readonly name: string,
+    private readonly limit: number,
+    private readonly queueTimeoutMs = 120000
+  ) {
+    console.log(
+      `[ALO AI QUEUE INIT] ${name}`,
+      {
+        limit,
+        queueTimeoutMs,
+      }
+    );
+  }
+
+  private dispatchNext() {
+    while (
+      this.active < this.limit &&
+      this.queue.length > 0
+    ) {
+      const next =
+        this.queue.shift();
+
+      if (!next) {
+        return;
+      }
+
+      clearTimeout(next.timer);
+
+      this.active += 1;
+
+      console.log(
+        `[ALO AI QUEUE START] ${this.name}`,
+        {
+          active: this.active,
+          waiting: this.queue.length,
+          limit: this.limit,
+        }
+      );
+
+      next.resolve();
+    }
+  }
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+
+      console.log(
+        `[ALO AI QUEUE START] ${this.name}`,
+        {
+          active: this.active,
+          waiting: this.queue.length,
+          limit: this.limit,
+        }
+      );
+
+      return;
+    }
+
+    console.log(
+      `[ALO AI QUEUE WAIT] ${this.name}`,
+      {
+        active: this.active,
+        waiting:
+          this.queue.length + 1,
+        limit: this.limit,
+      }
+    );
+
+    await new Promise<void>(
+      (resolve, reject) => {
+        const item = {
+          resolve,
+          reject,
+          timer:
+            setTimeout(
+              () => {
+                const index =
+                  this.queue.indexOf(
+                    item
+                  );
+
+                if (index >= 0) {
+                  this.queue.splice(
+                    index,
+                    1
+                  );
+                }
+
+                reject(
+                  new Error(
+                    `${this.name} Queue-Wartezeit überschritten.`
+                  )
+                );
+              },
+              this.queueTimeoutMs
+            ),
+        };
+
+        this.queue.push(item);
+      }
+    );
+  }
+
+  release() {
+    this.active =
+      Math.max(
+        0,
+        this.active - 1
+      );
+
+    console.log(
+      `[ALO AI QUEUE RELEASE] ${this.name}`,
+      {
+        active: this.active,
+        waiting: this.queue.length,
+        limit: this.limit,
+      }
+    );
+
+    this.dispatchNext();
+  }
+
+  async run<T>(
+    task: () => Promise<T>
+  ): Promise<T> {
+    await this.acquire();
+
+    try {
+      return await task();
+    } finally {
+      this.release();
+    }
+  }
+}
+
+const verifyGate =
+  new ConcurrencyGate(
+    "VERIFY",
+    readConcurrencyLimit(
+      "ALO_VERIFY_CONCURRENCY",
+      2
+    )
+  );
+
+const studioGate =
+  new ConcurrencyGate(
+    "STUDIO",
+    readConcurrencyLimit(
+      "ALO_STUDIO_CONCURRENCY",
+      2
+    )
+  );
+
 const nullableString = {
   type: ['string', 'null'],
 } as const;
@@ -1458,7 +1648,9 @@ router.post(
       );
 
       const response: any =
-        await Promise.race([
+        await verifyGate.run(
+          () =>
+            Promise.race([
           openai.responses.create({
           model: "gpt-5.6-terra",
           store: false,
@@ -1850,7 +2042,9 @@ Führe jetzt den Online-Abgleich durch.
               );
             }
           ),
-        ]);
+            ])
+        );
+
 
       console.log(
         "[ALO VERIFY OPENAI RETURNED]",
@@ -2052,7 +2246,9 @@ to the supplied reference.
 `;
 
       const result =
-        await openai.images.edit({
+        await studioGate.run(
+          () =>
+            openai.images.edit({
           model:
             "gpt-image-2",
           image:
@@ -2064,7 +2260,9 @@ to the supplied reference.
             "medium",
           background:
             "transparent",
-        });
+            })
+        );
+
 
       const base64 =
         result.data?.[0]
