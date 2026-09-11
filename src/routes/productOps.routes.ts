@@ -1215,6 +1215,105 @@ router.get(
   }
 );
 
+
+/*
+ * ============================================================
+ * ALO PRODUCT IMAGE -> SHOPIFY
+ * ============================================================
+ *
+ * Das Bild liegt zuerst dauerhaft in product_images.
+ *
+ * Wenn das ALO Produkt bereits mit Shopify verbunden ist,
+ * wird genau dieses gespeicherte Bild anschließend über den
+ * vorhandenen stageProductImage()-Workflow zu Shopify
+ * übertragen.
+ *
+ * Neue Produkte:
+ * - haben beim ersten Bild-Upload noch keine Shopify-ID
+ * - shopify-draft übernimmt das gespeicherte Bild später
+ *
+ * Bestehende Produkte:
+ * - bekommen das neue Staff/AI-Produktbild automatisch
+ *   auch in Shopify
+ */
+async function syncStoredProductImageToShopify(
+  productId: string,
+  shopifyProductId: string,
+  alt: string
+): Promise<boolean> {
+  const stagedImage =
+    await stageProductImage(productId);
+
+  if (!stagedImage) {
+    return false;
+  }
+
+  const response =
+    await shopifyGraphql(
+      `
+        mutation AloSyncStoredProductImage(
+          $product: ProductUpdateInput!,
+          $media: [CreateMediaInput!]
+        ) {
+          productUpdate(
+            product: $product,
+            media: $media
+          ) {
+            product {
+              id
+            }
+
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        product: {
+          id: shopifyProductId,
+        },
+        media: [
+          {
+            originalSource:
+              stagedImage.source,
+            alt:
+              alt ||
+              "ALO Produkt",
+            mediaContentType:
+              "IMAGE",
+          },
+        ],
+      }
+    );
+
+  const payload =
+    response?.productUpdate;
+
+  if (
+    payload?.userErrors?.length
+  ) {
+    throw new Error(
+      payload.userErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  if (!payload?.product?.id) {
+    throw new Error(
+      "Shopify hat nach dem Bild-Upload kein Produkt zurückgegeben."
+    );
+  }
+
+  return true;
+}
+
+
 router.post(
   "/api/product-image/remove-background",
   imageUpload.single("image"),
@@ -1334,8 +1433,65 @@ router.post(
         client.release();
       }
 
+      /*
+       * Bild ist jetzt garantiert in ALO CORE gespeichert.
+       *
+       * Falls dieses Produkt bereits eine Shopify-ID besitzt,
+       * übertragen wir das neue Bild ebenfalls automatisch.
+       *
+       * Ein Shopify-Fehler löscht NIEMALS das zuvor erfolgreich
+       * gespeicherte ALO-Bild.
+       */
+      let shopifyImageSynced =
+        false;
+
+      let shopifyImageError:
+        string | null =
+          null;
+
+      if (
+        product.shopify_product_id
+      ) {
+        try {
+          shopifyImageSynced =
+            await syncStoredProductImageToShopify(
+              productId,
+              String(
+                product.shopify_product_id
+              ),
+              String(
+                product.title ||
+                "ALO Produkt"
+              )
+            );
+        } catch (error) {
+          shopifyImageError =
+            error instanceof Error
+              ? error.message
+              : "Shopify Bild-Sync fehlgeschlagen.";
+
+          console.error(
+            "[ALO PRODUCT IMAGE SHOPIFY SYNC]",
+            {
+              productId,
+              shopifyProductId:
+                product.shopify_product_id,
+              error:
+                shopifyImageError,
+            }
+          );
+        }
+      }
+
       res.json({
         ok: true,
+        storedInAlo: true,
+        shopifyConnected:
+          Boolean(
+            product.shopify_product_id
+          ),
+        shopifyImageSynced,
+        shopifyImageError,
       });
     } catch (error) {
       res.status(500).json({
