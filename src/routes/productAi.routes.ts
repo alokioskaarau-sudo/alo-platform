@@ -694,6 +694,22 @@ router.post(
           ? currentDraft.unitSize.trim()
           : "";
 
+      console.log(
+        "[ALO VERIFY REQUEST RECEIVED]",
+        {
+          hasBody: Boolean(req.body),
+          hasDraft: Boolean(req.body?.draft),
+          barcode: barcode || null,
+          draftBarcode:
+            typeof currentDraft?.barcode === "string"
+              ? currentDraft.barcode
+              : null,
+          brand: brand || null,
+          title: title || null,
+          unitSize: unitSize || null,
+        }
+      );
+
       if (!barcode && !title && !brand) {
         res.status(400).json({
           ok: false,
@@ -806,6 +822,17 @@ router.post(
           },
         },
       } as const;
+
+      const verifyStartedAt =
+        Date.now();
+
+      console.log(
+        "[ALO VERIFY OPENAI START]",
+        {
+          barcode: barcode || null,
+          title: title || null,
+        }
+      );
 
       const response =
         await openai.responses.create({
@@ -1061,6 +1088,21 @@ Führe jetzt den Online-Abgleich durch.
           },
         });
 
+      console.log(
+        "[ALO VERIFY OPENAI RETURNED]",
+        {
+          ms:
+            Date.now() -
+            verifyStartedAt,
+          responseId:
+            response.id || null,
+          hasOutputText:
+            Boolean(
+              response.output_text
+            ),
+        }
+      );
+
       const raw =
         response.output_text;
 
@@ -1080,6 +1122,36 @@ Führe jetzt den Online-Abgleich durch.
           "ALO Verify Ergebnis konnte nicht gelesen werden."
         );
       }
+
+      console.log(
+        "[ALO VERIFY SUCCESS]",
+        {
+          totalMs:
+            Date.now() -
+            verifyStartedAt,
+          identityStatus:
+            result?.identityStatus ??
+            null,
+          sourceCount:
+            Array.isArray(
+              result?.sources
+            )
+              ? result.sources.length
+              : 0,
+          checkedFields:
+            result?.summary
+              ?.checkedFields ??
+            null,
+          foundFields:
+            result?.summary
+              ?.foundFields ??
+            null,
+          conflictCount:
+            result?.summary
+              ?.conflictCount ??
+            null,
+        }
+      );
 
       res.json({
         ok: true,
