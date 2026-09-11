@@ -78,10 +78,6 @@ import receivingRouter from "./routes/receiving.routes.js";
 const app =
   express();
 
-app.use('/api/ai', deliveryAiRouter);
-app.use('/api/ai', productAiRouter);
-
-
 // ============================================================
 // SHOPIFY WEBHOOK RAW BODY
 // ============================================================
@@ -123,6 +119,9 @@ app.use(
       "10mb",
   })
 );
+
+app.use('/api/ai', deliveryAiRouter);
+app.use('/api/ai', productAiRouter);
 
 app.use(productsRouter);
 app.use(productOpsRouter);
