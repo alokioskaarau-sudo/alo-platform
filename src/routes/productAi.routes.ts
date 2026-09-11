@@ -1940,7 +1940,7 @@ Führe jetzt den Online-Abgleich durch.
 
 
 router.post(
-  "/api/ai/product-image-studio",
+  "/product-image/studio",
   upload.single("image"),
   async (req, res) => {
     try {
@@ -2029,12 +2029,12 @@ COMPOSITION:
 - centered precisely
 - generous but efficient margin around the product
 - square 1:1 composition
-- clean pure white or extremely light neutral studio background
+- transparent background with clean professional product edges
 - professional softbox lighting
 - balanced exposure
 - crisp product edges
 - realistic material texture
-- subtle natural contact shadow beneath the product
+- no artificial floor, backdrop or opaque studio surface
 - no dramatic reflections hiding label information
 - no perspective distortion
 - no cropping of the product
@@ -2063,7 +2063,7 @@ to the supplied reference.
           quality:
             "medium",
           background:
-            "opaque",
+            "transparent",
         });
 
       const base64 =
