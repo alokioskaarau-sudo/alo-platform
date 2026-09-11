@@ -719,6 +719,549 @@ router.post(
         return;
       }
 
+      /*
+       * FAST FOOD DATA VERIFY
+       *
+       * Exakter Barcode zuerst direkt gegen Open Food Facts.
+       * Dadurch bekommen wir Zutaten und Nährwerte häufig
+       * innerhalb weniger Sekunden, ohne auf Web Search
+       * warten zu müssen.
+       *
+       * Falls dort nichts Belastbares vorhanden ist,
+       * läuft darunter der bestehende ALO Web Verify weiter.
+       */
+      if (barcode) {
+        const offController =
+          new AbortController();
+
+        const offTimeout =
+          setTimeout(
+            () =>
+              offController.abort(),
+            8000
+          );
+
+        try {
+          console.log(
+            "[ALO VERIFY OFF START]",
+            {
+              barcode,
+            }
+          );
+
+          const fields = [
+            "code",
+            "product_name",
+            "product_name_de",
+            "brands",
+            "quantity",
+            "countries",
+            "countries_tags",
+            "ingredients_text",
+            "ingredients_text_de",
+            "allergens",
+            "allergens_tags",
+            "traces",
+            "traces_tags",
+            "nutrition_data_per",
+            "nutriments",
+          ].join(",");
+
+          const offResponse =
+            await fetch(
+              `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(
+                barcode
+              )}.json?fields=${encodeURIComponent(
+                fields
+              )}`,
+              {
+                headers: {
+                  "User-Agent":
+                    "ALO-Kiosk/1.0",
+                  Accept:
+                    "application/json",
+                },
+                signal:
+                  offController.signal,
+              }
+            );
+
+          if (offResponse.ok) {
+            const offPayload: any =
+              await offResponse.json();
+
+            const product =
+              offPayload?.product;
+
+            if (
+              offPayload?.status === 1 &&
+              product &&
+              typeof product ===
+                "object"
+            ) {
+              const nutriments =
+                product.nutriments &&
+                typeof product.nutriments ===
+                  "object"
+                  ? product.nutriments
+                  : {};
+
+              const asString = (
+                value: unknown
+              ) => {
+                if (
+                  typeof value ===
+                  "string"
+                ) {
+                  const trimmed =
+                    value.trim();
+
+                  return trimmed ||
+                    null;
+                }
+
+                if (
+                  typeof value ===
+                    "number" &&
+                  Number.isFinite(value)
+                ) {
+                  return String(value);
+                }
+
+                return null;
+              };
+
+              const asNumber = (
+                value: unknown
+              ) => {
+                if (
+                  typeof value ===
+                    "number" &&
+                  Number.isFinite(value)
+                ) {
+                  return value;
+                }
+
+                if (
+                  typeof value ===
+                  "string"
+                ) {
+                  const parsed =
+                    Number(
+                      value.replace(
+                        ",",
+                        "."
+                      )
+                    );
+
+                  return Number.isFinite(
+                    parsed
+                  )
+                    ? parsed
+                    : null;
+                }
+
+                return null;
+              };
+
+              const cleanTags = (
+                value: unknown
+              ): string[] => {
+                if (
+                  !Array.isArray(value)
+                ) {
+                  return [];
+                }
+
+                return value
+                  .filter(
+                    (
+                      item
+                    ): item is string =>
+                      typeof item ===
+                      "string"
+                  )
+                  .map((item) =>
+                    item
+                      .replace(
+                        /^[a-z]{2}:/i,
+                        ""
+                      )
+                      .replace(
+                        /-/g,
+                        " "
+                      )
+                      .trim()
+                  )
+                  .filter(Boolean);
+              };
+
+              const ingredients =
+                asString(
+                  product
+                    .ingredients_text_de
+                ) ||
+                asString(
+                  product
+                    .ingredients_text
+                );
+
+              const allergens =
+                cleanTags(
+                  product.allergens_tags
+                );
+
+              const traces =
+                cleanTags(
+                  product.traces_tags
+                );
+
+              const energyKcal =
+                asNumber(
+                  nutriments[
+                    "energy-kcal_100g"
+                  ]
+                );
+
+              const energyKj =
+                asNumber(
+                  nutriments[
+                    "energy-kj_100g"
+                  ]
+                );
+
+              const fat =
+                asNumber(
+                  nutriments[
+                    "fat_100g"
+                  ]
+                );
+
+              const saturatedFat =
+                asNumber(
+                  nutriments[
+                    "saturated-fat_100g"
+                  ]
+                );
+
+              const carbohydrates =
+                asNumber(
+                  nutriments[
+                    "carbohydrates_100g"
+                  ]
+                );
+
+              const sugars =
+                asNumber(
+                  nutriments[
+                    "sugars_100g"
+                  ]
+                );
+
+              const protein =
+                asNumber(
+                  nutriments[
+                    "proteins_100g"
+                  ]
+                );
+
+              const fiber =
+                asNumber(
+                  nutriments[
+                    "fiber_100g"
+                  ]
+                );
+
+              const salt =
+                asNumber(
+                  nutriments[
+                    "salt_100g"
+                  ]
+                );
+
+              const nutritionValues =
+                [
+                  energyKcal,
+                  energyKj,
+                  fat,
+                  saturatedFat,
+                  carbohydrates,
+                  sugars,
+                  protein,
+                  fiber,
+                  salt,
+                ];
+
+              const nutritionFound =
+                nutritionValues.filter(
+                  (value) =>
+                    value !== null
+                ).length;
+
+              const usefulFoodFields =
+                [
+                  Boolean(
+                    ingredients
+                  ),
+                  allergens.length > 0,
+                  traces.length > 0,
+                  nutritionFound >= 4,
+                ].filter(
+                  Boolean
+                ).length;
+
+              console.log(
+                "[ALO VERIFY OFF RESULT]",
+                {
+                  barcode,
+                  productName:
+                    product
+                      .product_name_de ||
+                    product
+                      .product_name ||
+                    null,
+                  hasIngredients:
+                    Boolean(
+                      ingredients
+                    ),
+                  allergenCount:
+                    allergens.length,
+                  traceCount:
+                    traces.length,
+                  nutritionFound,
+                }
+              );
+
+              /*
+               * Nur direkt übernehmen, wenn
+               * tatsächlich brauchbare Food Data
+               * gefunden wurde.
+               *
+               * Exakter Barcode-Endpunkt = starke
+               * Produktidentität.
+               */
+              if (
+                usefulFoodFields > 0
+              ) {
+                const currentNutrition =
+                  currentDraft
+                    ?.nutritionPer100 &&
+                  typeof currentDraft
+                    .nutritionPer100 ===
+                    "object"
+                    ? currentDraft
+                        .nutritionPer100
+                    : {};
+
+                const verifiedDraft = {
+                  ...currentDraft,
+
+                  barcode:
+                    barcode ||
+                    currentDraft
+                      ?.barcode ||
+                    null,
+
+                  title:
+                    asString(
+                      product
+                        .product_name_de
+                    ) ||
+                    asString(
+                      product
+                        .product_name
+                    ) ||
+                    currentDraft
+                      ?.title ||
+                    "",
+
+                  brand:
+                    asString(
+                      product.brands
+                    ) ||
+                    currentDraft
+                      ?.brand ||
+                    null,
+
+                  unitSize:
+                    asString(
+                      product.quantity
+                    ) ||
+                    currentDraft
+                      ?.unitSize ||
+                    null,
+
+                  country:
+                    asString(
+                      product.countries
+                    ) ||
+                    currentDraft
+                      ?.country ||
+                    null,
+
+                  ingredients:
+                    ingredients ||
+                    currentDraft
+                      ?.ingredients ||
+                    null,
+
+                  allergens:
+                    allergens.length
+                      ? allergens
+                      : Array.isArray(
+                            currentDraft
+                              ?.allergens
+                          )
+                        ? currentDraft
+                            .allergens
+                        : [],
+
+                  traces:
+                    traces.length
+                      ? traces
+                      : Array.isArray(
+                            currentDraft
+                              ?.traces
+                          )
+                        ? currentDraft
+                            .traces
+                        : [],
+
+                  nutritionPer100: {
+                    ...currentNutrition,
+
+                    basis:
+                      currentNutrition
+                        ?.basis ||
+                      product
+                        .nutrition_data_per ||
+                      "100g",
+
+                    energyKj:
+                      energyKj ??
+                      currentNutrition
+                        ?.energyKj ??
+                      null,
+
+                    energyKcal:
+                      energyKcal ??
+                      currentNutrition
+                        ?.energyKcal ??
+                      null,
+
+                    fat:
+                      fat ??
+                      currentNutrition
+                        ?.fat ??
+                      null,
+
+                    saturatedFat:
+                      saturatedFat ??
+                      currentNutrition
+                        ?.saturatedFat ??
+                      null,
+
+                    carbohydrates:
+                      carbohydrates ??
+                      currentNutrition
+                        ?.carbohydrates ??
+                      null,
+
+                    sugars:
+                      sugars ??
+                      currentNutrition
+                        ?.sugars ??
+                      null,
+
+                    protein:
+                      protein ??
+                      currentNutrition
+                        ?.protein ??
+                      null,
+
+                    fiber:
+                      fiber ??
+                      currentNutrition
+                        ?.fiber ??
+                      null,
+
+                    salt:
+                      salt ??
+                      currentNutrition
+                        ?.salt ??
+                      null,
+                  },
+                };
+
+                const foundFields =
+                  [
+                    ingredients,
+                    allergens.length
+                      ? allergens
+                      : null,
+                    traces.length
+                      ? traces
+                      : null,
+                    ...nutritionValues,
+                  ].filter(
+                    (value) =>
+                      value !== null &&
+                      value !== ""
+                  ).length;
+
+                console.log(
+                  "[ALO VERIFY OFF SUCCESS]",
+                  {
+                    barcode,
+                    foundFields,
+                  }
+                );
+
+                res.json({
+                  ok: true,
+                  identityStatus:
+                    "confirmed",
+                  verifiedDraft,
+                  sources: [
+                    {
+                      title:
+                        "Open Food Facts",
+                      url:
+                        `https://world.openfoodfacts.org/product/${encodeURIComponent(
+                          barcode
+                        )}`,
+                      sourceType:
+                        "database",
+                    },
+                  ],
+                  conflicts: [],
+                  summary: {
+                    checkedFields:
+                      12,
+                    foundFields,
+                    conflictCount:
+                      0,
+                  },
+                });
+
+                return;
+              }
+            }
+          }
+        } catch (error) {
+          console.warn(
+            "[ALO VERIFY OFF FALLBACK]",
+            error instanceof Error
+              ? error.message
+              : error
+          );
+        } finally {
+          clearTimeout(
+            offTimeout
+          );
+        }
+      }
+
       const onlineVerificationSchema = {
         type: "object",
         additionalProperties: false,
@@ -834,8 +1377,9 @@ router.post(
         }
       );
 
-      const response =
-        await openai.responses.create({
+      const response: any =
+        await Promise.race([
+          openai.responses.create({
           model: "gpt-5.6-terra",
           store: false,
 
@@ -1086,7 +1630,24 @@ Führe jetzt den Online-Abgleich durch.
                 onlineVerificationSchema,
             },
           },
-        });
+        }),
+          new Promise(
+            (
+              _resolve,
+              reject
+            ) => {
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      "ALO Verify Websuche dauerte länger als 85 Sekunden."
+                    )
+                  ),
+                85000
+              );
+            }
+          ),
+        ]);
 
       console.log(
         "[ALO VERIFY OPENAI RETURNED]",
