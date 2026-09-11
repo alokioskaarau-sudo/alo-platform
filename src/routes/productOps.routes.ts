@@ -1,7 +1,5 @@
 import { Router } from "express";
 import multer from "multer";
-import sharp from "sharp";
-import { removeBackground } from "@imgly/background-removal-node";
 import axios from "axios";
 
 import { db } from "../database/db.js";
@@ -20,33 +18,6 @@ import {
 
 const router = Router();
 
-let backgroundRemovalBusy = false;
-
-async function runBackgroundRemovalSafely(inputBlob: Blob) {
-  if (backgroundRemovalBusy) {
-    const error: any = new Error("Background removal is currently busy");
-    error.code = "BACKGROUND_REMOVAL_BUSY";
-    throw error;
-  }
-
-  backgroundRemovalBusy = true;
-
-  try {
-    return await removeBackground(
-      inputBlob,
-      {
-        debug: false,
-        model: "small",
-        output: {
-          format: "image/png",
-          quality: 1,
-        },
-      }
-    );
-  } finally {
-    backgroundRemovalBusy = false;
-  }
-}
 
 
 const imageUpload = multer({
@@ -1209,110 +1180,27 @@ router.get(
 router.post(
   "/api/product-image/remove-background",
   imageUpload.single("image"),
-  async (req, res) => {
-    try {
-      const file = req.file;
-
-      if (!file) {
-        res.status(400).json({
-          ok: false,
-          error: "Bild fehlt.",
-        });
-        return;
-      }
-
-      /*
-       * Normalize the uploaded image before handing it to IMG.LY.
-       *
-       * Expo / multipart uploads can carry incomplete or misleading MIME
-       * information. IMG.LY was previously receiving the raw Node Buffer,
-       * which caused:
-       *
-       *   Unsupported format:
-       *
-       * Converting through sharp guarantees real PNG bytes and the typed
-       * Blob gives IMG.LY an explicit image/png content type.
-       */
-      const normalizedInput =
-        await sharp(
-          file.buffer,
-          {
-            limitInputPixels: 40_000_000,
-          }
-        )
-          .rotate()
-          .resize({
-            width: 1280,
-            height: 1280,
-            fit: "inside",
-            withoutEnlargement: true,
-          })
-          .png({
-            compressionLevel: 9,
-          })
-          .toBuffer();
-
-      const inputBlob =
-        new Blob(
-          [new Uint8Array(normalizedInput)],
-          {
-            type: "image/png",
-          }
-        );
-
-      const result =
-        await runBackgroundRemovalSafely(
-          inputBlob
-        );
-
-      const arrayBuffer =
-        await result.arrayBuffer();
-
-      const output =
-        Buffer.from(arrayBuffer);
-
-      res.setHeader(
-        "Content-Type",
-        "image/png"
-      );
-
-      res.setHeader(
-        "Cache-Control",
-        "no-store"
-      );
-
-      res.send(output);
-    } catch (error) {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as any).code ===
-          "BACKGROUND_REMOVAL_BUSY"
-      ) {
-        res.status(429).json({
-          ok: false,
-          error:
-            "BACKGROUND_REMOVAL_BUSY",
-          message:
-            "Bildverarbeitung läuft bereits. Bitte erneut versuchen.",
-        });
-        return;
-      }
-
-      console.error(
-        "Background removal error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Hintergrund konnte nicht entfernt werden.",
-      });
-    }
+  async (_req, res) => {
+    /*
+     * IMPORTANT:
+     * Background removal is intentionally disabled inside the
+     * main ALO API process.
+     *
+     * The ML model previously caused the Railway container to
+     * exceed its memory limit and kill the complete API.
+     *
+     * The Staff App already falls back to the original image,
+     * so product creation/editing remains fully usable.
+     *
+     * Background removal can later be moved into its own worker
+     * or dedicated service without risking the main platform.
+     */
+    res.status(503).json({
+      ok: false,
+      error: "BACKGROUND_REMOVAL_TEMPORARILY_DISABLED",
+      message:
+        "Automatische Bildfreistellung ist momentan deaktiviert. Das Originalbild wird verwendet.",
+    });
   }
 );
 
@@ -2365,6 +2253,7 @@ router.post(
 
       const shippingWeightGrams =
         parseShippingWeightGrams(
+          draft?.unitSize ??
           draft?.netWeight
         );
 
