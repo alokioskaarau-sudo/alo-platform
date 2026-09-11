@@ -720,6 +720,17 @@ router.post(
       }
 
       /*
+       * Schnelle Barcode-Daten werden NICHT mehr direkt
+       * an die Staff App zurückgegeben.
+       *
+       * Sie dienen als zusätzliche Rohdaten für den
+       * anschliessenden vollständigen ALO VERIFY Lauf.
+       */
+      let fastBarcodeDraft: any = null;
+      let fastBarcodeFoundFields = 0;
+      let fastBarcodeSource: any = null;
+
+      /*
        * FAST FOOD DATA VERIFY
        *
        * Exakter Barcode zuerst direkt gegen Open Food Facts.
@@ -1217,34 +1228,40 @@ router.post(
                   }
                 );
 
-                res.json({
-                  ok: true,
-                  identityStatus:
-                    "confirmed",
-                  verifiedDraft,
-                  sources: [
-                    {
-                      title:
-                        "Open Food Facts",
-                      url:
-                        `https://world.openfoodfacts.org/product/${encodeURIComponent(
-                          barcode
-                        )}`,
-                      sourceType:
-                        "database",
-                    },
-                  ],
-                  conflicts: [],
-                  summary: {
-                    checkedFields:
-                      12,
-                    foundFields,
-                    conflictCount:
-                      0,
-                  },
-                });
+                /*
+                 * WICHTIG:
+                 * Open Food Facts beendet ALO VERIFY hier
+                 * NICHT mehr.
+                 *
+                 * Die Daten werden jetzt in den vollständigen
+                 * Web-Abgleich mitgenommen. Dadurch können
+                 * sweets.ch, Herstellerseiten, Schweizer
+                 * Quellen sowie SEO weiterhin geprüft werden.
+                 */
+                fastBarcodeDraft =
+                  verifiedDraft;
 
-                return;
+                fastBarcodeFoundFields =
+                  foundFields;
+
+                fastBarcodeSource = {
+                  title:
+                    "Open Food Facts",
+                  url:
+                    `https://world.openfoodfacts.org/product/${encodeURIComponent(
+                      barcode
+                    )}`,
+                  sourceType:
+                    "database",
+                };
+
+                console.log(
+                  "[ALO VERIFY OFF CARRY FORWARD]",
+                  {
+                    barcode,
+                    foundFields,
+                  }
+                );
               }
             }
           }
@@ -1588,6 +1605,102 @@ Melde insbesondere Konflikte bei:
 
 SEO und Beschreibung dürfen nur auf der
 verifizierten Produktidentität beruhen.
+
+ALO KIOSK SCHWEIZ – SHOP COPY UND SEO:
+
+Wenn identityStatus "confirmed" ist, bearbeite zusätzlich
+ALLE im Product Schema vorhandenen Shop-/SEO-Felder
+vollständig und hochwertig.
+
+Insbesondere:
+- shortDescription
+- descriptionHtml
+- seoTitle
+- seoDescription
+- searchKeywords
+- tags
+
+REGELN FÜR ALO KIOSK:
+
+1. ALO Kiosk ist der Shop und niemals die Produktmarke.
+   "ALO Kiosk", "ALO Kiosk Schweiz" oder ähnliche Begriffe
+   dürfen NIEMALS als brand oder manufacturer eingetragen
+   werden.
+
+2. brand muss die tatsächliche Produktmarke sein.
+   Beispiel:
+   ULTRAPOP Produkt -> brand "Ultrapop",
+   nicht "Alo Kiosk".
+
+3. Alle Kundentexte auf natürlichem, gut lesbarem Deutsch.
+
+4. shortDescription:
+   - kompakt
+   - appetitlich / kaufstark
+   - echte Produktmerkmale nennen
+   - nichts erfinden
+
+5. descriptionHtml:
+   - eigenständige hochwertige Shopbeschreibung
+   - für einen Schweizer Online-Shop
+   - Produkt, Geschmack, Besonderheiten und Inhalt
+     natürlich erklären
+   - keine erfundenen Herkunfts-/Health-Claims
+   - nicht einfach fremde Händlertexte kopieren
+
+6. seoTitle:
+   - stärkste reale Suchbegriffe verwenden
+   - Marke + Produkt/Variante + relevante Grösse
+   - Schweizer Kaufintention berücksichtigen
+   - wenn sinnvoll mit
+     "| ALO Kiosk Schweiz"
+     abschliessen
+   - kein Keyword-Spam
+   - möglichst kompakt und suchmaschinenfreundlich
+
+7. seoDescription:
+   - natürliches Deutsch
+   - Produkt und Geschmack konkret nennen
+   - Kauf-/Bestellintention für die Schweiz
+   - "ALO Kiosk Schweiz" sinnvoll integrieren
+   - ungefähr 140 bis 160 Zeichen anstreben
+   - keine erfundenen Eigenschaften
+
+8. searchKeywords:
+   - echte Produktbezeichnung
+   - Marke
+   - Variante / Geschmack
+   - Inhalt / Packungsgrösse
+   - passende Kategorie
+   - sinnvolle Schweizer Suchvarianten
+   - Kombinationen mit "Schweiz", "kaufen",
+     "bestellen" wenn natürlich
+   - ALO Kiosk / ALO Kiosk Schweiz ergänzend
+   - keine irrelevanten Keywords
+
+9. tags:
+   - Marke
+   - Kategorie
+   - Produkttyp
+   - Geschmack / Variante
+   - Herkunft nur falls verifiziert
+   - besondere Ernährungsmerkmale nur falls
+     wirklich bestätigt
+
+10. SEO und Shoptexte dürfen kreativ formuliert werden,
+    aber die darin enthaltenen Produktfakten müssen immer
+    auf der verifizierten Produktidentität und den
+    recherchierten Fakten beruhen.
+
+11. Bei confirmed soll der verifiedDraft möglichst
+    vollständig sein. Prüfe NICHT nur fehlende Werte,
+    sondern jeden verfügbaren Produkt-, Food-, Shop- und
+    SEO-Wert auf Aktualität und Korrektheit.
+
+12. Gehe die vollständige Feldliste des Product Schemas
+    systematisch durch. Lass ein Feld nur leer/null, wenn
+    dafür tatsächlich keine belastbare Information
+    ermittelt werden kann.
 `,
                 },
               ],
@@ -1606,6 +1719,33 @@ ${JSON.stringify(
   null,
   2
 )}
+
+FAST BARCODE DATABASE DATA:
+${fastBarcodeDraft
+  ? JSON.stringify(
+      fastBarcodeDraft,
+      null,
+      2
+    )
+  : "Keine zusätzlichen Barcode-Daten gefunden."}
+
+FAST BARCODE SOURCE:
+${fastBarcodeSource
+  ? JSON.stringify(
+      fastBarcodeSource,
+      null,
+      2
+    )
+  : "Keine."}
+
+WICHTIG ZU DIESEN FAST-DATEN:
+- Sie sind zusätzliche Recherchehinweise.
+- Sie ersetzen NICHT deine Web-Recherche.
+- Prüfe sie gegen sweets.ch, Hersteller/Marke und
+  weitere passende Quellen.
+- Übernimm sie nur, wenn sie zur exakt identifizierten
+  Produktvariante passen.
+- Bei Konflikten melde diese in conflicts.
 
 IDENTITY HINTS:
 Barcode: ${barcode || "unbekannt"}
