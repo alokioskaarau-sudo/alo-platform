@@ -112,6 +112,24 @@ async function ensureSchema() {
     await db.query(`
       ALTER TABLE products
       ADD COLUMN IF NOT EXISTS
+        archived_at TIMESTAMPTZ
+    `);
+
+    await db.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
+        archived_reason TEXT
+    `);
+
+    await db.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
+        archived_barcode TEXT
+    `);
+
+    await db.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
         shopify_status TEXT
         NOT NULL
         DEFAULT 'NOT_SYNCED'
@@ -1143,6 +1161,7 @@ router.get(
             shopify_inventory_item_id,
             updated_at
           FROM products
+          WHERE archived_at IS NULL
           ORDER BY updated_at DESC
           LIMIT 500
         `);
@@ -1356,6 +1375,161 @@ router.get(
       );
     } catch {
       res.status(500).end();
+    }
+  }
+);
+
+router.post(
+  "/api/product-master/:id/archive",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(
+          req.params.id ?? ""
+        ).trim();
+
+      const reason =
+        String(
+          req.body?.reason ??
+            "FALSCHES_PRODUKT"
+        )
+          .trim()
+          .slice(0, 120);
+
+      if (!productId) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Product ID fehlt.",
+        });
+        return;
+      }
+
+      const existing =
+        await db.query(
+          `
+            SELECT
+              id,
+              barcode,
+              archived_barcode,
+              archived_at,
+              shopify_product_id
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [
+            productId,
+          ]
+        );
+
+      const row =
+        existing.rows[0];
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      /*
+       * Idempotent:
+       * Ein bereits archiviertes Produkt kann gefahrlos
+       * noch einmal archiviert werden.
+       */
+      if (row.archived_at) {
+        res.json({
+          ok: true,
+          alreadyArchived: true,
+          productId:
+            String(row.id),
+          archivedBarcode:
+            row.archived_barcode ??
+            null,
+          shopifyProductId:
+            row.shopify_product_id ??
+            null,
+          shopifyUntouched: true,
+        });
+        return;
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE products
+            SET
+              archived_barcode =
+                COALESCE(
+                  archived_barcode,
+                  barcode
+                ),
+              barcode = NULL,
+              archived_at = NOW(),
+              archived_reason = $2,
+              review_status = 'ARCHIVED',
+              updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+              id,
+              archived_barcode,
+              archived_at,
+              archived_reason,
+              shopify_product_id
+          `,
+          [
+            productId,
+            reason ||
+              "FALSCHES_PRODUKT",
+          ]
+        );
+
+      const archived =
+        result.rows[0];
+
+      res.json({
+        ok: true,
+        archived: true,
+        productId:
+          String(archived.id),
+        archivedBarcode:
+          archived.archived_barcode ??
+          null,
+        archivedAt:
+          archived.archived_at ??
+          null,
+        reason:
+          archived.archived_reason ??
+          null,
+        shopifyProductId:
+          archived.shopify_product_id ??
+          null,
+
+        /*
+         * Absichtlich:
+         * Archivieren in ALO darf nicht automatisch ein
+         * echtes Shopify-Produkt zerstören.
+         */
+        shopifyUntouched: true,
+      });
+    } catch (error) {
+      console.error(
+        "Product archive error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Produkt konnte nicht archiviert werden.",
+      });
     }
   }
 );
