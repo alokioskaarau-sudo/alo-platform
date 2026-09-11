@@ -20,6 +20,35 @@ import {
 
 const router = Router();
 
+let backgroundRemovalBusy = false;
+
+async function runBackgroundRemovalSafely(inputBlob: Blob) {
+  if (backgroundRemovalBusy) {
+    const error: any = new Error("Background removal is currently busy");
+    error.code = "BACKGROUND_REMOVAL_BUSY";
+    throw error;
+  }
+
+  backgroundRemovalBusy = true;
+
+  try {
+    return await removeBackground(
+      inputBlob,
+      {
+        debug: false,
+        model: "small",
+        output: {
+          format: "image/png",
+          quality: 1,
+        },
+      }
+    );
+  } finally {
+    backgroundRemovalBusy = false;
+  }
+}
+
+
 const imageUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -1205,9 +1234,22 @@ router.post(
        * Blob gives IMG.LY an explicit image/png content type.
        */
       const normalizedInput =
-        await sharp(file.buffer)
+        await sharp(
+          file.buffer,
+          {
+            limitInputPixels: 40_000_000,
+          }
+        )
           .rotate()
-          .png()
+          .resize({
+            width: 1280,
+            height: 1280,
+            fit: "inside",
+            withoutEnlargement: true,
+          })
+          .png({
+            compressionLevel: 9,
+          })
           .toBuffer();
 
       const inputBlob =
@@ -1219,16 +1261,8 @@ router.post(
         );
 
       const result =
-        await removeBackground(
-          inputBlob,
-          {
-            debug: false,
-            model: "medium",
-            output: {
-              format: "image/png",
-              quality: 1,
-            },
-          }
+        await runBackgroundRemovalSafely(
+          inputBlob
         );
 
       const arrayBuffer =
@@ -1249,6 +1283,23 @@ router.post(
 
       res.send(output);
     } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error as any).code ===
+          "BACKGROUND_REMOVAL_BUSY"
+      ) {
+        res.status(429).json({
+          ok: false,
+          error:
+            "BACKGROUND_REMOVAL_BUSY",
+          message:
+            "Bildverarbeitung läuft bereits. Bitte erneut versuchen.",
+        });
+        return;
+      }
+
       console.error(
         "Background removal error:",
         error
