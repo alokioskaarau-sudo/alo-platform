@@ -840,11 +840,32 @@ router.put(
         return;
       }
 
+      /*
+       * EAN-Semantik:
+       *
+       * - barcode fehlt im Draft:
+       *   bestehenden Barcode behalten
+       *
+       * - barcode ist null / leer:
+       *   Barcode bewusst entfernen
+       *
+       * - barcode enthält einen Wert:
+       *   normalisieren und übernehmen
+       */
+      const hasBarcodeField =
+        Object.prototype.hasOwnProperty.call(
+          draft,
+          "barcode"
+        );
+
       const barcode =
-        normalizeBarcode(
-          draft.barcode ??
-          existing.barcode
-        ) || null;
+        hasBarcodeField
+          ? normalizeBarcode(
+              draft.barcode
+            ) || null
+          : normalizeBarcode(
+              existing.barcode
+            ) || null;
 
       if (barcode) {
         const duplicate =
@@ -928,12 +949,16 @@ router.put(
         return incoming;
       }
 
+      /*
+       * barcode ist hier bereits der endgültige gewünschte
+       * Product-Master-Wert.
+       *
+       * Wichtig: NULL darf NICHT wieder auf existing.barcode
+       * zurückfallen, da NULL ein bewusstes Entfernen der EAN
+       * darstellen kann.
+       */
       const safeBarcode =
-        barcode ||
-        normalizeBarcode(
-          existing.barcode
-        ) ||
-        null;
+        barcode;
 
       const mergedData =
         mergeProductDataSafely(
@@ -1010,6 +1035,31 @@ router.put(
           ),
       });
     } catch (error) {
+      /*
+       * Race-Schutz für parallele Staff-Geräte:
+       *
+       * Zwei Requests können theoretisch gleichzeitig dieselbe
+       * neue EAN prüfen und beide die SELECT-Vorprüfung bestehen.
+       *
+       * Die DB-Unique-Constraint ist deshalb die letzte
+       * verbindliche Instanz. PostgreSQL 23505 wird sauber als
+       * fachlicher 409-Konflikt an die App zurückgegeben.
+       */
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as any).code === "23505"
+      ) {
+        res.status(409).json({
+          ok: false,
+          code: "BARCODE_ALREADY_ASSIGNED",
+          error:
+            "Diese EAN ist bereits einem anderen Produkt zugeordnet.",
+        });
+        return;
+      }
+
       console.error(
         "Product Master update error:",
         error
