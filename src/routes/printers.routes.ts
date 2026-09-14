@@ -15,6 +15,11 @@ import {
   requirePrintAgentToken,
 } from "../middleware/printAgentAuth.js";
 
+import {
+  claimNextOrderAlert,
+  completeOrderAlert,
+} from "../database/orderAlerts.js";
+
 
 export const printersRouter =
   express.Router();
@@ -435,6 +440,78 @@ printersRouter.post(
 
           error:
             error.message,
+        });
+    }
+  }
+);
+
+
+// ==========================================================
+// PRINT AGENT: NÄCHSTEN ORDER ALERT HOLEN
+// ==========================================================
+
+printersRouter.post(
+  "/api/print-agent/order-alerts/next",
+  requirePrintAgentToken,
+  async (_req, res) => {
+    try {
+      const alert =
+        await claimNextOrderAlert();
+
+      return res.json({
+        ok: true,
+        alert,
+      });
+    } catch (error: any) {
+      console.error(
+        "Order Alert Claim Error:",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            error?.message ??
+            "Order Alert konnte nicht geladen werden.",
+        });
+    }
+  }
+);
+
+
+// ==========================================================
+// PRINT AGENT: ORDER ALERT ERLEDIGT
+// ==========================================================
+
+printersRouter.post(
+  "/api/print-agent/order-alerts/:id/complete",
+  requirePrintAgentToken,
+  async (req, res) => {
+    try {
+      const alert =
+        await completeOrderAlert(
+          String(req.params.id)
+        );
+
+      return res.json({
+        ok: true,
+        alert,
+      });
+    } catch (error: any) {
+      console.error(
+        "Order Alert Complete Error:",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            error?.message ??
+            "Order Alert konnte nicht abgeschlossen werden.",
         });
     }
   }

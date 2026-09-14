@@ -8,6 +8,7 @@ import {
   markWebhookProcessing,
   markWebhookCompleted,
   markWebhookFailed,
+  markWebhookNeedsReview,
 } from "../../database/shopifyWebhookEvents.js";
 
 
@@ -17,6 +18,28 @@ type RecoverableWebhookEvent = {
   status: string;
   attempts: number;
 };
+
+
+function isPermanentWebhookFailure(
+  message: string
+): boolean {
+  const normalized =
+    String(message ?? "")
+      .trim()
+      .toLowerCase();
+
+  return (
+    normalized.includes(
+      "hat keine versandadresse"
+    ) ||
+    normalized.includes(
+      "adresse nicht ausreichend bestätigt"
+    ) ||
+    normalized.includes(
+      "hausnummer konnte aus adresse nicht erkannt werden"
+    )
+  );
+}
 
 
 // ============================================================
@@ -69,17 +92,35 @@ async function recoverEvent(
       error?.message ??
       String(error);
 
-    await markWebhookFailed(
-      event.id,
-      message
-    );
+    const permanent =
+      isPermanentWebhookFailure(
+        message
+      );
+
+    if (permanent) {
+      await markWebhookNeedsReview(
+        event.id,
+        message
+      );
+    } else {
+      await markWebhookFailed(
+        event.id,
+        message
+      );
+    }
 
     console.error(
-      "Webhook Recovery fehlgeschlagen:",
+      permanent
+        ? "Webhook Recovery benötigt manuelle Prüfung:"
+        : "Webhook Recovery fehlgeschlagen:",
       {
         eventId: event.id,
         orderId:
           event.shopify_order_id,
+        status:
+          permanent
+            ? "NEEDS_REVIEW"
+            : "FAILED",
         error: message,
       }
     );

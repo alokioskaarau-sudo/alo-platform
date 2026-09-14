@@ -338,7 +338,8 @@ export async function processPaidShopifyOrder(
 
   const shippingPrintJob =
     await createPrintJob(
-      storedLabel.id
+      storedLabel.id,
+      "Brother QL-1110NWB"
     );
 
 
@@ -378,7 +379,8 @@ export async function processPaidShopifyOrder(
 
   const packingSlipPrintJob =
     await createPackingSlipPrintJob(
-      packingSlip.id
+      packingSlip.id,
+      "HP7C4D8F71B318(HP Color Laser MFP 178 179)"
     );
 
 
@@ -414,7 +416,8 @@ export async function processPaidShopifyOrder(
 
   const invoicePrintJob =
     await createInvoicePrintJob(
-      invoice.id
+      invoice.id,
+      "HP7C4D8F71B318(HP Color Laser MFP 178 179)"
     );
 
 

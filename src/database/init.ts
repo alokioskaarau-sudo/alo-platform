@@ -672,6 +672,34 @@ export async function initializeDatabase() {
 
   // ==========================================================
   // SHOPIFY WEBHOOK EVENTS
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS shopify_webhook_events (
+      id BIGSERIAL PRIMARY KEY,
+      webhook_id TEXT NOT NULL UNIQUE,
+      topic TEXT NOT NULL,
+      shop_domain TEXT,
+      shopify_order_id TEXT,
+      shopify_order_name TEXT,
+      status TEXT
+        NOT NULL
+        DEFAULT 'PENDING',
+      attempts INTEGER
+        NOT NULL
+        DEFAULT 0,
+      error_message TEXT,
+      received_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+      processing_started_at TIMESTAMPTZ,
+      processed_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW()
+    );
+  `);
+
   await db.query(`
     ALTER TABLE shopify_webhook_events
     ALTER COLUMN shopify_order_id DROP NOT NULL
@@ -688,47 +716,6 @@ export async function initializeDatabase() {
     ON shopify_webhook_events (
       shopify_resource_id
     )
-  `);
-
-
-  // ==========================================================
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS shopify_webhook_events (
-      id BIGSERIAL PRIMARY KEY,
-
-      webhook_id TEXT NOT NULL UNIQUE,
-
-      topic TEXT NOT NULL,
-
-      shop_domain TEXT,
-
-      shopify_order_id TEXT NOT NULL,
-
-      shopify_order_name TEXT,
-
-      status TEXT
-        NOT NULL
-        DEFAULT 'PENDING',
-
-      attempts INTEGER
-        NOT NULL
-        DEFAULT 0,
-
-      error_message TEXT,
-
-      received_at TIMESTAMPTZ
-        NOT NULL
-        DEFAULT NOW(),
-
-      processing_started_at TIMESTAMPTZ,
-
-      processed_at TIMESTAMPTZ,
-
-      updated_at TIMESTAMPTZ
-        NOT NULL
-        DEFAULT NOW()
-    );
   `);
 
   await db.query(`
@@ -752,6 +739,54 @@ export async function initializeDatabase() {
       shopify_webhook_events_received_idx
     ON shopify_webhook_events (
       received_at
+    );
+  `);
+
+  // ==========================================================
+
+  // ORDER ALERTS
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_alerts (
+      id BIGSERIAL PRIMARY KEY,
+
+      shopify_order_id TEXT NOT NULL UNIQUE,
+
+      shopify_order_name TEXT NOT NULL,
+
+      total_amount NUMERIC(12, 2)
+        NOT NULL DEFAULT 0,
+
+      currency_code TEXT
+        NOT NULL DEFAULT 'CHF',
+
+      fulfillment_type TEXT
+        NOT NULL DEFAULT 'ORDER',
+
+      items JSONB
+        NOT NULL DEFAULT '[]'::jsonb,
+
+      status TEXT
+        NOT NULL DEFAULT 'PENDING',
+
+      claimed_at TIMESTAMPTZ,
+
+      completed_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_alerts_status_idx
+    ON order_alerts (
+      status
     );
   `);
 

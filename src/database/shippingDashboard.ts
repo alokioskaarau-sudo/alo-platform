@@ -728,6 +728,257 @@ export async function createInvoicePrintJob(
 }
 
 
+
+// ==========================================================
+// MANUELLER NACHDRUCK AUS BESTELLZENTRALE
+//
+// WICHTIG:
+// - verwendet ausschließlich bereits vorhandene PDFs
+// - erzeugt KEIN neues Shopify-Fulfillment
+// - erzeugt KEIN neues Versandlabel
+// - erlaubt Nachdruck auch nach bereits erfolgreichem Druck
+// - verhindert doppelte gleichzeitig offene Printjobs
+// ==========================================================
+
+export async function createManualReprintJob(
+  documentType:
+    | "SHIPPING_LABEL"
+    | "PACKING_SLIP"
+    | "INVOICE",
+  documentId: string,
+  printerName?: string
+) {
+  const client =
+    await db.connect();
+
+  try {
+    await client.query(
+      "BEGIN"
+    );
+
+    let tableName = "";
+    let idColumn = "";
+    let foreignKeyColumn = "";
+
+    if (
+      documentType ===
+      "SHIPPING_LABEL"
+    ) {
+      tableName =
+        "shipping_labels";
+      idColumn =
+        "shipping_label_id";
+      foreignKeyColumn =
+        "shipping_label_id";
+
+    } else if (
+      documentType ===
+      "PACKING_SLIP"
+    ) {
+      tableName =
+        "packing_slips";
+      idColumn =
+        "packing_slip_id";
+      foreignKeyColumn =
+        "packing_slip_id";
+
+    } else {
+      tableName =
+        "invoices";
+      idColumn =
+        "invoice_id";
+      foreignKeyColumn =
+        "invoice_id";
+    }
+
+    /*
+      Dokument sperren, damit zwei Klicks nicht gleichzeitig
+      zwei identische offene Reprint-Jobs erzeugen.
+    */
+    const pdfColumn =
+      documentType === "SHIPPING_LABEL"
+        ? "label_pdf_base64"
+        : "pdf_base64";
+
+    const documentResult =
+      await client.query(
+        `
+          SELECT
+            id,
+            status,
+            ${pdfColumn} AS pdf_base64
+          FROM ${tableName}
+          WHERE id = $1
+          FOR UPDATE
+        `,
+        [
+          documentId,
+        ]
+      );
+
+    const document =
+      documentResult.rows[0];
+
+    if (!document) {
+      throw new Error(
+        "Dokument wurde nicht gefunden."
+      );
+    }
+
+    if (
+      document.status !==
+      "COMPLETED"
+    ) {
+      throw new Error(
+        "Nur vollständig erstellte Dokumente können nachgedruckt werden."
+      );
+    }
+
+    if (
+      !document.pdf_base64
+    ) {
+      throw new Error(
+        "Dokument enthält kein archiviertes PDF."
+      );
+    }
+
+    /*
+      Falls dieses Dokument bereits gerade wartet oder druckt,
+      keinen zweiten parallelen Job erzeugen.
+    */
+    const existing =
+      await client.query(
+        `
+          SELECT *
+          FROM print_jobs
+          WHERE ${foreignKeyColumn} = $1
+            AND document_type = $2
+            AND status IN (
+              'PENDING',
+              'PRINTING'
+            )
+          ORDER BY requested_at DESC
+          LIMIT 1
+        `,
+        [
+          documentId,
+          documentType,
+        ]
+      );
+
+    if (
+      existing.rows[0]
+    ) {
+      await client.query(
+        "COMMIT"
+      );
+
+      return {
+        created: false,
+        job:
+          existing.rows[0],
+      };
+    }
+
+    let shippingLabelId:
+      string | null = null;
+
+    let packingSlipId:
+      string | null = null;
+
+    let invoiceId:
+      string | null = null;
+
+    if (
+      documentType ===
+      "SHIPPING_LABEL"
+    ) {
+      shippingLabelId =
+        documentId;
+    } else if (
+      documentType ===
+      "PACKING_SLIP"
+    ) {
+      packingSlipId =
+        documentId;
+    } else {
+      invoiceId =
+        documentId;
+    }
+
+    const insert =
+      await client.query(
+        `
+          INSERT INTO print_jobs (
+            shipping_label_id,
+            packing_slip_id,
+            invoice_id,
+            document_type,
+            printer_name,
+            status
+          )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            'PENDING'
+          )
+          RETURNING *
+        `,
+        [
+          shippingLabelId,
+          packingSlipId,
+          invoiceId,
+          documentType,
+          printerName ?? null,
+        ]
+      );
+
+    await client.query(
+      `
+        UPDATE ${tableName}
+        SET
+          print_status = 'QUEUED',
+          printer_name =
+            COALESCE(
+              $2,
+              printer_name
+            ),
+          error_message = NULL,
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      [
+        documentId,
+        printerName ?? null,
+      ]
+    );
+
+    await client.query(
+      "COMMIT"
+    );
+
+    return {
+      created: true,
+      job:
+        insert.rows[0],
+    };
+
+  } catch (error) {
+    await client.query(
+      "ROLLBACK"
+    );
+
+    throw error;
+
+  } finally {
+    client.release();
+  }
+}
+
+
 // ==========================================================
 // NÄCHSTEN PRINT JOB HOLEN
 // ==========================================================
@@ -743,6 +994,113 @@ export async function claimNextPrintJob(
 
   try {
     await client.query("BEGIN");
+
+    /*
+      CRASH-RECOVERY / DOPPELPRINT-SCHUTZ
+
+      Wenn ein Agent nach dem Claim abstürzt, bleibt der Job sonst
+      dauerhaft auf PRINTING stehen.
+
+      Wichtig:
+      Wir setzen solche alten Jobs NICHT zurück auf PENDING,
+      weil das Dokument bereits physisch gedruckt worden sein könnte.
+
+      Nach 10 Minuten wird der Zustand deshalb konservativ FAILED.
+      Ein bewusster Nachdruck kann danach über die Bestellzentrale
+      ausgelöst werden.
+    */
+    const staleResult =
+      await client.query(
+        `
+          UPDATE print_jobs
+          SET
+            status = 'FAILED',
+            error_message =
+              'Druckstatus nach Agent-Abbruch unklar – automatischer Wiederholungsdruck gesperrt. Bitte Druck prüfen und bei Bedarf manuell nachdrucken.',
+            updated_at = NOW()
+          WHERE
+            status = 'PRINTING'
+            AND document_type = $2
+            AND printer_name = $1
+            AND started_at IS NOT NULL
+            AND started_at <
+              NOW() - INTERVAL '10 minutes'
+          RETURNING *
+        `,
+        [
+          printerName,
+          documentType,
+        ]
+      );
+
+    for (
+      const staleJob of
+        staleResult.rows
+    ) {
+      const staleError =
+        staleJob.error_message;
+
+      if (
+        staleJob.document_type ===
+          "SHIPPING_LABEL" &&
+        staleJob.shipping_label_id
+      ) {
+        await client.query(
+          `
+            UPDATE shipping_labels
+            SET
+              print_status = 'FAILED',
+              error_message = $2,
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [
+            staleJob.shipping_label_id,
+            staleError,
+          ]
+        );
+
+      } else if (
+        staleJob.document_type ===
+          "PACKING_SLIP" &&
+        staleJob.packing_slip_id
+      ) {
+        await client.query(
+          `
+            UPDATE packing_slips
+            SET
+              print_status = 'FAILED',
+              error_message = $2,
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [
+            staleJob.packing_slip_id,
+            staleError,
+          ]
+        );
+
+      } else if (
+        staleJob.document_type ===
+          "INVOICE" &&
+        staleJob.invoice_id
+      ) {
+        await client.query(
+          `
+            UPDATE invoices
+            SET
+              print_status = 'FAILED',
+              error_message = $2,
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [
+            staleJob.invoice_id,
+            staleError,
+          ]
+        );
+      }
+    }
 
     const result = await client.query(
       `
@@ -1088,38 +1446,61 @@ export async function completePrintJob(
 
 export async function failPrintJob(
   printJobId: string,
-  errorMessage: string
+  errorMessage: string,
+  retryable: boolean = true
 ) {
-
   const client =
     await db.connect();
 
   try {
-
     await client.query(
       "BEGIN"
     );
 
+    /*
+      attempts wird bereits beim Claim hochgezählt.
+
+      Versuch 1/3 + 2/3:
+        -> zurück auf PENDING
+        -> Print-Agent darf denselben Job erneut holen
+
+      Versuch 3/3:
+        -> endgültig FAILED
+
+      Erfolgreiche PRINTED-Jobs werden hier nie verändert.
+    */
     const jobResult =
       await client.query(
         `
           UPDATE print_jobs
-
           SET
-
-            status = 'FAILED',
-
+            status =
+              CASE
+                WHEN $3::boolean = FALSE
+                  THEN 'FAILED'
+                WHEN attempts < 3
+                  THEN 'PENDING'
+                ELSE 'FAILED'
+              END,
             error_message = $2,
-
+            started_at =
+              CASE
+                WHEN $3::boolean = FALSE
+                  THEN started_at
+                WHEN attempts < 3
+                  THEN NULL
+                ELSE started_at
+              END,
             updated_at = NOW()
-
-          WHERE id = $1
-
+          WHERE
+            id = $1
+            AND status <> 'PRINTED'
           RETURNING *
         `,
         [
           printJobId,
           errorMessage,
+          retryable,
         ]
       );
 
@@ -1127,78 +1508,68 @@ export async function failPrintJob(
       jobResult.rows[0];
 
     if (job) {
+      const retrying =
+        job.status === "PENDING";
+
+      const documentStatus =
+        retrying
+          ? "PENDING"
+          : "FAILED";
 
       if (
         job.document_type ===
         "SHIPPING_LABEL"
       ) {
-
         await client.query(
           `
             UPDATE shipping_labels
-
             SET
-
-              print_status = 'FAILED',
-
-              error_message = $2,
-
+              print_status = $2,
+              error_message = $3,
               updated_at = NOW()
-
             WHERE id = $1
           `,
           [
             job.shipping_label_id,
+            documentStatus,
             errorMessage,
           ]
         );
-
       } else if (
         job.document_type ===
         "PACKING_SLIP"
       ) {
-
         await client.query(
           `
             UPDATE packing_slips
-
             SET
-
-              print_status = 'FAILED',
-
-              error_message = $2,
-
+              print_status = $2,
+              error_message = $3,
               updated_at = NOW()
-
             WHERE id = $1
           `,
           [
             job.packing_slip_id,
+            documentStatus,
             errorMessage,
           ]
         );
-
       } else if (
         job.document_type ===
         "INVOICE"
       ) {
-
         await client.query(
           `
             UPDATE invoices
-
             SET
-
-              print_status = 'FAILED',
-
-              error_message = $2,
-
+              print_status = $2,
+              error_message = $3,
               updated_at = NOW()
-
             WHERE id = $1
           `,
           [
             job.invoice_id,
+            documentStatus,
             errorMessage,
           ]
         );
@@ -1212,7 +1583,6 @@ export async function failPrintJob(
     return job ?? null;
 
   } catch (error) {
-
     await client.query(
       "ROLLBACK"
     );
@@ -1220,9 +1590,7 @@ export async function failPrintJob(
     throw error;
 
   } finally {
-
     client.release();
-
   }
 }
 

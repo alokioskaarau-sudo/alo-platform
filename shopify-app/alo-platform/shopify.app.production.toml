@@ -14,7 +14,7 @@ api_version = "2026-07"
 
 [access_scopes]
 
-scopes = "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_orders,read_products,write_discounts"
+scopes = "read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_orders,read_products,write_discounts,write_products,write_files,write_inventory,read_locations"
 
 optional_scopes = []
 

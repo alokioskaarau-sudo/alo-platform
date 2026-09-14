@@ -62,8 +62,19 @@ export async function validateShopifyShippingAddress(
     );
   }
 
+  const address1 = address.address1.trim();
+  const address2 = address.address2?.trim() ?? "";
+
+  const address2IsHouseNumber =
+    /^\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(address2);
+
+  const streetAddress =
+    address2IsHouseNumber
+      ? `${address1} ${address2}`
+      : address1;
+
   const { street, houseNumber } =
-    splitSwissStreetAddress(address.address1);
+    splitSwissStreetAddress(streetAddress);
 
   const result = await validateSwissPostAddress({
     firstName: address.firstName,

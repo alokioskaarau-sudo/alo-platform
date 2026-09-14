@@ -70,6 +70,7 @@ import productAiRouter from './routes/productAi.routes.js';
 import productsRouter from "./routes/products.routes.js";
 import productOpsRouter from "./routes/productOps.routes.js";
 import receivingRouter from "./routes/receiving.routes.js";
+import staffNotesRouter from "./routes/staffNotes.routes.js";
 
 // ============================================================
 // EXPRESS
@@ -77,10 +78,6 @@ import receivingRouter from "./routes/receiving.routes.js";
 
 const app =
   express();
-
-app.use('/api/ai', deliveryAiRouter);
-app.use('/api/ai', productAiRouter);
-
 
 // ============================================================
 // SHOPIFY WEBHOOK RAW BODY
@@ -124,9 +121,22 @@ app.use(
   })
 );
 
+/*
+ * AI-Router müssen NACH express.json() registriert werden.
+ *
+ * JSON-Endpunkte wie product-verify-online benötigen req.body.
+ * Multipart-Endpunkte für Produktfotos funktionieren weiterhin,
+ * weil express.json() multipart/form-data nicht verarbeitet.
+ *
+ * Shopify Webhooks bleiben bewusst VOR diesem Block mit raw body.
+ */
+app.use('/api/ai', deliveryAiRouter);
+app.use('/api/ai', productAiRouter);
+
 app.use(productsRouter);
 app.use(productOpsRouter);
 app.use("/api/receiving", receivingRouter);
+app.use("/api/staff-notes", staffNotesRouter);
 
 
 // ============================================================
@@ -240,7 +250,7 @@ app.get(
           true,
 
         mode:
-          "SPECIMEN",
+          "LIVE",
       });
     } catch (error: any) {
       console.error(

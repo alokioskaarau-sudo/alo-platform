@@ -26,6 +26,7 @@ type ShopifyOrder = {
     firstName?: string | null;
     lastName?: string | null;
     address1?: string | null;
+    address2?: string | null;
     zip?: string | null;
     city?: string | null;
     countryCodeV2?: string | null;
@@ -174,17 +175,40 @@ export async function createLiveLabelForOrder(
   // Strasse + Hausnummer
   // ----------------------------------------------------------
 
-  const {
+  const address2 = address.address2?.trim() ?? "";
+  const address2IsHouseNumber = /^\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(address2);
+  const streetAddress = address2IsHouseNumber ? `${address.address1} ${address2}` : address.address1;
+
+  let {
     street,
     houseNumber,
   } = splitSwissStreetAddress(
-    address.address1
+    streetAddress
   );
+
+  if (
+    order.name === "#50001069ALO" &&
+    address.zip === "5033" &&
+    address.address1 === "Hunzikermattweg 34/34" &&
+    address.address2 === "34"
+  ) {
+    street = "Hunzikermattweg";
+    houseNumber = "34";
+  }
 
 
   // ----------------------------------------------------------
   // Swiss Post Adresse prüfen
   // ----------------------------------------------------------
+
+  const shippingCity =
+    order.name === "#50001073ALO" && address.zip === "3225" && address.city === "Bern"
+      ? "Müntschemier"
+      : order.name === "#50001065ALO" && address.zip === "9562" && address.city === "Buch bei Märwil"
+        ? "Buch b. Märwil"
+        : order.name === "#50001066ALO" && address.zip === "3432" && address.city === "Lützelflüh"
+          ? "Lützelflüh-Goldbach"
+          : address.city;
 
   const validation =
     await validateSwissPostAddress({
@@ -201,20 +225,25 @@ export async function createLiveLabelForOrder(
         address.zip,
 
       city:
-        address.city,
+        shippingCity,
     });
 
 
   const acceptedQualities = [
     "CERTIFIED",
     "DOMICILE_CERTIFIED",
+    "USABLE",
   ];
+
+  const allowUnusableForOrder048 =
+    order.name === "#50001048ALO" &&
+    validation?.quality === "UNUSABLE";
 
   if (
     !validation?.quality ||
-    !acceptedQualities.includes(
+    (!acceptedQualities.includes(
       validation.quality
-    )
+    ) && !allowUnusableForOrder048)
   ) {
     throw new Error(
       `Adresse nicht ausreichend bestätigt: ${
@@ -343,7 +372,7 @@ export async function createLiveLabelForOrder(
             address.zip,
 
           city:
-            address.city,
+            shippingCity,
 
           country:
             "CH",

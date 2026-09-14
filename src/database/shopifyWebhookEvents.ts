@@ -209,6 +209,33 @@ export async function markWebhookCompleted(
 
 
 // ============================================================
+// EVENT BRAUCHT MANUELLE PRÜFUNG
+// ============================================================
+
+export async function markWebhookNeedsReview(
+  id: string,
+  errorMessage: string
+) {
+  await db.query(
+    `
+      UPDATE shopify_webhook_events
+      SET
+        status = 'NEEDS_REVIEW',
+        error_message =
+          $2,
+        updated_at =
+          NOW()
+      WHERE id = $1
+    `,
+    [
+      id,
+      errorMessage,
+    ]
+  );
+}
+
+
+// ============================================================
 // EVENT FEHLGESCHLAGEN
 // ============================================================
 

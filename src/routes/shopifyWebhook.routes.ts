@@ -20,6 +20,10 @@ import {
   processShopifyProductWebhook,
 } from "../services/shopifyProductWebhook.service.js";
 
+import {
+  createOrderAlert,
+} from "../database/orderAlerts.js";
+
 const router =
   Router();
 
@@ -321,6 +325,102 @@ router.post(
 
           orderName,
         });
+
+
+      // ------------------------------------------------------
+      // ALO ORDER ALERT
+      //
+      // Bewusst VOR dem Duplicate-Return:
+      // Falls die Alert-Erstellung einmal fehlschlägt und
+      // Shopify den Webhook erneut sendet, kann der Alert
+      // beim Retry noch erstellt werden.
+      //
+      // shopify_order_id ist in order_alerts UNIQUE.
+      // Dadurch entsteht pro Bestellung maximal ein Alert.
+      // ------------------------------------------------------
+
+      const alertItems =
+        Array.isArray(
+          payload?.line_items
+        )
+          ? payload.line_items
+              .map(
+                (item: any) => ({
+                  name:
+                    String(
+                      item?.name ??
+                      item?.title ??
+                      "Artikel"
+                    ).trim(),
+                  quantity:
+                    Math.max(
+                      1,
+                      Number(
+                        item?.quantity ??
+                        1
+                      ) || 1
+                    ),
+                })
+              )
+              .filter(
+                (item: any) =>
+                  item.name.length > 0
+              )
+          : [];
+
+      const alertTotalAmount =
+        String(
+          payload?.current_total_price ??
+          payload?.total_price ??
+          "0"
+        );
+
+      const alertCurrencyCode =
+        String(
+          payload?.currency ??
+          payload?.presentment_currency ??
+          "CHF"
+        ).toUpperCase();
+
+      const alertResult =
+        await createOrderAlert({
+          shopifyOrderId:
+            orderId,
+
+          shopifyOrderName:
+            orderName ??
+            String(orderId),
+
+          totalAmount:
+            alertTotalAmount,
+
+          currencyCode:
+            alertCurrencyCode,
+
+          fulfillmentType:
+            "ORDER",
+
+          items:
+            alertItems,
+        });
+
+      console.log(
+        alertResult.created
+          ? "ALO Order Alert erstellt:"
+          : "ALO Order Alert bereits vorhanden:",
+        {
+          orderId,
+          orderName,
+          alertId:
+            alertResult.alert.id,
+          total:
+            alertTotalAmount,
+          currency:
+            alertCurrencyCode,
+          items:
+            alertItems.length,
+        }
+      );
 
 
       // ------------------------------------------------------

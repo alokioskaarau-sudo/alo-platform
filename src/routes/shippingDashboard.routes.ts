@@ -13,6 +13,7 @@ import {
   archiveOrderAsTest,
   restoreArchivedOrder,
   createPrintJob,
+  createManualReprintJob,
   claimNextPrintJob,
   completePrintJob,
   failPrintJob,
@@ -1085,6 +1086,98 @@ shippingDashboardRouter.post(
 );
 
 
+
+// ==========================================================
+// API: MANUELLER NACHDRUCK AUS BESTELLZENTRALE
+//
+// Nutzt ausschließlich vorhandene archivierte PDFs.
+// KEIN neues Shopify-Fulfillment.
+// KEIN neues Versandlabel.
+// ==========================================================
+
+shippingDashboardRouter.post(
+  "/api/shipping/reprint",
+  async (req, res) => {
+    try {
+      const rawType =
+        String(
+          req.body?.documentType ??
+          ""
+        )
+          .trim()
+          .toUpperCase();
+
+      const documentId =
+        String(
+          req.body?.documentId ??
+          ""
+        ).trim();
+
+      if (
+        rawType !== "SHIPPING_LABEL" &&
+        rawType !== "PACKING_SLIP" &&
+        rawType !== "INVOICE"
+      ) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Ungültiger Dokumenttyp.",
+          });
+      }
+
+      if (!documentId) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Dokument-ID fehlt.",
+          });
+      }
+
+      const printerName =
+        typeof req.body?.printerName ===
+        "string"
+          ? req.body.printerName.trim()
+          : undefined;
+
+      const result =
+        await createManualReprintJob(
+          rawType,
+          documentId,
+          printerName ||
+            undefined
+        );
+
+      return res.json({
+        ok: true,
+        documentType:
+          rawType,
+        documentId,
+        ...result,
+      });
+
+    } catch (error: any) {
+      console.error(
+        "Manual Reprint Error:",
+        error
+      );
+
+      return res
+        .status(400)
+        .json({
+          ok: false,
+          error:
+            error?.message ??
+            "Nachdruck konnte nicht gestartet werden.",
+        });
+    }
+  }
+);
+
+
 // ==========================================================
 // PRINT AGENT AUTH
 //
@@ -1229,11 +1322,15 @@ shippingDashboardRouter.post(
           "Unbekannter Druckfehler"
         ).trim();
 
+      const retryable =
+        req.body?.retryable !== false;
+
       const job =
         await failPrintJob(
           req.params.id,
           message ||
-            "Unbekannter Druckfehler"
+            "Unbekannter Druckfehler",
+          retryable
         );
 
       return res.json({
@@ -2203,6 +2300,45 @@ tbody tr:last-child td {
    PROCESS
 ========================================================== */
 
+
+.reprint-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.reprint-label {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.doc.reprint {
+  appearance: none;
+  cursor: pointer;
+}
+
+.doc.reprint-all {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+.doc.reprint-all:hover {
+  border-color: #2a2a2a;
+  background: #2a2a2a;
+}
+
+.doc.reprint:disabled {
+  opacity: .4;
+  cursor: wait;
+  transform: none;
+}
+
 .process {
   display:
     flex;
@@ -2828,7 +2964,7 @@ tbody tr:last-child td {
           class="search"
           id="search"
           type="search"
-          placeholder="Bestellung, Rechnung, Tracking suchen …"
+          placeholder="Bestellnummer / letzte Ziffern / Tracking suchen …"
           autocomplete="off"
         >
 
@@ -3146,63 +3282,303 @@ tbody tr:last-child td {
 
 
   function documents(
+
     order
+
   ) {
 
     const labelUrl =
+
       order.label_id
+
         ? "/api/shipping/labels/"
+
           + encodeURIComponent(
+
               order.label_id
+
             )
+
           + "/pdf"
+
         : null;
+
 
     const slipUrl =
+
       order.packing_slip_id
+
         ? "/api/shipping/packing-slips/"
+
           + encodeURIComponent(
+
               order.packing_slip_id
+
             )
+
           + "/pdf"
+
         : null;
+
 
     const invoiceUrl =
+
       order.invoice_id
+
         ? "/api/shipping/invoices/"
+
           + encodeURIComponent(
+
               order.invoice_id
+
             )
+
           + "/pdf"
+
         : null;
 
+
+    function reprintButton(
+
+      type,
+
+      id,
+
+      label
+
+    ) {
+
+      if (!id) {
+
+        return \`
+
+          <span
+
+            class="doc disabled"
+
+          >
+
+            ↻ \${label}
+
+          </span>
+
+        \`;
+
+      }
+
+
+      return \`
+
+        <button
+
+          class="doc reprint"
+
+          type="button"
+
+          data-reprint-type="\${type}"
+
+          data-reprint-id="\${escapeHtml(
+
+            id
+
+          )}"
+
+          data-reprint-order="\${escapeHtml(
+
+            order.shopify_order_name
+
+          )}"
+
+        >
+
+          ↻ \${label}
+
+        </button>
+
+      \`;
+
+    }
+
+
+    const allParts = [];
+
+
+    if (
+
+      order.label_id
+
+    ) {
+
+      allParts.push(
+
+        "SHIPPING_LABEL:" +
+
+        order.label_id
+
+      );
+
+    }
+
+
+    if (
+
+      order.packing_slip_id
+
+    ) {
+
+      allParts.push(
+
+        "PACKING_SLIP:" +
+
+        order.packing_slip_id
+
+      );
+
+    }
+
+
+    if (
+
+      order.invoice_id
+
+    ) {
+
+      allParts.push(
+
+        "INVOICE:" +
+
+        order.invoice_id
+
+      );
+
+    }
+
+
+    const allButton =
+
+      allParts.length
+
+        ? \`
+
+          <button
+
+            class="doc reprint reprint-all"
+
+            type="button"
+
+            data-reprint-all="\${escapeHtml(
+
+              allParts.join("|")
+
+            )}"
+
+            data-reprint-order="\${escapeHtml(
+
+              order.shopify_order_name
+
+            )}"
+
+          >
+
+            🖨 ALLES DRUCKEN
+
+          </button>
+
+        \`
+
+        : "";
+
+
     return \`
-      <div class="docs">
 
-        \${documentButton(
-          labelUrl,
-          "Label"
-        )}
+      <div>
 
-        \${documentButton(
-          slipUrl,
-          "Lieferschein"
-        )}
+        <div class="docs">
 
-        \${documentButton(
-          invoiceUrl,
-          order.invoice_number
-            ? escapeHtml(
-                order.invoice_number
-              )
-            : "Rechnung",
-          "invoice"
-        )}
+          \${documentButton(
+
+            labelUrl,
+
+            "LABEL"
+
+          )}
+
+          \${documentButton(
+
+            slipUrl,
+
+            "LIEFERSCHEIN"
+
+          )}
+
+          \${documentButton(
+
+            invoiceUrl,
+
+            order.invoice_number
+
+              ? escapeHtml(
+
+                  order.invoice_number
+
+                )
+
+              : "Rechnung",
+
+            "invoice"
+
+          )}
+
+        </div>
+
+
+        <div class="reprint-row">
+
+          <span class="reprint-label">
+
+            Drucken
+
+          </span>
+
+          \${reprintButton(
+
+            "SHIPPING_LABEL",
+
+            order.label_id,
+
+            "Label"
+
+          )}
+
+          \${reprintButton(
+
+            "PACKING_SLIP",
+
+            order.packing_slip_id,
+
+            "Lieferschein"
+
+          )}
+
+          \${reprintButton(
+
+            "INVOICE",
+
+            order.invoice_id,
+
+            "RECHNUNG"
+
+          )}
+
+          \${allButton}
+
+        </div>
 
       </div>
-    \`;
-  }
 
+    \`;
+
+  }
 
   function processStepClass(
     status,
@@ -3401,42 +3777,168 @@ tbody tr:last-child td {
         .trim()
         .toLowerCase();
 
-    return orders.filter(
-      order => {
+    const normalizedQuery =
+      query.replace(
+        /[^a-z0-9]/g,
+        ""
+      );
 
-        if (
-          activeFilter !==
-            "ALL" &&
-          order.dashboard_status !==
+    /*
+      Ohne Suche gilt weiterhin der gewählte Tab.
+
+      Sobald etwas eingegeben wird, suchen wir bewusst
+      über ALLE Bestellungen – auch erledigte und archivierte.
+      So reicht z.B. die letzte Ziffernfolge einer Bestellung.
+    */
+    if (!query) {
+      return orders.filter(
+        order =>
+          activeFilter === "ALL" ||
+          order.dashboard_status ===
             activeFilter
-        ) {
-          return false;
-        }
+      );
+    }
 
-        if (!query) {
-          return true;
-        }
+    const matches =
+      orders
+        .map(
+          order => {
 
-        const haystack = [
-          order.shopify_order_name,
-          order.invoice_number,
-          order.tracking_number,
-          order.swisspost_ident_code,
-          order.service,
-          order.total_amount,
-          order.currency,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
+            const orderName =
+              String(
+                order.shopify_order_name ||
+                ""
+              ).toLowerCase();
 
-        return haystack.includes(
-          query
-        );
-      }
+            const invoice =
+              String(
+                order.invoice_number ||
+                ""
+              ).toLowerCase();
+
+            const tracking =
+              String(
+                order.tracking_number ||
+                ""
+              ).toLowerCase();
+
+            const ident =
+              String(
+                order.swisspost_ident_code ||
+                ""
+              ).toLowerCase();
+
+            const fields = [
+              orderName,
+              invoice,
+              tracking,
+              ident,
+              String(
+                order.service ||
+                ""
+              ).toLowerCase(),
+              String(
+                order.total_amount ||
+                ""
+              ).toLowerCase(),
+              String(
+                order.currency ||
+                ""
+              ).toLowerCase(),
+            ];
+
+            const normalizedFields =
+              fields.map(
+                value =>
+                  value.replace(
+                    /[^a-z0-9]/g,
+                    ""
+                  )
+              );
+
+            const haystack =
+              fields.join(" ");
+
+            const normalizedHaystack =
+              normalizedFields.join(" ");
+
+            if (
+              !haystack.includes(query) &&
+              (
+                !normalizedQuery ||
+                !normalizedHaystack.includes(
+                  normalizedQuery
+                )
+              )
+            ) {
+              return null;
+            }
+
+            /*
+              Treffer-Rang:
+              0 = exakte Bestellnummer
+              1 = Bestellnummer endet mit Suche
+              2 = andere exakte Nummer
+              3 = andere Nummer endet mit Suche
+              4 = normaler Teiltreffer
+            */
+            const normalizedOrder =
+              normalizedFields[0] || "";
+
+            let score = 4;
+
+            if (
+              normalizedOrder ===
+              normalizedQuery
+            ) {
+              score = 0;
+
+            } else if (
+              normalizedQuery &&
+              normalizedOrder.endsWith(
+                normalizedQuery
+              )
+            ) {
+              score = 1;
+
+            } else if (
+              normalizedFields.some(
+                value =>
+                  value ===
+                  normalizedQuery
+              )
+            ) {
+              score = 2;
+
+            } else if (
+              normalizedQuery &&
+              normalizedFields.some(
+                value =>
+                  value.endsWith(
+                    normalizedQuery
+                  )
+              )
+            ) {
+              score = 3;
+            }
+
+            return {
+              order,
+              score,
+            };
+          }
+        )
+        .filter(Boolean);
+
+    matches.sort(
+      (a, b) =>
+        a.score - b.score
+    );
+
+    return matches.map(
+      match => match.order
     );
   }
-
 
   function updateStats() {
 
@@ -3890,6 +4392,380 @@ tbody tr:last-child td {
   }
 
 
+
+  async function queueReprint(
+
+    documentType,
+
+    documentId
+
+  ) {
+
+    const response =
+
+      await fetch(
+
+        "/api/shipping/reprint",
+
+        {
+
+          method:
+
+            "POST",
+
+          headers: {
+
+            "Content-Type":
+
+              "application/json",
+
+          },
+
+          body:
+
+            JSON.stringify({
+
+              documentType,
+
+              documentId,
+
+            }),
+
+        }
+
+      );
+
+
+    const data =
+
+      await response.json();
+
+
+    if (
+
+      !response.ok ||
+
+      !data.ok
+
+    ) {
+
+      throw new Error(
+
+        data.error ||
+
+        "Nachdruck konnte nicht gestartet werden."
+
+      );
+
+    }
+
+
+    return data;
+
+  }
+
+
+  async function handleReprint(
+
+    button
+
+  ) {
+
+    const orderName =
+
+      button.dataset.reprintOrder ||
+
+      "Bestellung";
+
+
+    const all =
+
+      button.dataset.reprintAll;
+
+
+    const type =
+
+      button.dataset.reprintType;
+
+
+    const id =
+
+      button.dataset.reprintId;
+
+
+    let jobs = [];
+
+
+    if (all) {
+
+      jobs =
+
+        all
+
+          .split("|")
+
+          .map(
+
+            item => {
+
+              const separator =
+
+                item.indexOf(":");
+
+
+              if (
+
+                separator <= 0
+
+              ) {
+
+                return null;
+
+              }
+
+
+              return {
+
+                type:
+
+                  item.slice(
+
+                    0,
+
+                    separator
+
+                  ),
+
+                id:
+
+                  item.slice(
+
+                    separator + 1
+
+                  ),
+
+              };
+
+            }
+
+          )
+
+          .filter(Boolean);
+
+
+      if (
+
+        !window.confirm(
+
+          orderName +
+
+          ": alle vorhandenen Dokumente nachdrucken?"
+
+        )
+
+      ) {
+
+        return;
+
+      }
+
+    } else {
+
+      if (
+
+        !type ||
+
+        !id
+
+      ) {
+
+        return;
+
+      }
+
+
+      jobs = [
+
+        {
+
+          type,
+
+          id,
+
+        },
+
+      ];
+
+
+      const names = {
+
+        SHIPPING_LABEL:
+
+          "Versandlabel",
+
+        PACKING_SLIP:
+
+          "Lieferschein",
+
+        INVOICE:
+
+          "Rechnung",
+
+      };
+
+
+      if (
+
+        !window.confirm(
+
+          orderName +
+
+          ": " +
+
+          (
+
+            names[type] ||
+
+            "Dokument"
+
+          ) +
+
+          " nachdrucken?"
+
+        )
+
+      ) {
+
+        return;
+
+      }
+
+    }
+
+
+    button.disabled = true;
+
+
+    const oldText =
+
+      button.textContent;
+
+
+    button.textContent =
+
+      "Wird gesendet …";
+
+
+    try {
+
+      let created = 0;
+
+      let existing = 0;
+
+
+      for (
+
+        const job of jobs
+
+      ) {
+
+        const result =
+
+          await queueReprint(
+
+            job.type,
+
+            job.id
+
+          );
+
+
+        if (
+
+          result.created
+
+        ) {
+
+          created += 1;
+
+        } else {
+
+          existing += 1;
+
+        }
+
+      }
+
+
+      if (
+
+        created > 0
+
+      ) {
+
+        showToast(
+
+          orderName +
+
+          ": Nachdruck wurde an die Druckwarteschlange gesendet."
+
+        );
+
+      } else if (
+
+        existing > 0
+
+      ) {
+
+        showToast(
+
+          orderName +
+
+          ": Dokument ist bereits in der Druckwarteschlange."
+
+        );
+
+      }
+
+
+      await loadOrders(
+
+        true
+
+      );
+
+    } catch (error) {
+
+      console.error(
+
+        "Reprint Error:",
+
+        error
+
+      );
+
+
+      showToast(
+
+        error?.message ||
+
+        "Nachdruck fehlgeschlagen.",
+
+        true
+
+      );
+
+    } finally {
+
+      button.disabled = false;
+
+      button.textContent = oldText;
+
+    }
+
+  }
+
+
   async function changeArchiveStatus(
     button
   ) {
@@ -4050,22 +4926,61 @@ tbody tr:last-child td {
 
 
   content.addEventListener(
+
     "click",
+
     event => {
 
-      const button =
+      const reprintButton =
+
         event.target.closest(
-          "[data-action]"
+
+          "[data-reprint-type], [data-reprint-all]"
+
         );
 
-      if (!button) {
+
+      if (
+
+        reprintButton
+
+      ) {
+
+        handleReprint(
+
+          reprintButton
+
+        );
+
         return;
+
       }
 
+
+      const button =
+
+        event.target.closest(
+
+          "[data-action]"
+
+        );
+
+
+      if (!button) {
+
+        return;
+
+      }
+
+
       changeArchiveStatus(
+
         button
+
       );
+
     }
+
   );
 
 
