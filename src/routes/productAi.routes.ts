@@ -39,6 +39,196 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/*
+ * ALO AI Concurrency Gate
+ *
+ * Limitiert schwere AI-Aufrufe serverseitig.
+ * Weitere Requests warten FIFO auf einen freien Slot.
+ */
+function readConcurrencyLimit(
+  envName: string,
+  fallback: number
+): number {
+  const raw =
+    process.env[envName];
+
+  const parsed =
+    raw ? Number(raw) : NaN;
+
+  if (
+    Number.isInteger(parsed) &&
+    parsed > 0 &&
+    parsed <= 20
+  ) {
+    return parsed;
+  }
+
+  return fallback;
+}
+
+class ConcurrencyGate {
+  private active = 0;
+
+  private readonly queue: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+
+  constructor(
+    private readonly name: string,
+    private readonly limit: number,
+    private readonly queueTimeoutMs = 120000
+  ) {
+    console.log(
+      `[ALO AI QUEUE INIT] ${name}`,
+      {
+        limit,
+        queueTimeoutMs,
+      }
+    );
+  }
+
+  private dispatchNext() {
+    while (
+      this.active < this.limit &&
+      this.queue.length > 0
+    ) {
+      const next =
+        this.queue.shift();
+
+      if (!next) {
+        return;
+      }
+
+      clearTimeout(next.timer);
+
+      this.active += 1;
+
+      console.log(
+        `[ALO AI QUEUE START] ${this.name}`,
+        {
+          active: this.active,
+          waiting: this.queue.length,
+          limit: this.limit,
+        }
+      );
+
+      next.resolve();
+    }
+  }
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+
+      console.log(
+        `[ALO AI QUEUE START] ${this.name}`,
+        {
+          active: this.active,
+          waiting: this.queue.length,
+          limit: this.limit,
+        }
+      );
+
+      return;
+    }
+
+    console.log(
+      `[ALO AI QUEUE WAIT] ${this.name}`,
+      {
+        active: this.active,
+        waiting:
+          this.queue.length + 1,
+        limit: this.limit,
+      }
+    );
+
+    await new Promise<void>(
+      (resolve, reject) => {
+        const item = {
+          resolve,
+          reject,
+          timer:
+            setTimeout(
+              () => {
+                const index =
+                  this.queue.indexOf(
+                    item
+                  );
+
+                if (index >= 0) {
+                  this.queue.splice(
+                    index,
+                    1
+                  );
+                }
+
+                reject(
+                  new Error(
+                    `${this.name} Queue-Wartezeit überschritten.`
+                  )
+                );
+              },
+              this.queueTimeoutMs
+            ),
+        };
+
+        this.queue.push(item);
+      }
+    );
+  }
+
+  release() {
+    this.active =
+      Math.max(
+        0,
+        this.active - 1
+      );
+
+    console.log(
+      `[ALO AI QUEUE RELEASE] ${this.name}`,
+      {
+        active: this.active,
+        waiting: this.queue.length,
+        limit: this.limit,
+      }
+    );
+
+    this.dispatchNext();
+  }
+
+  async run<T>(
+    task: () => Promise<T>
+  ): Promise<T> {
+    await this.acquire();
+
+    try {
+      return await task();
+    } finally {
+      this.release();
+    }
+  }
+}
+
+const verifyGate =
+  new ConcurrencyGate(
+    "VERIFY",
+    readConcurrencyLimit(
+      "ALO_VERIFY_CONCURRENCY",
+      2
+    )
+  );
+
+const studioGate =
+  new ConcurrencyGate(
+    "STUDIO",
+    readConcurrencyLimit(
+      "ALO_STUDIO_CONCURRENCY",
+      2
+    )
+  );
+
 const nullableString = {
   type: ['string', 'null'],
 } as const;
@@ -365,7 +555,8 @@ router.post(
                 'product-ingredients.jpg',
               {
                 type:
-                  ingredients.mimetype,
+                  ingredients.mimetype ||
+                  'image/jpeg',
               }
             ),
             purpose:
@@ -385,7 +576,8 @@ router.post(
                 'product-nutrition.jpg',
               {
                 type:
-                  nutrition.mimetype,
+                  nutrition.mimetype ||
+                  'image/jpeg',
               }
             ),
             purpose:
@@ -549,8 +741,7 @@ Erfinde keine Fakten.
 
       if (ingredientsFileId) {
         content.push({
-          type:
-            'input_text',
+          type: 'input_text',
           text:
             'Das folgende Bild ist speziell für ZUTATEN / ALLERGENE / SPUREN bestimmt.',
         });
@@ -566,8 +757,7 @@ Erfinde keine Fakten.
 
       if (nutritionFileId) {
         content.push({
-          type:
-            'input_text',
+          type: 'input_text',
           text:
             'Das folgende Bild ist speziell für NÄHRWERTE bestimmt.',
         });
@@ -741,14 +931,1197 @@ router.post(
   "/product-verify-online",
   async (req, res) => {
     try {
-      const result =
-        await verifyProductOnline({
-          draft: req.body?.draft,
-          barcode:
-            typeof req.body?.barcode === "string"
-              ? req.body.barcode
+      const currentDraft =
+        req.body?.draft &&
+        typeof req.body.draft === "object"
+          ? req.body.draft
+          : {};
+
+      const barcode =
+        typeof req.body?.barcode === "string"
+          ? req.body.barcode.trim()
+          : typeof currentDraft?.barcode === "string"
+            ? currentDraft.barcode.trim()
+            : "";
+
+      const brand =
+        typeof currentDraft?.brand === "string"
+          ? currentDraft.brand.trim()
+          : "";
+
+      const title =
+        typeof currentDraft?.title === "string"
+          ? currentDraft.title.trim()
+          : "";
+
+      const unitSize =
+        typeof currentDraft?.unitSize === "string"
+          ? currentDraft.unitSize.trim()
+          : "";
+
+      console.log(
+        "[ALO VERIFY REQUEST RECEIVED]",
+        {
+          hasBody: Boolean(req.body),
+          hasDraft: Boolean(req.body?.draft),
+          barcode: barcode || null,
+          draftBarcode:
+            typeof currentDraft?.barcode === "string"
+              ? currentDraft.barcode
               : null,
+          brand: brand || null,
+          title: title || null,
+          unitSize: unitSize || null,
+        }
+      );
+
+      if (!barcode && !title && !brand) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Für den Online-Abgleich fehlen Barcode und Produktidentität.",
         });
+        return;
+      }
+
+      /*
+       * Schnelle Barcode-Daten werden NICHT mehr direkt
+       * an die Staff App zurückgegeben.
+       *
+       * Sie dienen als zusätzliche Rohdaten für den
+       * anschliessenden vollständigen ALO VERIFY Lauf.
+       */
+      let fastBarcodeDraft: any = null;
+      let fastBarcodeFoundFields = 0;
+      let fastBarcodeSource: any = null;
+
+      /*
+       * FAST FOOD DATA VERIFY
+       *
+       * Exakter Barcode zuerst direkt gegen Open Food Facts.
+       * Dadurch bekommen wir Zutaten und Nährwerte häufig
+       * innerhalb weniger Sekunden, ohne auf Web Search
+       * warten zu müssen.
+       *
+       * Falls dort nichts Belastbares vorhanden ist,
+       * läuft darunter der bestehende ALO Web Verify weiter.
+       */
+      if (barcode) {
+        const offController =
+          new AbortController();
+
+        const offTimeout =
+          setTimeout(
+            () =>
+              offController.abort(),
+            8000
+          );
+
+        try {
+          console.log(
+            "[ALO VERIFY OFF START]",
+            {
+              barcode,
+            }
+          );
+
+          const fields = [
+            "code",
+            "product_name",
+            "product_name_de",
+            "brands",
+            "quantity",
+            "countries",
+            "countries_tags",
+            "ingredients_text",
+            "ingredients_text_de",
+            "allergens",
+            "allergens_tags",
+            "traces",
+            "traces_tags",
+            "nutrition_data_per",
+            "nutriments",
+          ].join(",");
+
+          const offResponse =
+            await fetch(
+              `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(
+                barcode
+              )}.json?fields=${encodeURIComponent(
+                fields
+              )}`,
+              {
+                headers: {
+                  "User-Agent":
+                    "ALO-Kiosk/1.0",
+                  Accept:
+                    "application/json",
+                },
+                signal:
+                  offController.signal,
+              }
+            );
+
+          if (offResponse.ok) {
+            const offPayload: any =
+              await offResponse.json();
+
+            const product =
+              offPayload?.product;
+
+            if (
+              offPayload?.status === 1 &&
+              product &&
+              typeof product ===
+                "object"
+            ) {
+              const nutriments =
+                product.nutriments &&
+                typeof product.nutriments ===
+                  "object"
+                  ? product.nutriments
+                  : {};
+
+              const asString = (
+                value: unknown
+              ) => {
+                if (
+                  typeof value ===
+                  "string"
+                ) {
+                  const trimmed =
+                    value.trim();
+
+                  return trimmed ||
+                    null;
+                }
+
+                if (
+                  typeof value ===
+                    "number" &&
+                  Number.isFinite(value)
+                ) {
+                  return String(value);
+                }
+
+                return null;
+              };
+
+              const asNumber = (
+                value: unknown
+              ) => {
+                if (
+                  typeof value ===
+                    "number" &&
+                  Number.isFinite(value)
+                ) {
+                  return value;
+                }
+
+                if (
+                  typeof value ===
+                  "string"
+                ) {
+                  const parsed =
+                    Number(
+                      value.replace(
+                        ",",
+                        "."
+                      )
+                    );
+
+                  return Number.isFinite(
+                    parsed
+                  )
+                    ? parsed
+                    : null;
+                }
+
+                return null;
+              };
+
+              const cleanTags = (
+                value: unknown
+              ): string[] => {
+                if (
+                  !Array.isArray(value)
+                ) {
+                  return [];
+                }
+
+                return value
+                  .filter(
+                    (
+                      item
+                    ): item is string =>
+                      typeof item ===
+                      "string"
+                  )
+                  .map((item) =>
+                    item
+                      .replace(
+                        /^[a-z]{2}:/i,
+                        ""
+                      )
+                      .replace(
+                        /-/g,
+                        " "
+                      )
+                      .trim()
+                  )
+                  .filter(Boolean);
+              };
+
+              const ingredients =
+                asString(
+                  product
+                    .ingredients_text_de
+                ) ||
+                asString(
+                  product
+                    .ingredients_text
+                );
+
+              const allergens =
+                cleanTags(
+                  product.allergens_tags
+                );
+
+              const traces =
+                cleanTags(
+                  product.traces_tags
+                );
+
+              const energyKcal =
+                asNumber(
+                  nutriments[
+                    "energy-kcal_100g"
+                  ]
+                );
+
+              const energyKj =
+                asNumber(
+                  nutriments[
+                    "energy-kj_100g"
+                  ]
+                );
+
+              const fat =
+                asNumber(
+                  nutriments[
+                    "fat_100g"
+                  ]
+                );
+
+              const saturatedFat =
+                asNumber(
+                  nutriments[
+                    "saturated-fat_100g"
+                  ]
+                );
+
+              const carbohydrates =
+                asNumber(
+                  nutriments[
+                    "carbohydrates_100g"
+                  ]
+                );
+
+              const sugars =
+                asNumber(
+                  nutriments[
+                    "sugars_100g"
+                  ]
+                );
+
+              const protein =
+                asNumber(
+                  nutriments[
+                    "proteins_100g"
+                  ]
+                );
+
+              const fiber =
+                asNumber(
+                  nutriments[
+                    "fiber_100g"
+                  ]
+                );
+
+              const salt =
+                asNumber(
+                  nutriments[
+                    "salt_100g"
+                  ]
+                );
+
+              const nutritionValues =
+                [
+                  energyKcal,
+                  energyKj,
+                  fat,
+                  saturatedFat,
+                  carbohydrates,
+                  sugars,
+                  protein,
+                  fiber,
+                  salt,
+                ];
+
+              const nutritionFound =
+                nutritionValues.filter(
+                  (value) =>
+                    value !== null
+                ).length;
+
+              const usefulFoodFields =
+                [
+                  Boolean(
+                    ingredients
+                  ),
+                  allergens.length > 0,
+                  traces.length > 0,
+                  nutritionFound >= 4,
+                ].filter(
+                  Boolean
+                ).length;
+
+              console.log(
+                "[ALO VERIFY OFF RESULT]",
+                {
+                  barcode,
+                  productName:
+                    product
+                      .product_name_de ||
+                    product
+                      .product_name ||
+                    null,
+                  hasIngredients:
+                    Boolean(
+                      ingredients
+                    ),
+                  allergenCount:
+                    allergens.length,
+                  traceCount:
+                    traces.length,
+                  nutritionFound,
+                }
+              );
+
+              /*
+               * Nur direkt übernehmen, wenn
+               * tatsächlich brauchbare Food Data
+               * gefunden wurde.
+               *
+               * Exakter Barcode-Endpunkt = starke
+               * Produktidentität.
+               */
+              if (
+                usefulFoodFields > 0
+              ) {
+                const currentNutrition =
+                  currentDraft
+                    ?.nutritionPer100 &&
+                  typeof currentDraft
+                    .nutritionPer100 ===
+                    "object"
+                    ? currentDraft
+                        .nutritionPer100
+                    : {};
+
+                const verifiedDraft = {
+                  ...currentDraft,
+
+                  barcode:
+                    barcode ||
+                    currentDraft
+                      ?.barcode ||
+                    null,
+
+                  title:
+                    asString(
+                      product
+                        .product_name_de
+                    ) ||
+                    asString(
+                      product
+                        .product_name
+                    ) ||
+                    currentDraft
+                      ?.title ||
+                    "",
+
+                  brand:
+                    asString(
+                      product.brands
+                    ) ||
+                    currentDraft
+                      ?.brand ||
+                    null,
+
+                  unitSize:
+                    asString(
+                      product.quantity
+                    ) ||
+                    currentDraft
+                      ?.unitSize ||
+                    null,
+
+                  country:
+                    asString(
+                      product.countries
+                    ) ||
+                    currentDraft
+                      ?.country ||
+                    null,
+
+                  ingredients:
+                    ingredients ||
+                    currentDraft
+                      ?.ingredients ||
+                    null,
+
+                  allergens:
+                    allergens.length
+                      ? allergens
+                      : Array.isArray(
+                            currentDraft
+                              ?.allergens
+                          )
+                        ? currentDraft
+                            .allergens
+                        : [],
+
+                  traces:
+                    traces.length
+                      ? traces
+                      : Array.isArray(
+                            currentDraft
+                              ?.traces
+                          )
+                        ? currentDraft
+                            .traces
+                        : [],
+
+                  nutritionPer100: {
+                    ...currentNutrition,
+
+                    basis:
+                      currentNutrition
+                        ?.basis ||
+                      product
+                        .nutrition_data_per ||
+                      "100g",
+
+                    energyKj:
+                      energyKj ??
+                      currentNutrition
+                        ?.energyKj ??
+                      null,
+
+                    energyKcal:
+                      energyKcal ??
+                      currentNutrition
+                        ?.energyKcal ??
+                      null,
+
+                    fat:
+                      fat ??
+                      currentNutrition
+                        ?.fat ??
+                      null,
+
+                    saturatedFat:
+                      saturatedFat ??
+                      currentNutrition
+                        ?.saturatedFat ??
+                      null,
+
+                    carbohydrates:
+                      carbohydrates ??
+                      currentNutrition
+                        ?.carbohydrates ??
+                      null,
+
+                    sugars:
+                      sugars ??
+                      currentNutrition
+                        ?.sugars ??
+                      null,
+
+                    protein:
+                      protein ??
+                      currentNutrition
+                        ?.protein ??
+                      null,
+
+                    fiber:
+                      fiber ??
+                      currentNutrition
+                        ?.fiber ??
+                      null,
+
+                    salt:
+                      salt ??
+                      currentNutrition
+                        ?.salt ??
+                      null,
+                  },
+                };
+
+                const foundFields =
+                  [
+                    ingredients,
+                    allergens.length
+                      ? allergens
+                      : null,
+                    traces.length
+                      ? traces
+                      : null,
+                    ...nutritionValues,
+                  ].filter(
+                    (value) =>
+                      value !== null &&
+                      value !== ""
+                  ).length;
+
+                console.log(
+                  "[ALO VERIFY OFF SUCCESS]",
+                  {
+                    barcode,
+                    foundFields,
+                  }
+                );
+
+                /*
+                 * WICHTIG:
+                 * Open Food Facts beendet ALO VERIFY hier
+                 * NICHT mehr.
+                 *
+                 * Die Daten werden jetzt in den vollständigen
+                 * Web-Abgleich mitgenommen. Dadurch können
+                 * sweets.ch, Herstellerseiten, Schweizer
+                 * Quellen sowie SEO weiterhin geprüft werden.
+                 */
+                fastBarcodeDraft =
+                  verifiedDraft;
+
+                fastBarcodeFoundFields =
+                  foundFields;
+
+                fastBarcodeSource = {
+                  title:
+                    "Open Food Facts",
+                  url:
+                    `https://world.openfoodfacts.org/product/${encodeURIComponent(
+                      barcode
+                    )}`,
+                  sourceType:
+                    "database",
+                };
+
+                console.log(
+                  "[ALO VERIFY OFF CARRY FORWARD]",
+                  {
+                    barcode,
+                    foundFields,
+                  }
+                );
+              }
+            }
+          }
+        } catch (error) {
+          console.warn(
+            "[ALO VERIFY OFF FALLBACK]",
+            error instanceof Error
+              ? error.message
+              : error
+          );
+        } finally {
+          clearTimeout(
+            offTimeout
+          );
+        }
+      }
+
+      const onlineVerificationSchema = {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "identityStatus",
+          "verifiedDraft",
+          "sources",
+          "conflicts",
+          "summary",
+        ],
+        properties: {
+          identityStatus: {
+            type: "string",
+            enum: [
+              "confirmed",
+              "probable",
+              "not_confirmed",
+            ],
+          },
+
+          verifiedDraft: productSchema,
+
+          sources: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "title",
+                "url",
+                "sourceType",
+              ],
+              properties: {
+                title: {
+                  type: "string",
+                },
+                url: {
+                  type: "string",
+                },
+                sourceType: {
+                  type: "string",
+                  enum: [
+                    "manufacturer",
+                    "official",
+                    "retailer",
+                    "database",
+                    "other",
+                  ],
+                },
+              },
+            },
+          },
+
+          conflicts: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: [
+                "field",
+                "currentValue",
+                "onlineValue",
+                "reason",
+              ],
+              properties: {
+                field: {
+                  type: "string",
+                },
+                currentValue: {
+                  type: ["string", "null"],
+                },
+                onlineValue: {
+                  type: ["string", "null"],
+                },
+                reason: {
+                  type: "string",
+                },
+              },
+            },
+          },
+
+          summary: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "checkedFields",
+              "foundFields",
+              "conflictCount",
+            ],
+            properties: {
+              checkedFields: {
+                type: "number",
+              },
+              foundFields: {
+                type: "number",
+              },
+              conflictCount: {
+                type: "number",
+              },
+            },
+          },
+        },
+      } as const;
+
+      const verifyStartedAt =
+        Date.now();
+
+      console.log(
+        "[ALO VERIFY OPENAI START]",
+        {
+          barcode: barcode || null,
+          title: title || null,
+        }
+      );
+
+      const response: any =
+        await verifyGate.run(
+          () =>
+            Promise.race([
+          openai.responses.create({
+          model: "gpt-5.6-terra",
+          store: false,
+
+          reasoning: {
+            effort: "low",
+          },
+
+          tools: [
+            {
+              type: "web_search",
+              search_context_size:
+                "medium",
+            },
+          ],
+
+          input: [
+            {
+              role: "developer",
+              content: [
+                {
+                  type: "input_text",
+                  text: `
+Du bist ALO VERIFY, das Online-Verifikationssystem
+für einen Schweizer Snack-, Getränke- und
+Süsswarenhandel.
+
+Du erhältst einen bereits per Verpackungsfoto
+erzeugten Product Draft.
+
+DEINE AUFGABE:
+
+1. Identifiziere zuerst exakt das Produkt.
+2. Recherchiere aktuelle und belastbare
+   Produktinformationen im Web.
+3. Recherchiere systematisch in dieser Reihenfolge:
+
+   A) SWEETS.CH
+   - Suche zuerst gezielt nach dem exakten Produkt
+     auf sweets.ch.
+   - Suche nach Barcode/EAN sowie nach
+     Marke + Produkt + Geschmack + Packungsgrösse.
+   - Wenn dort die exakte Variante gefunden wird,
+     nutze die Seite als wichtige Schweizer
+     Handelsquelle.
+
+   B) HERSTELLER / MARKE
+   - Suche danach auf offiziellen Herstellerseiten,
+     offiziellen Markenwebseiten und offiziellen
+     Produktdatenquellen.
+   - Diese Quellen haben für Rezeptur und
+     Produktidentität hohe Priorität.
+
+   C) SCHWEIZER QUELLEN
+   - Seriöse Schweizer Händler und
+     Produktdatenbanken ergänzend prüfen.
+   - Bevorzuge Seiten, welche exakt dieselbe
+     EAN, Variante und Packungsgrösse führen.
+
+   D) INTERNATIONALE QUELLEN
+   - Nur verwenden, wenn es nachweislich dieselbe
+     Produkt- und Marktvariante ist.
+   - US-, EU-, UK-, Japan- oder andere Varianten
+     dürfen NICHT miteinander vermischt werden.
+
+4. Verwende mehrere Quellen, wenn verfügbar.
+   Übernimm Food Data nicht allein deshalb,
+   weil irgendeine Seite einen passenden Namen hat.
+
+5. Barcode/EAN ist das stärkste Identitätsmerkmal.
+
+6. Zusätzlich müssen soweit verfügbar abgeglichen
+   werden:
+   - Marke
+   - Produktname
+   - Geschmack / Variante
+   - Packungsgrösse
+   - Verpackungsart
+   - Markt-/Ländervariante
+
+7. Eine Quelle darf für Food Data nur verwendet
+   werden, wenn sie mit der identifizierten
+   Produktvariante kompatibel ist.
+
+8. Wenn Packungsgrösse, Variante, Marktversion
+   oder Barcode widersprechen, darf die Quelle
+   NICHT zur automatischen Befüllung verwendet
+   werden.
+
+9. Wenn mehrere belastbare Quellen vorhanden sind,
+   vergleiche sie aktiv miteinander.
+
+10. Bei Widersprüchen gilt:
+    - sichtbare Originalverpackung ist die stärkste
+      Quelle für genau das physisch gescannte Produkt
+    - exakte EAN + exakte Variante + exakte Grösse
+      haben Vorrang vor bloßer Namensähnlichkeit
+    - offizielle Herstellerdaten haben Vorrang vor
+      allgemeinen Händlertexten, sofern dieselbe
+      Marktvariante gemeint ist
+    - Konflikte müssen in conflicts gemeldet werden
+    - widersprüchliche Food Data niemals raten oder
+      zu einem Mischdatensatz kombinieren
+
+WICHTIGE REGELN:
+
+- Keine erfundenen Fakten.
+- Zutaten nicht schätzen.
+- Allergene nicht schätzen.
+- Nährwerte nicht schätzen.
+- Gewicht nicht aus Volumen berechnen.
+- 355 ml darf niemals zu 355 g werden.
+- netWeight nur bei echtem Gewicht in g/kg.
+- unitSize darf Volumen oder Gewicht enthalten.
+- HALAL/KOSHER niemals allein anhand Zutaten
+  bestätigen.
+- Wenn eine Information nicht sicher gefunden
+  wird: null / unknown / leeres Array.
+- Widersprüche zwischen aktuellem Draft und
+  Onlinequelle in conflicts melden.
+- Konflikte NICHT eigenmächtig auflösen.
+- Bestehende Produktidentität nicht durch ein
+  ähnlich klingendes Produkt ersetzen.
+
+IDENTITY STATUS:
+
+confirmed:
+Barcode oder mehrere starke Merkmale stimmen
+eindeutig überein.
+
+probable:
+Produkt scheint korrekt, aber eindeutige
+Bestätigung fehlt.
+
+not_confirmed:
+Recherche deutet auf ein anderes Produkt,
+andere Grösse oder andere Variante.
+
+VERIFIED DRAFT:
+
+Gib einen vollständigen Draft exakt nach dem
+ALO Product Schema zurück.
+
+Bereits vorhandene sichere Werte dürfen im
+verifiedDraft wiederholt werden.
+
+Neue Food-Daten nur eintragen, wenn sie durch
+die gefundenen Quellen belastbar sind.
+
+Versuche für das exakt identifizierte Produkt
+insbesondere vollständig zu ermitteln:
+
+- ingredients
+- allergens
+- traces
+- nutritionPer100.basis
+- nutritionPer100.energyKj
+- nutritionPer100.energyKcal
+- nutritionPer100.fat
+- nutritionPer100.saturatedFat
+- nutritionPer100.carbohydrates
+- nutritionPer100.sugars
+- nutritionPer100.protein
+- nutritionPer100.fiber
+- nutritionPer100.salt
+- servingSize
+- country
+- manufacturer
+- unitSize
+- netWeight
+- flavor
+- category
+- subcategory
+
+Prüfe jedes dieser Felder einzeln.
+
+Fehlt ein einzelner Nährwert online, lasse genau
+dieses Feld null, statt andere Nährwerte zu
+verwerfen oder einen Wert zu schätzen.
+
+Allergene nur übernehmen, wenn sie explizit aus
+Verpackung oder belastbarer Quelle hervorgehen.
+
+traces ausschließlich bei expliziten
+May-contain-/Kann-Spuren-enthalten-Angaben.
+
+Zutatenlisten unterschiedlicher Länder- oder
+Packungsvarianten niemals miteinander mischen.
+
+QUELLEN:
+
+Gib die wichtigsten tatsächlich verwendeten
+Webquellen zurück.
+
+CONFLICTS:
+
+Melde insbesondere Konflikte bei:
+- Barcode
+- Produktvariante
+- Geschmack
+- unitSize
+- netWeight
+- Zutaten
+- Allergenen
+- Nährwerten
+- Herkunft
+
+SEO und Beschreibung dürfen nur auf der
+verifizierten Produktidentität beruhen.
+
+ALO KIOSK SCHWEIZ – SHOP COPY UND SEO:
+
+Wenn identityStatus "confirmed" ist, bearbeite zusätzlich
+ALLE im Product Schema vorhandenen Shop-/SEO-Felder
+vollständig und hochwertig.
+
+Insbesondere:
+- shortDescription
+- descriptionHtml
+- seoTitle
+- seoDescription
+- searchKeywords
+- tags
+
+REGELN FÜR ALO KIOSK:
+
+1. ALO Kiosk ist der Shop und niemals die Produktmarke.
+   "ALO Kiosk", "ALO Kiosk Schweiz" oder ähnliche Begriffe
+   dürfen NIEMALS als brand oder manufacturer eingetragen
+   werden.
+
+2. brand muss die tatsächliche Produktmarke sein.
+   Beispiel:
+   ULTRAPOP Produkt -> brand "Ultrapop",
+   nicht "Alo Kiosk".
+
+3. Alle Kundentexte auf natürlichem, gut lesbarem Deutsch.
+
+4. shortDescription:
+   - kompakt
+   - appetitlich / kaufstark
+   - echte Produktmerkmale nennen
+   - nichts erfinden
+
+5. descriptionHtml:
+   - eigenständige hochwertige Shopbeschreibung
+   - für einen Schweizer Online-Shop
+   - Produkt, Geschmack, Besonderheiten und Inhalt
+     natürlich erklären
+   - keine erfundenen Herkunfts-/Health-Claims
+   - nicht einfach fremde Händlertexte kopieren
+
+6. seoTitle:
+   - stärkste reale Suchbegriffe verwenden
+   - Marke + Produkt/Variante + relevante Grösse
+   - Schweizer Kaufintention berücksichtigen
+   - wenn sinnvoll mit
+     "| ALO Kiosk Schweiz"
+     abschliessen
+   - kein Keyword-Spam
+   - möglichst kompakt und suchmaschinenfreundlich
+
+7. seoDescription:
+   - natürliches Deutsch
+   - Produkt und Geschmack konkret nennen
+   - Kauf-/Bestellintention für die Schweiz
+   - "ALO Kiosk Schweiz" sinnvoll integrieren
+   - ungefähr 140 bis 160 Zeichen anstreben
+   - keine erfundenen Eigenschaften
+
+8. searchKeywords:
+   - echte Produktbezeichnung
+   - Marke
+   - Variante / Geschmack
+   - Inhalt / Packungsgrösse
+   - passende Kategorie
+   - sinnvolle Schweizer Suchvarianten
+   - Kombinationen mit "Schweiz", "kaufen",
+     "bestellen" wenn natürlich
+   - ALO Kiosk / ALO Kiosk Schweiz ergänzend
+   - keine irrelevanten Keywords
+
+9. tags:
+   - Marke
+   - Kategorie
+   - Produkttyp
+   - Geschmack / Variante
+   - Herkunft nur falls verifiziert
+   - besondere Ernährungsmerkmale nur falls
+     wirklich bestätigt
+
+10. SEO und Shoptexte dürfen kreativ formuliert werden,
+    aber die darin enthaltenen Produktfakten müssen immer
+    auf der verifizierten Produktidentität und den
+    recherchierten Fakten beruhen.
+
+11. Bei confirmed soll der verifiedDraft möglichst
+    vollständig sein. Prüfe NICHT nur fehlende Werte,
+    sondern jeden verfügbaren Produkt-, Food-, Shop- und
+    SEO-Wert auf Aktualität und Korrektheit.
+
+12. Gehe die vollständige Feldliste des Product Schemas
+    systematisch durch. Lass ein Feld nur leer/null, wenn
+    dafür tatsächlich keine belastbare Information
+    ermittelt werden kann.
+`,
+                },
+              ],
+            },
+
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: `
+ALO CURRENT PRODUCT DRAFT:
+
+${JSON.stringify(
+  currentDraft,
+  null,
+  2
+)}
+
+FAST BARCODE DATABASE DATA:
+${fastBarcodeDraft
+  ? JSON.stringify(
+      fastBarcodeDraft,
+      null,
+      2
+    )
+  : "Keine zusätzlichen Barcode-Daten gefunden."}
+
+FAST BARCODE SOURCE:
+${fastBarcodeSource
+  ? JSON.stringify(
+      fastBarcodeSource,
+      null,
+      2
+    )
+  : "Keine."}
+
+WICHTIG ZU DIESEN FAST-DATEN:
+- Sie sind zusätzliche Recherchehinweise.
+- Sie ersetzen NICHT deine Web-Recherche.
+- Prüfe sie gegen sweets.ch, Hersteller/Marke und
+  weitere passende Quellen.
+- Übernimm sie nur, wenn sie zur exakt identifizierten
+  Produktvariante passen.
+- Bei Konflikten melde diese in conflicts.
+
+IDENTITY HINTS:
+Barcode: ${barcode || "unbekannt"}
+Marke: ${brand || "unbekannt"}
+Titel: ${title || "unbekannt"}
+Inhalt: ${unitSize || "unbekannt"}
+
+Führe jetzt den Online-Abgleich durch.
+`,
+                },
+              ],
+            },
+          ],
+
+          text: {
+            format: {
+              type: "json_schema",
+              name:
+                "alo_product_online_verification",
+              strict: true,
+              schema:
+                onlineVerificationSchema,
+            },
+          },
+        }),
+          new Promise(
+            (
+              _resolve,
+              reject
+            ) => {
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      "ALO Verify Websuche dauerte länger als 85 Sekunden."
+                    )
+                  ),
+                85000
+              );
+            }
+          ),
+            ])
+        );
+
+
+      console.log(
+        "[ALO VERIFY OPENAI RETURNED]",
+        {
+          ms:
+            Date.now() -
+            verifyStartedAt,
+          responseId:
+            response.id || null,
+          hasOutputText:
+            Boolean(
+              response.output_text
+            ),
+        }
+      );
+
+      const raw =
+        response.output_text;
+
+      if (!raw) {
+        throw new Error(
+          "ALO Verify hat kein Ergebnis geliefert."
+        );
+      }
+
+      let result: any;
+
+      try {
+        result =
+          JSON.parse(raw);
+      } catch {
+        throw new Error(
+          "ALO Verify Ergebnis konnte nicht gelesen werden."
+        );
+      }
+
+      console.log(
+        "[ALO VERIFY SUCCESS]",
+        {
+          totalMs:
+            Date.now() -
+            verifyStartedAt,
+          identityStatus:
+            result?.identityStatus ??
+            null,
+          sourceCount:
+            Array.isArray(
+              result?.sources
+            )
+              ? result.sources.length
+              : 0,
+          checkedFields:
+            result?.summary
+              ?.checkedFields ??
+            null,
+          foundFields:
+            result?.summary
+              ?.foundFields ??
+            null,
+          conflictCount:
+            result?.summary
+              ?.conflictCount ??
+            null,
+        }
+      );
 
       res.json({
         ok: true,
@@ -781,7 +2154,7 @@ router.post(
 
 
 router.post(
-  "/api/ai/product-image-studio",
+  "/product-image/studio",
   upload.single("image"),
   async (req, res) => {
     try {
@@ -870,12 +2243,12 @@ COMPOSITION:
 - centered precisely
 - generous but efficient margin around the product
 - square 1:1 composition
-- clean pure white or extremely light neutral studio background
+- transparent background with clean professional product edges
 - professional softbox lighting
 - balanced exposure
 - crisp product edges
 - realistic material texture
-- subtle natural contact shadow beneath the product
+- no artificial floor, backdrop or opaque studio surface
 - no dramatic reflections hiding label information
 - no perspective distortion
 - no cropping of the product
@@ -893,7 +2266,9 @@ to the supplied reference.
 `;
 
       const result =
-        await openai.images.edit({
+        await studioGate.run(
+          () =>
+            openai.images.edit({
           model:
             "gpt-image-2",
           image:
@@ -904,8 +2279,10 @@ to the supplied reference.
           quality:
             "medium",
           background:
-            "opaque",
-        });
+            "transparent",
+            })
+        );
+
 
       const base64 =
         result.data?.[0]

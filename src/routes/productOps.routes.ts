@@ -130,6 +130,24 @@ async function ensureSchema() {
     await db.query(`
       ALTER TABLE products
       ADD COLUMN IF NOT EXISTS
+        archived_at TIMESTAMPTZ
+    `);
+
+    await db.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
+        archived_reason TEXT
+    `);
+
+    await db.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
+        archived_barcode TEXT
+    `);
+
+    await db.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
         shopify_status TEXT
         NOT NULL
         DEFAULT 'NOT_SYNCED'
@@ -939,22 +957,25 @@ router.post(
               NOW()
             )
 
+            /*
+             * EAN ist die primäre Produkt-Identität.
+             *
+             * Bei zwei oder mehreren gleichzeitigen Staff-Requests
+             * gewinnt der erste INSERT.
+             *
+             * Weitere Requests mit derselben EAN bekommen durch
+             * RETURNING dieselbe bestehende Product-Master-ID zurück,
+             * dürfen dessen bereits gespeicherte Produktdaten aber
+             * NICHT mit einem zweiten AI-Draft überschreiben.
+             *
+             * Die self-assignment UPDATE-Operation ist absichtlich
+             * minimal. Sie erlaubt ein atomisches RETURNING des
+             * bereits vorhandenen Datensatzes.
+             */
             ON CONFLICT (barcode)
             DO UPDATE SET
-              title =
-                EXCLUDED.title,
-              product_data =
-                EXCLUDED.product_data,
-              source_type =
-                EXCLUDED.source_type,
-              review_status =
-                'REVIEWED',
-              reviewed_by =
-                EXCLUDED.reviewed_by,
-              reviewed_at =
-                NOW(),
-              updated_at =
-                NOW()
+              barcode =
+                products.barcode
 
             RETURNING
               id,
@@ -1040,6 +1061,7 @@ router.put(
               product_data,
               source_type,
               review_status,
+              archived_at,
               shopify_status,
               shopify_product_id,
               shopify_variant_id,
@@ -1059,6 +1081,21 @@ router.put(
         res.status(404).json({
           ok: false,
           error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      /*
+       * Schutz vor veralteten Staff-Screens:
+       * Ein bereits archiviertes Produkt darf nicht
+       * über einen noch offenen Editor verändert werden.
+       */
+      if (existing.archived_at) {
+        res.status(409).json({
+          ok: false,
+          code: "PRODUCT_ARCHIVED",
+          error:
+            "Dieses Produkt wurde bereits archiviert. Bitte die Produktliste neu laden.",
         });
         return;
       }
@@ -1085,11 +1122,32 @@ router.put(
         return;
       }
 
+      /*
+       * EAN-Semantik:
+       *
+       * - barcode fehlt im Draft:
+       *   bestehenden Barcode behalten
+       *
+       * - barcode ist null / leer:
+       *   Barcode bewusst entfernen
+       *
+       * - barcode enthält einen Wert:
+       *   normalisieren und übernehmen
+       */
+      const hasBarcodeField =
+        Object.prototype.hasOwnProperty.call(
+          draft,
+          "barcode"
+        );
+
       const barcode =
-        normalizeBarcode(
-          draft.barcode ??
-          existing.barcode
-        ) || null;
+        hasBarcodeField
+          ? normalizeBarcode(
+              draft.barcode
+            ) || null
+          : normalizeBarcode(
+              existing.barcode
+            ) || null;
 
       if (barcode) {
         const duplicate =
@@ -1173,12 +1231,16 @@ router.put(
         return incoming;
       }
 
+      /*
+       * barcode ist hier bereits der endgültige gewünschte
+       * Product-Master-Wert.
+       *
+       * Wichtig: NULL darf NICHT wieder auf existing.barcode
+       * zurückfallen, da NULL ein bewusstes Entfernen der EAN
+       * darstellen kann.
+       */
       const safeBarcode =
-        barcode ||
-        normalizeBarcode(
-          existing.barcode
-        ) ||
-        null;
+        barcode;
 
       const mergedData =
         mergeProductDataSafely(
@@ -1255,6 +1317,31 @@ router.put(
           ),
       });
     } catch (error) {
+      /*
+       * Race-Schutz für parallele Staff-Geräte:
+       *
+       * Zwei Requests können theoretisch gleichzeitig dieselbe
+       * neue EAN prüfen und beide die SELECT-Vorprüfung bestehen.
+       *
+       * Die DB-Unique-Constraint ist deshalb die letzte
+       * verbindliche Instanz. PostgreSQL 23505 wird sauber als
+       * fachlicher 409-Konflikt an die App zurückgegeben.
+       */
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as any).code === "23505"
+      ) {
+        res.status(409).json({
+          ok: false,
+          code: "BARCODE_ALREADY_ASSIGNED",
+          error:
+            "Diese EAN ist bereits einem anderen Produkt zugeordnet.",
+        });
+        return;
+      }
+
       console.error(
         "Product Master update error:",
         error
@@ -1425,6 +1512,7 @@ router.get(
             shopify_inventory_item_id,
             updated_at
           FROM products
+          WHERE archived_at IS NULL
           ORDER BY updated_at DESC
           LIMIT 500
         `);
@@ -1716,120 +1804,127 @@ im Studio fotografiert worden.
   }
 );
 
+/*
+ * ALO PRODUCT IMAGE -> SHOPIFY
+ * ============================================================
+ *
+ * Das Bild liegt zuerst dauerhaft in product_images.
+ *
+ * Wenn das ALO Produkt bereits mit Shopify verbunden ist,
+ * wird genau dieses gespeicherte Bild anschließend über den
+ * vorhandenen stageProductImage()-Workflow zu Shopify
+ * übertragen.
+ *
+ * Neue Produkte:
+ * - haben beim ersten Bild-Upload noch keine Shopify-ID
+ * - shopify-draft übernimmt das gespeicherte Bild später
+ *
+ * Bestehende Produkte:
+ * - bekommen das neue Staff/AI-Produktbild automatisch
+ *   auch in Shopify
+ */
+async function syncStoredProductImageToShopify(
+  productId: string,
+  shopifyProductId: string,
+  alt: string
+): Promise<boolean> {
+  const stagedImage =
+    await stageProductImage(productId);
+
+  if (!stagedImage) {
+    return false;
+  }
+
+  const response =
+    await shopifyGraphql(
+      `
+        mutation AloSyncStoredProductImage(
+          $product: ProductUpdateInput!,
+          $media: [CreateMediaInput!]
+        ) {
+          productUpdate(
+            product: $product,
+            media: $media
+          ) {
+            product {
+              id
+            }
+
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        product: {
+          id: shopifyProductId,
+        },
+        media: [
+          {
+            originalSource:
+              stagedImage.source,
+            alt:
+              alt ||
+              "ALO Produkt",
+            mediaContentType:
+              "IMAGE",
+          },
+        ],
+      }
+    );
+
+  const payload =
+    response?.productUpdate;
+
+  if (
+    payload?.userErrors?.length
+  ) {
+    throw new Error(
+      payload.userErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  if (!payload?.product?.id) {
+    throw new Error(
+      "Shopify hat nach dem Bild-Upload kein Produkt zurückgegeben."
+    );
+  }
+
+  return true;
+}
+
 
 router.post(
   "/api/product-image/remove-background",
   imageUpload.single("image"),
-  async (req, res) => {
-    try {
-      const file = req.file;
-
-      if (!file) {
-        res.status(400).json({
-          ok: false,
-          error: "Bild fehlt.",
-        });
-        return;
-      }
-
-      /*
-       * IMG.LY läuft absichtlich in einem separaten
-       * Node-Prozess.
-       *
-       * Grund:
-       * @imgly/background-removal-node verwendet
-       * sharp 0.32.x / eine eigene libvips-Version,
-       * während ALO Platform sharp 0.35.x verwendet.
-       *
-       * Beide nativen libvips-Versionen dürfen auf
-       * macOS nicht im selben Prozess geladen werden.
-       */
-      const cutout =
-        await removeBackgroundIsolated(
-          file.buffer
-        );
-
-      /*
-       * ALO SHOP IMAGE STANDARD
-       *
-       * 1. Transparente Leerfläche um das Produkt entfernen.
-       * 2. Produkt proportional skalieren.
-       * 3. Auf transparente 1200 x 1200 Canvas setzen.
-       * 4. Verpackung selbst niemals verzerren.
-       *
-       * Maximale Produktfläche:
-       * 1040 x 1040 px = ca. 86,7 % der Canvas.
-       */
-      const trimmed =
-        await sharp(cutout)
-          .trim({
-            background: {
-              r: 0,
-              g: 0,
-              b: 0,
-              alpha: 0,
-            },
-          })
-          .png()
-          .toBuffer();
-
-      const output =
-        await sharp(trimmed)
-          .resize({
-            width: 1040,
-            height: 1040,
-            fit: "contain",
-            position: "centre",
-            background: {
-              r: 0,
-              g: 0,
-              b: 0,
-              alpha: 0,
-            },
-            withoutEnlargement: false,
-          })
-          .extend({
-            top: 80,
-            bottom: 80,
-            left: 80,
-            right: 80,
-            background: {
-              r: 0,
-              g: 0,
-              b: 0,
-              alpha: 0,
-            },
-          })
-          .png({
-            compressionLevel: 9,
-          })
-          .toBuffer();
-
-      res.setHeader(
-        "Content-Type",
-        "image/png"
-      );
-
-      res.setHeader(
-        "Cache-Control",
-        "no-store"
-      );
-
-      res.send(output);
-    } catch (error) {
-      console.error(
-        "Background removal error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Hintergrund konnte nicht entfernt werden.",
-      });
-    }
+  async (_req, res) => {
+    /*
+     * IMPORTANT:
+     * Background removal is intentionally disabled inside the
+     * main ALO API process.
+     *
+     * The ML model previously caused the Railway container to
+     * exceed its memory limit and kill the complete API.
+     *
+     * The Staff App already falls back to the original image,
+     * so product creation/editing remains fully usable.
+     *
+     * Background removal can later be moved into its own worker
+     * or dedicated service without risking the main platform.
+     */
+    res.status(503).json({
+      ok: false,
+      error: "BACKGROUND_REMOVAL_TEMPORARILY_DISABLED",
+      message:
+        "Automatische Bildfreistellung ist momentan deaktiviert. Das Originalbild wird verwendet.",
+    });
   }
 );
 
@@ -1926,50 +2021,63 @@ router.post(
       }
 
       /*
-       * Das Product-Master-Bild ist jetzt sicher gespeichert.
+       * Bild ist jetzt garantiert in ALO CORE gespeichert.
        *
-       * Falls dieses Produkt bereits mit Shopify verbunden ist,
-       * synchronisieren wir das neue Hauptbild zusätzlich.
+       * Falls dieses Produkt bereits eine Shopify-ID besitzt,
+       * übertragen wir das neue Bild ebenfalls automatisch.
        *
-       * Ein Shopify-Fehler darf den erfolgreichen lokalen
-       * Bild-Upload NICHT rückgängig machen.
+       * Ein Shopify-Fehler löscht NIEMALS das zuvor erfolgreich
+       * gespeicherte ALO-Bild.
        */
-      let shopifyImageSynced = false;
-      let shopifyImageError: string | null = null;
+      let shopifyImageSynced =
+        false;
 
-      const shopifyProductId =
+      let shopifyImageError:
+        string | null =
+          null;
+
+      if (
         product.shopify_product_id
-          ? String(product.shopify_product_id)
-          : null;
-
-      if (shopifyProductId) {
+      ) {
         try {
-          const shopifyImage =
-            await syncPrimaryProductImageToShopify(
-              productId,
-              shopifyProductId
-            );
-
           shopifyImageSynced =
-            shopifyImage.synced;
+            await syncStoredProductImageToShopify(
+              productId,
+              String(
+                product.shopify_product_id
+              ),
+              String(
+                product.title ||
+                "ALO Produkt"
+              )
+            );
         } catch (error) {
           shopifyImageError =
             error instanceof Error
               ? error.message
-              : "Shopify-Bild konnte nicht synchronisiert werden.";
+              : "Shopify Bild-Sync fehlgeschlagen.";
 
           console.error(
-            `Shopify image sync failed for Product Master ${productId}:`,
-            error
+            "[ALO PRODUCT IMAGE SHOPIFY SYNC]",
+            {
+              productId,
+              shopifyProductId:
+                product.shopify_product_id,
+              error:
+                shopifyImageError,
+            }
           );
         }
       }
 
       res.json({
         ok: true,
+        storedInAlo: true,
         imageSaved: true,
-        shopifyLinked:
-          Boolean(shopifyProductId),
+        shopifyConnected:
+          Boolean(
+            product.shopify_product_id
+          ),
         shopifyImageSynced,
         shopifyImageError,
       });
@@ -2297,6 +2405,162 @@ router.put(
     }
   }
 );
+
+router.post(
+  "/api/product-master/:id/archive",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(
+          req.params.id ?? ""
+        ).trim();
+
+      const reason =
+        String(
+          req.body?.reason ??
+            "FALSCHES_PRODUKT"
+        )
+          .trim()
+          .slice(0, 120);
+
+      if (!productId) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Product ID fehlt.",
+        });
+        return;
+      }
+
+      const existing =
+        await db.query(
+          `
+            SELECT
+              id,
+              barcode,
+              archived_barcode,
+              archived_at,
+              shopify_product_id
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [
+            productId,
+          ]
+        );
+
+      const row =
+        existing.rows[0];
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      /*
+       * Idempotent:
+       * Ein bereits archiviertes Produkt kann gefahrlos
+       * noch einmal archiviert werden.
+       */
+      if (row.archived_at) {
+        res.json({
+          ok: true,
+          alreadyArchived: true,
+          productId:
+            String(row.id),
+          archivedBarcode:
+            row.archived_barcode ??
+            null,
+          shopifyProductId:
+            row.shopify_product_id ??
+            null,
+          shopifyUntouched: true,
+        });
+        return;
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE products
+            SET
+              archived_barcode =
+                COALESCE(
+                  archived_barcode,
+                  barcode
+                ),
+              barcode = NULL,
+              archived_at = NOW(),
+              archived_reason = $2,
+              review_status = 'ARCHIVED',
+              updated_at = NOW()
+            WHERE id = $1
+            RETURNING
+              id,
+              archived_barcode,
+              archived_at,
+              archived_reason,
+              shopify_product_id
+          `,
+          [
+            productId,
+            reason ||
+              "FALSCHES_PRODUKT",
+          ]
+        );
+
+      const archived =
+        result.rows[0];
+
+      res.json({
+        ok: true,
+        archived: true,
+        productId:
+          String(archived.id),
+        archivedBarcode:
+          archived.archived_barcode ??
+          null,
+        archivedAt:
+          archived.archived_at ??
+          null,
+        reason:
+          archived.archived_reason ??
+          null,
+        shopifyProductId:
+          archived.shopify_product_id ??
+          null,
+
+        /*
+         * Absichtlich:
+         * Archivieren in ALO darf nicht automatisch ein
+         * echtes Shopify-Produkt zerstören.
+         */
+        shopifyUntouched: true,
+      });
+    } catch (error) {
+      console.error(
+        "Product archive error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Produkt konnte nicht archiviert werden.",
+      });
+    }
+  }
+);
+
 
 router.put(
   "/api/product-master/:id/stock/:storeId",
