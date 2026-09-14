@@ -99,6 +99,245 @@ async function shopifyGraphql(
 }
 
 
+
+async function ensureInventoryTracked(
+  inventoryItemId: string
+): Promise<{
+  changed: boolean;
+}> {
+  const data =
+    await shopifyGraphql(
+      `
+        query AloInventoryTrackingState(
+          $id: ID!
+        ) {
+          inventoryItem(
+            id: $id
+          ) {
+            id
+            tracked
+          }
+        }
+      `,
+      {
+        id: inventoryItemId,
+      }
+    );
+
+  const item =
+    data?.inventoryItem;
+
+  if (!item?.id) {
+    throw new Error(
+      "Shopify Inventory Item wurde nicht gefunden."
+    );
+  }
+
+  if (item.tracked === true) {
+    return {
+      changed: false,
+    };
+  }
+
+  const updated =
+    await shopifyGraphql(
+      `
+        mutation AloEnableInventoryTracking(
+          $id: ID!,
+          $input: InventoryItemInput!
+        ) {
+          inventoryItemUpdate(
+            id: $id,
+            input: $input
+          ) {
+            inventoryItem {
+              id
+              tracked
+            }
+
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        id: inventoryItemId,
+        input: {
+          tracked: true,
+        },
+      }
+    );
+
+  const payload =
+    updated?.inventoryItemUpdate;
+
+  const userErrors =
+    payload?.userErrors ?? [];
+
+  if (userErrors.length) {
+    throw new Error(
+      userErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  if (
+    !payload?.inventoryItem?.id ||
+    payload.inventoryItem.tracked !== true
+  ) {
+    throw new Error(
+      "Shopify Inventarverfolgung konnte nicht aktiviert werden."
+    );
+  }
+
+  return {
+    changed: true,
+  };
+}
+
+
+async function deactivateOtherInventoryLocations(
+  inventoryItemId: string
+): Promise<Array<{
+  inventoryLevelId: string;
+  locationId: string;
+  locationName: string;
+}>> {
+  const data =
+    await shopifyGraphql(
+      `
+        query AloInventoryLocations(
+          $id: ID!
+        ) {
+          inventoryItem(
+            id: $id
+          ) {
+            id
+
+            inventoryLevels(
+              first: 50
+            ) {
+              nodes {
+                id
+
+                location {
+                  id
+                  name
+                }
+              }
+            }
+          }
+        }
+      `,
+      {
+        id: inventoryItemId,
+      }
+    );
+
+  const item =
+    data?.inventoryItem;
+
+  if (!item?.id) {
+    throw new Error(
+      "Shopify Inventory Item wurde nicht gefunden."
+    );
+  }
+
+  const levels =
+    Array.isArray(
+      item?.inventoryLevels?.nodes
+    )
+      ? item.inventoryLevels.nodes
+      : [];
+
+  const removed: Array<{
+    inventoryLevelId: string;
+    locationId: string;
+    locationName: string;
+  }> = [];
+
+  for (const level of levels) {
+    const levelId =
+      String(
+        level?.id ?? ""
+      ).trim();
+
+    const locationId =
+      String(
+        level?.location?.id ?? ""
+      ).trim();
+
+    if (
+      !levelId ||
+      !locationId ||
+      locationId ===
+        ALO_ONLINE_SHOP_LOCATION_ID
+    ) {
+      continue;
+    }
+
+    const result =
+      await shopifyGraphql(
+        `
+          mutation AloDeactivateInventoryLevel(
+            $inventoryLevelId: ID!
+          ) {
+            inventoryDeactivate(
+              inventoryLevelId:
+                $inventoryLevelId
+            ) {
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `,
+        {
+          inventoryLevelId:
+            levelId,
+        }
+      );
+
+    const payload =
+      result?.inventoryDeactivate;
+
+    const userErrors =
+      payload?.userErrors ?? [];
+
+    if (userErrors.length) {
+      throw new Error(
+        userErrors
+          .map(
+            (error: any) =>
+              error.message
+          )
+          .join(" · ")
+      );
+    }
+
+    removed.push({
+      inventoryLevelId:
+        levelId,
+      locationId,
+      locationName:
+        String(
+          level?.location?.name ??
+          ""
+        ),
+    });
+  }
+
+  return removed;
+}
+
+
 async function ensureOnlineInventoryActivated(
   inventoryItemId: string,
   reference: string
@@ -361,10 +600,20 @@ export async function setShopifyOnlineInventory(
     );
   }
 
+  const tracking =
+    await ensureInventoryTracked(
+      inventoryItemId
+    );
+
   const activation =
     await ensureOnlineInventoryActivated(
       inventoryItemId,
       input.reference
+    );
+
+  const deactivatedLocations =
+    await deactivateOtherInventoryLocations(
+      inventoryItemId
     );
 
   const idempotencyKey =
