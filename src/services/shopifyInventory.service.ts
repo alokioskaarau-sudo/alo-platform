@@ -236,6 +236,107 @@ async function ensureOnlineInventoryActivated(
   };
 }
 
+
+export async function getShopifyOnlineInventory(
+  input: {
+    inventoryItemId: string;
+  }
+) {
+  const inventoryItemId =
+    normalizeInventoryItemId(
+      input.inventoryItemId
+    );
+
+  const data =
+    await shopifyGraphql(
+      `
+        query AloGetOnlineInventory(
+          $inventoryItemId: ID!,
+          $locationId: ID!
+        ) {
+          inventoryItem(
+            id: $inventoryItemId
+          ) {
+            id
+            tracked
+            inventoryLevel(
+              locationId: $locationId
+            ) {
+              id
+              quantities(
+                names: ["available"]
+              ) {
+                name
+                quantity
+              }
+            }
+          }
+
+          location(
+            id: $locationId
+          ) {
+            id
+            name
+          }
+        }
+      `,
+      {
+        inventoryItemId,
+        locationId:
+          ALO_ONLINE_SHOP_LOCATION_ID,
+      }
+    );
+
+  const item =
+    data?.inventoryItem;
+
+  if (!item) {
+    throw new Error(
+      "Shopify Inventory Item wurde nicht gefunden."
+    );
+  }
+
+  const level =
+    item.inventoryLevel ?? null;
+
+  const available =
+    Array.isArray(
+      level?.quantities
+    )
+      ? level.quantities.find(
+          (entry: any) =>
+            entry?.name ===
+            "available"
+        )?.quantity
+      : null;
+
+  return {
+    ok: true as const,
+
+    locationId:
+      data?.location?.id ??
+      ALO_ONLINE_SHOP_LOCATION_ID,
+
+    locationName:
+      data?.location?.name ??
+      "ALO Kiosk Online Shop",
+
+    inventoryItemId:
+      item.id,
+
+    tracked:
+      Boolean(item.tracked),
+
+    active:
+      Boolean(level),
+
+    quantity:
+      typeof available === "number"
+        ? available
+        : null,
+  };
+}
+
 export async function setShopifyOnlineInventory(
   input: {
     inventoryItemId: string;

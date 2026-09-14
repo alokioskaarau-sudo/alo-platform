@@ -1,12 +1,17 @@
 import {
+  getShopifyOnlineInventory,
+  setShopifyOnlineInventory,
+} from "../services/shopifyInventory.service.js";
+import {
   normalizeAloSeoDescription,
   normalizeAloSeoTitle,
 } from "../utils/aloSeo.js";
 
 import { Router } from "express";
 import multer from "multer";
-import { removeBackground } from "@imgly/background-removal-node";
+import { removeBackgroundIsolated } from "../services/backgroundRemoval.service.js";
 import sharp from "sharp";
+import OpenAI, { toFile } from "openai";
 import axios from "axios";
 
 import { db } from "../database/db.js";
@@ -28,6 +33,10 @@ import {
 } from "../services/shopifyCatalog.service.js";
 
 const router = Router();
+
+const productStudioOpenAI = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 const imageUpload = multer({
   storage: multer.memoryStorage(),
@@ -587,6 +596,270 @@ async function stageProductImage(
     source:
       target.resourceUrl,
     alt: filename,
+  };
+}
+
+/*
+ * Synchronisiert das aktuelle primäre
+ * Product-Master-Bild zu einem bereits
+ * verknüpften Shopify-Produkt.
+ *
+ * Sicherheitsprinzip:
+ * 1. vorhandene Medien lesen
+ * 2. neues Bild hochladen
+ * 3. neues Bild an Position 0 verschieben
+ * 4. vorheriges Hauptbild löschen
+ *
+ * Andere Galerie-Bilder bleiben erhalten.
+ */
+async function syncPrimaryProductImageToShopify(
+  productId: string,
+  shopifyProductId: string
+): Promise<{
+  synced: boolean;
+  mediaId: string | null;
+}> {
+  const stagedImage =
+    await stageProductImage(productId);
+
+  if (!stagedImage) {
+    return {
+      synced: false,
+      mediaId: null,
+    };
+  }
+
+  const existingData =
+    await shopifyGraphql(
+      `
+        query AloProductMedia(
+          $id: ID!
+        ) {
+          product(id: $id) {
+            id
+            media(first: 50) {
+              nodes {
+                id
+                mediaContentType
+              }
+            }
+          }
+        }
+      `,
+      {
+        id: shopifyProductId,
+      }
+    );
+
+  const existingMedia =
+    Array.isArray(
+      existingData?.product?.media?.nodes
+    )
+      ? existingData.product.media.nodes
+      : [];
+
+  const previousPrimaryImageId =
+    existingMedia.find(
+      (media: any) =>
+        media?.mediaContentType ===
+        "IMAGE"
+    )?.id ?? null;
+
+  const createData =
+    await shopifyGraphql(
+      `
+        mutation AloCreateProductMedia(
+          $productId: ID!,
+          $media: [CreateMediaInput!]!
+        ) {
+          productCreateMedia(
+            productId: $productId,
+            media: $media
+          ) {
+            media {
+              id
+              mediaContentType
+              status
+            }
+
+            mediaUserErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        productId:
+          shopifyProductId,
+        media: [
+          {
+            originalSource:
+              stagedImage.source,
+            alt:
+              stagedImage.alt,
+            mediaContentType:
+              "IMAGE",
+          },
+        ],
+      }
+    );
+
+  const createPayload =
+    createData?.productCreateMedia;
+
+  if (
+    createPayload
+      ?.mediaUserErrors
+      ?.length
+  ) {
+    throw new Error(
+      createPayload.mediaUserErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  const newMediaId =
+    createPayload?.media?.[0]?.id ??
+    null;
+
+  if (!newMediaId) {
+    throw new Error(
+      "Shopify hat keine neue Media-ID zurückgegeben."
+    );
+  }
+
+  /*
+   * Neues ALO-Bild wird Hauptbild.
+   * Reorder läuft bei Shopify asynchron,
+   * aber die Mutation selbst wird geprüft.
+   */
+  const reorderData =
+    await shopifyGraphql(
+      `
+        mutation AloReorderProductMedia(
+          $id: ID!,
+          $moves: [MoveInput!]!
+        ) {
+          productReorderMedia(
+            id: $id,
+            moves: $moves
+          ) {
+            job {
+              id
+            }
+
+            mediaUserErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        id:
+          shopifyProductId,
+        moves: [
+          {
+            id:
+              newMediaId,
+            newPosition:
+              "0",
+          },
+        ],
+      }
+    );
+
+  const reorderPayload =
+    reorderData
+      ?.productReorderMedia;
+
+  if (
+    reorderPayload
+      ?.mediaUserErrors
+      ?.length
+  ) {
+    throw new Error(
+      reorderPayload.mediaUserErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  /*
+   * Nur das bisherige erste IMAGE
+   * entfernen.
+   *
+   * Andere Galerie-/Lifestyle-Bilder
+   * bleiben erhalten.
+   */
+  if (
+    previousPrimaryImageId &&
+    previousPrimaryImageId !==
+      newMediaId
+  ) {
+    const deleteData =
+      await shopifyGraphql(
+        `
+          mutation AloDeleteOldProductMedia(
+            $productId: ID!,
+            $mediaIds: [ID!]!
+          ) {
+            productDeleteMedia(
+              productId:
+                $productId,
+              mediaIds:
+                $mediaIds
+            ) {
+              deletedMediaIds
+
+              mediaUserErrors {
+                field
+                message
+              }
+            }
+          }
+        `,
+        {
+          productId:
+            shopifyProductId,
+          mediaIds: [
+            previousPrimaryImageId,
+          ],
+        }
+      );
+
+    const deletePayload =
+      deleteData
+        ?.productDeleteMedia;
+
+    if (
+      deletePayload
+        ?.mediaUserErrors
+        ?.length
+    ) {
+      throw new Error(
+        deletePayload.mediaUserErrors
+          .map(
+            (error: any) =>
+              error.message
+          )
+          .join(" · ")
+      );
+    }
+  }
+
+  return {
+    synced: true,
+    mediaId:
+      newMediaId,
   };
 }
 
@@ -1186,6 +1459,264 @@ router.get(
   }
 );
 
+
+/*
+ * ============================================================
+ * ALO PRODUCT STUDIO V1
+ * ============================================================
+ *
+ * Normales Mitarbeiter-Foto -> professionelles Shopbild.
+ *
+ * AI ist nur die optische Aufbereitung.
+ * Das reale Produktfoto bleibt die verbindliche Referenz.
+ */
+
+router.post(
+  "/api/product-image/studio",
+  imageUpload.single("image"),
+  async (req, res) => {
+    try {
+      const file = req.file;
+
+      if (!file) {
+        res.status(400).json({
+          ok: false,
+          error: "Produktfoto fehlt.",
+        });
+        return;
+      }
+
+      const title =
+        typeof req.body?.title === "string"
+          ? req.body.title.trim()
+          : "";
+
+      const brand =
+        typeof req.body?.brand === "string"
+          ? req.body.brand.trim()
+          : "";
+
+      const barcode =
+        typeof req.body?.barcode === "string"
+          ? req.body.barcode.trim()
+          : "";
+
+      const identity = [
+        title
+          ? `Produkt: ${title}`
+          : null,
+        brand
+          ? `Marke: ${brand}`
+          : null,
+        barcode
+          ? `EAN: ${barcode}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const sourceImage =
+        await toFile(
+          file.buffer,
+          file.originalname ||
+            "alo-product-front.png",
+          {
+            type:
+              file.mimetype ||
+              "image/png",
+          }
+        );
+
+      const result: any =
+        await productStudioOpenAI.images.edit({
+          model: "gpt-image-2",
+
+          image: sourceImage,
+
+          prompt: `
+ALO KIOSK PRODUCT STUDIO
+
+Bearbeite das hochgeladene reale Produktfoto zu einem
+hochwertigen professionellen E-Commerce-Produktfotografie-Bild.
+
+PRODUKTIDENTITÄT:
+${identity || "Die sichtbare Verpackung ist die verbindliche Identität."}
+
+ABSOLUTE REGELN:
+
+Das hochgeladene Produkt ist die verbindliche visuelle Referenz.
+
+Es muss exakt dieselbe reale Produktvariante bleiben.
+
+NICHT verändern oder neu erfinden:
+- Marke
+- Logo
+- Produktname
+- Geschmacksrichtung
+- Sorte
+- Verpackungsdesign
+- Farben
+- sichtbare Grafiken
+- Gewichts- oder Volumenangaben
+- sichtbare Produkttexte
+- EAN / Barcode
+- Claims auf der Verpackung
+
+Keine andere Produktvariante erzeugen.
+
+Keine zusätzlichen:
+- Lebensmittel
+- Früchte
+- Chips
+- Bonbons
+- Getränke
+- Gegenstände
+- Dekorationen
+- Hände
+- Hintergründe
+hinzufügen.
+
+ERLAUBTE VERBESSERUNGEN:
+
+- professionelle Studio-Ausleuchtung
+- bessere Belichtung
+- bessere Klarheit
+- saubere natürliche Kontraste
+- störende Farbstiche korrigieren
+- leichte glaubwürdige Perspektivkorrektur
+- Produkt sauber frontal präsentieren
+- Verpackung vollständig sichtbar
+- hochwertige Materialdarstellung
+- Produkt mittig darstellen
+- Produkt groß und präsent darstellen
+- saubere Kanten
+
+Die Verpackung darf NICHT künstlich neu gestaltet werden.
+
+Wenn eine optische Verbesserung sichtbare Produktinformationen
+verändern könnte, behalte das Originaldetail unverändert.
+
+HINTERGRUND:
+vollständig transparent.
+
+KEIN Bodenschatten außerhalb des Produktes.
+
+ZIEL:
+Ein einheitliches Premium-Produktfotografie-Bild für den
+ALO Kiosk Online-Shop, als wäre das echte Produkt professionell
+im Studio fotografiert worden.
+          `.trim(),
+
+          size: "1024x1024",
+          quality: "high",
+          background: "transparent",
+          output_format: "png",
+        });
+
+      const encoded =
+        result?.data?.[0]?.b64_json;
+
+      if (
+        typeof encoded !== "string" ||
+        !encoded
+      ) {
+        throw new Error(
+          "Product Studio hat kein Bild zurückgegeben."
+        );
+      }
+
+      const generated =
+        Buffer.from(
+          encoded,
+          "base64"
+        );
+
+      /*
+       * ALO IMAGE STANDARD
+       *
+       * Das AI-Bild wird nochmals technisch normalisiert.
+       * Dadurch sind ALLE Produktbilder gleich aufgebaut.
+       */
+
+      const trimmed =
+        await sharp(generated)
+          .trim({
+            background: {
+              r: 0,
+              g: 0,
+              b: 0,
+              alpha: 0,
+            },
+          })
+          .png()
+          .toBuffer();
+
+      const output =
+        await sharp(trimmed)
+          .resize({
+            width: 1040,
+            height: 1040,
+            fit: "contain",
+            position: "centre",
+            background: {
+              r: 0,
+              g: 0,
+              b: 0,
+              alpha: 0,
+            },
+            withoutEnlargement: false,
+          })
+          .extend({
+            top: 80,
+            bottom: 80,
+            left: 80,
+            right: 80,
+            background: {
+              r: 0,
+              g: 0,
+              b: 0,
+              alpha: 0,
+            },
+          })
+          .png({
+            compressionLevel: 9,
+          })
+          .toBuffer();
+
+      res.setHeader(
+        "Content-Type",
+        "image/png"
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "no-store"
+      );
+
+      res.setHeader(
+        "X-ALO-Image-Mode",
+        "product-studio"
+      );
+
+      res.send(output);
+    } catch (error) {
+      console.error(
+        "ALO Product Studio error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Product Studio fehlgeschlagen.",
+      });
+    }
+  }
+);
+
+
 router.post(
   "/api/product-image/remove-background",
   imageUpload.single("image"),
@@ -1201,24 +1732,22 @@ router.post(
         return;
       }
 
-      const result =
-        await removeBackground(
-          file.buffer,
-          {
-            debug: false,
-            model: "medium",
-            output: {
-              format: "image/png",
-              quality: 1,
-            },
-          }
-        );
-
-      const arrayBuffer =
-        await result.arrayBuffer();
-
+      /*
+       * IMG.LY läuft absichtlich in einem separaten
+       * Node-Prozess.
+       *
+       * Grund:
+       * @imgly/background-removal-node verwendet
+       * sharp 0.32.x / eine eigene libvips-Version,
+       * während ALO Platform sharp 0.35.x verwendet.
+       *
+       * Beide nativen libvips-Versionen dürfen auf
+       * macOS nicht im selben Prozess geladen werden.
+       */
       const cutout =
-        Buffer.from(arrayBuffer);
+        await removeBackgroundIsolated(
+          file.buffer
+        );
 
       /*
        * ALO SHOP IMAGE STANDARD
@@ -1396,8 +1925,53 @@ router.post(
         client.release();
       }
 
+      /*
+       * Das Product-Master-Bild ist jetzt sicher gespeichert.
+       *
+       * Falls dieses Produkt bereits mit Shopify verbunden ist,
+       * synchronisieren wir das neue Hauptbild zusätzlich.
+       *
+       * Ein Shopify-Fehler darf den erfolgreichen lokalen
+       * Bild-Upload NICHT rückgängig machen.
+       */
+      let shopifyImageSynced = false;
+      let shopifyImageError: string | null = null;
+
+      const shopifyProductId =
+        product.shopify_product_id
+          ? String(product.shopify_product_id)
+          : null;
+
+      if (shopifyProductId) {
+        try {
+          const shopifyImage =
+            await syncPrimaryProductImageToShopify(
+              productId,
+              shopifyProductId
+            );
+
+          shopifyImageSynced =
+            shopifyImage.synced;
+        } catch (error) {
+          shopifyImageError =
+            error instanceof Error
+              ? error.message
+              : "Shopify-Bild konnte nicht synchronisiert werden.";
+
+          console.error(
+            `Shopify image sync failed for Product Master ${productId}:`,
+            error
+          );
+        }
+      }
+
       res.json({
         ok: true,
+        imageSaved: true,
+        shopifyLinked:
+          Boolean(shopifyProductId),
+        shopifyImageSynced,
+        shopifyImageError,
       });
     } catch (error) {
       res.status(500).json({
@@ -1456,6 +2030,270 @@ router.get(
       );
     } catch {
       res.status(500).end();
+    }
+  }
+);
+
+
+
+// ============================================================
+// PRODUCT MASTER - SHOPIFY ONLINE INVENTORY
+// ============================================================
+
+router.get(
+  "/api/product-master/:id/online-stock",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(
+          req.params.id ?? ""
+        ).trim();
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              id,
+              title,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const product =
+        result.rows[0];
+
+      if (!product) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt nicht gefunden.",
+        });
+
+        return;
+      }
+
+      const inventoryItemId =
+        String(
+          product
+            .shopify_inventory_item_id ??
+          ""
+        ).trim();
+
+      if (!inventoryItemId) {
+        res.status(409).json({
+          ok: false,
+          error:
+            "Produkt ist noch nicht mit einem Shopify Inventory Item verbunden.",
+        });
+
+        return;
+      }
+
+      const inventory =
+        await getShopifyOnlineInventory({
+          inventoryItemId,
+        });
+
+      res.json({
+        ok: true,
+
+        onlineStock: {
+          productId:
+            String(product.id),
+
+          title:
+            String(
+              product.title ?? ""
+            ),
+
+          locationId:
+            inventory.locationId,
+
+          locationName:
+            inventory.locationName,
+
+          inventoryItemId:
+            inventory.inventoryItemId,
+
+          tracked:
+            inventory.tracked,
+
+          active:
+            inventory.active,
+
+          quantity:
+            inventory.quantity,
+
+          synced: true,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Product Master online stock GET error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Online-Bestand konnte nicht geladen werden.",
+      });
+    }
+  }
+);
+
+router.put(
+  "/api/product-master/:id/online-stock",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(
+          req.params.id ?? ""
+        ).trim();
+
+      const quantity =
+        Number(
+          req.body?.quantity
+        );
+
+      if (
+        !Number.isInteger(
+          quantity
+        ) ||
+        quantity < 0
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Online-Bestand muss eine ganze Zahl ab 0 sein.",
+        });
+
+        return;
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              id,
+              title,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const product =
+        result.rows[0];
+
+      if (!product) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt nicht gefunden.",
+        });
+
+        return;
+      }
+
+      const inventoryItemId =
+        String(
+          product
+            .shopify_inventory_item_id ??
+          ""
+        ).trim();
+
+      if (!inventoryItemId) {
+        res.status(409).json({
+          ok: false,
+          error:
+            "Produkt ist noch nicht mit einem Shopify Inventory Item verbunden.",
+        });
+
+        return;
+      }
+
+      await setShopifyOnlineInventory({
+        inventoryItemId,
+
+        quantity,
+
+        reference:
+          `product-master-${productId}-${Date.now()}`,
+      });
+
+      /*
+       * Direkt wieder aus Shopify lesen.
+       * So bestätigt die API nicht nur den gewünschten,
+       * sondern den tatsächlich gespeicherten Bestand.
+       */
+      const inventory =
+        await getShopifyOnlineInventory({
+          inventoryItemId,
+        });
+
+      res.json({
+        ok: true,
+
+        onlineStock: {
+          productId:
+            String(product.id),
+
+          title:
+            String(
+              product.title ?? ""
+            ),
+
+          locationId:
+            inventory.locationId,
+
+          locationName:
+            inventory.locationName,
+
+          inventoryItemId:
+            inventory.inventoryItemId,
+
+          tracked:
+            inventory.tracked,
+
+          active:
+            inventory.active,
+
+          quantity:
+            inventory.quantity,
+
+          synced: true,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "Product Master online stock PUT error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Online-Bestand konnte nicht gespeichert werden.",
+      });
     }
   }
 );
@@ -2105,6 +2943,302 @@ router.get(
 );
 
 
+
+type AloPackagingType =
+  | "snack_bag"
+  | "wrapper"
+  | "plastic_bag"
+  | "cardboard_box"
+  | "aluminum_can"
+  | "pet_bottle"
+  | "glass_bottle"
+  | "plastic_cup"
+  | "jar"
+  | "other";
+
+function parseAloAmount(
+  value: unknown
+): {
+  amount: number;
+  unit: "g" | "kg" | "ml" | "l";
+} | null {
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number"
+  ) {
+    return null;
+  }
+
+  const raw =
+    String(value)
+      .trim()
+      .toLowerCase()
+      .replace(",", ".");
+
+  const match =
+    raw.match(
+      /(\d+(?:\.\d+)?)\s*(kg|g|ml|l)\b/
+    );
+
+  if (!match) {
+    return null;
+  }
+
+  const amount =
+    Number(match[1]);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    amount,
+    unit:
+      match[2] as
+        | "g"
+        | "kg"
+        | "ml"
+        | "l",
+  };
+}
+
+function inferAloPackagingType(
+  draft: any
+): AloPackagingType {
+  const text =
+    [
+      draft?.title,
+      draft?.productName,
+      draft?.category,
+      draft?.subcategory,
+      draft?.productType,
+      draft?.packagingType,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+  if (
+    /glasflasche|glass bottle/.test(
+      text
+    )
+  ) {
+    return "glass_bottle";
+  }
+
+  if (
+    /pet[- ]?flasche|pet bottle|plastic bottle|kunststoffflasche/.test(
+      text
+    )
+  ) {
+    return "pet_bottle";
+  }
+
+  if (
+    /dose|can|energy drink|softdrink|soft drink/.test(
+      text
+    )
+  ) {
+    return "aluminum_can";
+  }
+
+  if (
+    /jar|glasbehälter|glasbehaelter/.test(
+      text
+    )
+  ) {
+    return "jar";
+  }
+
+  if (
+    /becher|cup/.test(
+      text
+    )
+  ) {
+    return "plastic_cup";
+  }
+
+  if (
+    /box|schachtel|karton/.test(
+      text
+    )
+  ) {
+    return "cardboard_box";
+  }
+
+  if (
+    /riegel|bar|wrapper/.test(
+      text
+    )
+  ) {
+    return "wrapper";
+  }
+
+  if (
+    /chips|takis|crisps|snack/.test(
+      text
+    )
+  ) {
+    return "snack_bag";
+  }
+
+  if (
+    /bonbon|candy|gummy|gummies|sweets/.test(
+      text
+    )
+  ) {
+    return "plastic_bag";
+  }
+
+  return "other";
+}
+
+function getAloPackagingTareGrams(
+  type: AloPackagingType,
+  contentGrams: number
+): number {
+  switch (type) {
+    case "wrapper":
+      return 3;
+
+    case "snack_bag":
+      return contentGrams <= 150
+        ? 7
+        : 10;
+
+    case "plastic_bag":
+      return contentGrams <= 250
+        ? 6
+        : 10;
+
+    case "cardboard_box":
+      return contentGrams <= 250
+        ? 18
+        : 30;
+
+    case "aluminum_can":
+      return 16;
+
+    case "pet_bottle":
+      return contentGrams <= 600
+        ? 25
+        : 40;
+
+    case "glass_bottle":
+      return contentGrams <= 600
+        ? 250
+        : 400;
+
+    case "plastic_cup":
+      return 15;
+
+    case "jar":
+      return 180;
+
+    default:
+      return Math.max(
+        5,
+        Math.min(
+          25,
+          Math.round(
+            contentGrams * 0.03
+          )
+        )
+      );
+  }
+}
+
+function calculateAloShippingWeightGrams(
+  draft: any
+): number | null {
+  /*
+   * Falls später ein echtes verifiziertes Bruttogewicht
+   * vorhanden ist, hat dieses immer Vorrang.
+   */
+
+  const gross =
+    parseAloAmount(
+      draft?.grossWeight ??
+      draft?.shippingWeight
+    );
+
+  if (
+    gross &&
+    (
+      gross.unit === "g" ||
+      gross.unit === "kg"
+    )
+  ) {
+    return Math.round(
+      gross.unit === "kg"
+        ? gross.amount * 1000
+        : gross.amount
+    );
+  }
+
+  /*
+   * netWeight ist bevorzugt.
+   * unitSize ist Fallback.
+   */
+
+  const amount =
+    parseAloAmount(
+      draft?.netWeight ??
+      draft?.unitSize
+    );
+
+  if (!amount) {
+    return null;
+  }
+
+  let contentGrams: number;
+
+  if (amount.unit === "kg") {
+    contentGrams =
+      amount.amount * 1000;
+  } else if (
+    amount.unit === "g"
+  ) {
+    contentGrams =
+      amount.amount;
+  } else if (
+    amount.unit === "l"
+  ) {
+    /*
+     * Versand-Schätzung für typische Getränke.
+     * NICHT als Produkt-Nettogewicht speichern.
+     */
+    contentGrams =
+      amount.amount * 1000;
+  } else {
+    /*
+     * ml -> ungefähre Versandmasse typischer
+     * wasserbasierter Getränke.
+     */
+    contentGrams =
+      amount.amount;
+  }
+
+  const packagingType =
+    inferAloPackagingType(
+      draft
+    );
+
+  const packagingGrams =
+    getAloPackagingTareGrams(
+      packagingType,
+      contentGrams
+    );
+
+  return Math.ceil(
+    contentGrams +
+    packagingGrams
+  );
+}
+
 function parseShippingWeightGrams(
   value: unknown
 ): number | null {
@@ -2149,6 +3283,822 @@ function parseShippingWeightGrams(
   return Math.round(grams * 1000) / 1000;
 }
 
+
+type AloCanonicalCollection = {
+  id: string;
+  handle: string;
+  title: string;
+};
+
+const ALO_CANONICAL_COLLECTIONS = {
+  drinks: {
+    id: "gid://shopify/Collection/299715133524",
+    handle: "drinks",
+    title: "DRINKS",
+  },
+  eistee: {
+    id: "gid://shopify/Collection/301935001684",
+    handle: "eistee",
+    title: "EISTEE",
+  },
+  durstloscher: {
+    id: "gid://shopify/Collection/303819653204",
+    handle: "durstloscher",
+    title: "Durstlöscher",
+  },
+  softdrinks: {
+    id: "gid://shopify/Collection/301934215252",
+    handle: "softdrinks-schweiz",
+    title: "SOFTDRINKS",
+  },
+  limonade: {
+    id: "gid://shopify/Collection/301934608468",
+    handle: "limonade",
+    title: "LIMONADE",
+  },
+  energy: {
+    id: "gid://shopify/Collection/301934575700",
+    handle: "energy-drinks",
+    title: "Alle Energy Drinks",
+  },
+  snacks: {
+    id: "gid://shopify/Collection/299715985492",
+    handle: "snacks-1",
+    title: "SNACKS",
+  },
+  sweets: {
+    id: "gid://shopify/Collection/299716247636",
+    handle: "sweets-candys",
+    title: "SWEETS",
+  },
+  chocolate: {
+    id: "gid://shopify/Collection/301720633428",
+    handle: "chocolate",
+    title: "CHOCOLATE",
+  },
+  cookies: {
+    id: "gid://shopify/Collection/266208772180",
+    handle: "cookies",
+    title: "Cookies",
+  },
+  chips: {
+    id: "gid://shopify/Collection/301956235348",
+    handle: "chips",
+    title: "CHIPS",
+  },
+  riegel: {
+    id: "gid://shopify/Collection/266208673876",
+    handle: "riegel",
+    title: "Riegel",
+  },
+} satisfies Record<string, AloCanonicalCollection>;
+
+function normalizeAloTaxonomyText(
+  value: unknown
+): string {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ß/g, "ss")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function resolveAloCanonicalCollections(
+  draft: any,
+  fallbackTitle?: unknown
+): AloCanonicalCollection[] {
+  const category =
+    normalizeAloTaxonomyText(
+      draft?.category
+    );
+
+  const subcategory =
+    normalizeAloTaxonomyText(
+      draft?.subcategory
+    );
+
+  const productType =
+    normalizeAloTaxonomyText(
+      draft?.productType
+    );
+
+  const brand =
+    normalizeAloTaxonomyText(
+      draft?.brand ??
+      draft?.vendor
+    );
+
+  const title =
+    normalizeAloTaxonomyText(
+      draft?.title ??
+      draft?.productName ??
+      fallbackTitle
+    );
+
+  const tags = Array.isArray(draft?.tags)
+    ? draft.tags
+        .map(normalizeAloTaxonomyText)
+        .join(" ")
+    : normalizeAloTaxonomyText(
+        draft?.tags
+      );
+
+  const text = [
+    category,
+    subcategory,
+    productType,
+    brand,
+    title,
+    tags,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const result =
+    new Map<
+      string,
+      AloCanonicalCollection
+    >();
+
+  const add = (
+    collection:
+      AloCanonicalCollection
+  ) => {
+    result.set(
+      collection.id,
+      collection
+    );
+  };
+
+  const isDrink =
+    /\bdrinks?\b/.test(category) ||
+    /\bgetranke\b/.test(category) ||
+    /\bsoftdrinks?\b/.test(category) ||
+    /\bdrink\b/.test(productType) ||
+    /\bgetrank\b/.test(productType) ||
+    /\berfrischungsgetrank/.test(text) ||
+    /\blimonade\b/.test(text) ||
+    /\beistee\b/.test(text) ||
+    /\benergy drinks?\b/.test(text) ||
+    /\bmate\b/.test(text) ||
+    brand === "durstloscher";
+
+  if (isDrink) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.drinks
+    );
+  }
+
+  if (
+    isDrink &&
+    (
+      /\beistee\b/.test(text) ||
+      /\bice tea\b/.test(text) ||
+      /\biced tea\b/.test(text)
+    )
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.eistee
+    );
+  }
+
+  if (
+    brand === "durstloscher" ||
+    /\bdurstloscher\b/.test(title)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.drinks
+    );
+
+    add(
+      ALO_CANONICAL_COLLECTIONS.durstloscher
+    );
+
+    if (
+      /\beistee\b/.test(text) ||
+      /\bice tea\b/.test(text) ||
+      /\biced tea\b/.test(text)
+    ) {
+      add(
+        ALO_CANONICAL_COLLECTIONS.eistee
+      );
+    }
+  }
+
+  if (
+    isDrink &&
+    (
+      /\bsoft ?drinks?\b/.test(text) ||
+      /\bkohlensaurehaltig/.test(text)
+    )
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.softdrinks
+    );
+  }
+
+  if (
+    isDrink &&
+    /\blimonade\b/.test(text)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.limonade
+    );
+  }
+
+  if (
+    isDrink &&
+    /\benergy drinks?\b/.test(text)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.energy
+    );
+  }
+
+  if (
+    /\bsnacks?\b/.test(category) ||
+    /\bsnacks?\b/.test(productType)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.snacks
+    );
+  }
+
+  if (
+    /\bsweets?\b/.test(category) ||
+    /\bsussigkeiten\b/.test(category) ||
+    /\bsusswaren\b/.test(category)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.sweets
+    );
+  }
+
+  if (
+    /\bchocolate\b/.test(category) ||
+    /\bschokolade\b/.test(category)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.chocolate
+    );
+  }
+
+  if (
+    /\bcookies?\b/.test(text) ||
+    /\bkekse?\b/.test(text)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.cookies
+    );
+  }
+
+  if (
+    /\bchips?\b/.test(text) ||
+    /\bkartoffelchips\b/.test(text) ||
+    /\btortilla chips?\b/.test(text)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.snacks
+    );
+
+    add(
+      ALO_CANONICAL_COLLECTIONS.chips
+    );
+  }
+
+  if (
+    /\briegel\b/.test(text) ||
+    /\bbar\b/.test(productType)
+  ) {
+    add(
+      ALO_CANONICAL_COLLECTIONS.riegel
+    );
+  }
+
+  return [...result.values()];
+}
+
+type AloCollectionSyncResult = {
+  requested: AloCanonicalCollection[];
+  added: AloCanonicalCollection[];
+  alreadyMember: AloCanonicalCollection[];
+  skipped: Array<{
+    collection: AloCanonicalCollection;
+    reason: string;
+  }>;
+};
+
+
+type AloPublicationSyncResult = {
+  status:
+    | "available"
+    | "permission_missing"
+    | "error";
+  publications: Array<{
+    id: string;
+    name: string;
+  }>;
+  warning?: string;
+};
+
+let aloPublicationAccessCache:
+  {
+    expiresAt: number;
+    result: AloPublicationSyncResult;
+  } | null = null;
+
+const ALO_PUBLICATION_ACCESS_CACHE_MS =
+  10 * 60 * 1000;
+
+async function inspectAloPublicationAccess():
+  Promise<AloPublicationSyncResult> {
+  const now =
+    Date.now();
+
+  if (
+    aloPublicationAccessCache &&
+    aloPublicationAccessCache.expiresAt >
+      now
+  ) {
+    return {
+      ...aloPublicationAccessCache.result,
+      publications:
+        aloPublicationAccessCache.result
+          .publications
+          .map(
+            (publication) => ({
+              ...publication,
+            })
+          ),
+    };
+  }
+  try {
+    const data =
+      await shopifyGraphql(
+        `
+          query AloPublicationCapability {
+            publications(first: 50) {
+              nodes {
+                id
+                name
+              }
+            }
+          }
+        `,
+        {}
+      );
+
+    const publications =
+      (
+        data
+          ?.publications
+          ?.nodes ?? []
+      )
+        .map((publication: any) => ({
+          id:
+            String(
+              publication?.id ?? ""
+            ),
+          name:
+            String(
+              publication?.name ?? ""
+            ),
+        }))
+        .filter(
+          (publication: {
+            id: string;
+            name: string;
+          }) =>
+            Boolean(
+              publication.id
+            )
+        );
+
+    const result:
+      AloPublicationSyncResult = {
+        status: "available",
+        publications,
+      };
+
+    aloPublicationAccessCache = {
+      expiresAt:
+        now +
+        ALO_PUBLICATION_ACCESS_CACHE_MS,
+      result,
+    };
+
+    return result;
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    const normalized =
+      message.toLowerCase();
+
+    if (
+      normalized.includes(
+        "read_publications"
+      ) ||
+      (
+        normalized.includes(
+          "access denied"
+        ) &&
+        normalized.includes(
+          "publication"
+        )
+      )
+    ) {
+      const result:
+        AloPublicationSyncResult = {
+          status:
+            "permission_missing",
+          publications: [],
+          warning:
+            "Shopify Publication-Zugriff fehlt. Produkt- und Collection-Sync wurden trotzdem erfolgreich ausgeführt.",
+        };
+
+      aloPublicationAccessCache = {
+        expiresAt:
+          now +
+          ALO_PUBLICATION_ACCESS_CACHE_MS,
+        result,
+      };
+
+      return result;
+    }
+
+    return {
+      status: "error",
+      publications: [],
+      warning:
+        message ||
+        "Publication-Status konnte nicht geprüft werden.",
+    };
+  }
+}
+
+
+async function publishAloProductToAllPublications(
+  shopifyProductId: string
+): Promise<AloPublicationSyncResult> {
+  const access =
+    await inspectAloPublicationAccess();
+
+  if (
+    access.status !== "available" ||
+    !access.publications.length
+  ) {
+    return access;
+  }
+
+  try {
+    const data =
+      await shopifyGraphql(
+        `
+          mutation AloPublishProductEverywhere(
+            $id: ID!,
+            $input: [PublicationInput!]!
+          ) {
+            publishablePublish(
+              id: $id,
+              input: $input
+            ) {
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `,
+        {
+          id: shopifyProductId,
+          input:
+            access.publications.map(
+              (publication) => ({
+                publicationId:
+                  publication.id,
+              })
+            ),
+        }
+      );
+
+    const errors =
+      data
+        ?.publishablePublish
+        ?.userErrors ?? [];
+
+    if (errors.length) {
+      return {
+        status: "error",
+        publications:
+          access.publications,
+        warning:
+          errors
+            .map(
+              (error: any) =>
+                error.message
+            )
+            .join(" · "),
+      };
+    }
+
+    return {
+      status: "available",
+      publications:
+        access.publications,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    const normalized =
+      message.toLowerCase();
+
+    if (
+      normalized.includes(
+        "write_publications"
+      ) ||
+      (
+        normalized.includes(
+          "access denied"
+        ) &&
+        normalized.includes(
+          "publication"
+        )
+      )
+    ) {
+      return {
+        status:
+          "permission_missing",
+        publications:
+          access.publications,
+        warning:
+          "Shopify write_publications fehlt. Produkt ist ACTIVE, konnte aber nicht automatisch auf alle Vertriebskanäle veröffentlicht werden.",
+      };
+    }
+
+    return {
+      status: "error",
+      publications:
+        access.publications,
+      warning:
+        message ||
+        "Vertriebskanäle konnten nicht synchronisiert werden.",
+    };
+  }
+}
+
+
+async function syncAloCanonicalCollections(
+  shopifyProductId: string,
+  collections: AloCanonicalCollection[]
+): Promise<AloCollectionSyncResult> {
+  const uniqueCollections =
+    [...new Map(
+      collections.map((collection) => [
+        collection.id,
+        collection,
+      ])
+    ).values()];
+
+  const result: AloCollectionSyncResult = {
+    requested: uniqueCollections,
+    added: [],
+    alreadyMember: [],
+    skipped: [],
+  };
+
+  if (!uniqueCollections.length) {
+    return result;
+  }
+
+  for (
+    const collection
+    of uniqueCollections
+  ) {
+    try {
+      /*
+       * Shopify 2026-07:
+       * Produkte werden nicht mehr direkt über
+       * collectionAddProducts gepflegt.
+       *
+       * Wir brauchen den Conditions-Source der
+       * jeweiligen Collection.
+       */
+      const collectionData =
+        await shopifyGraphql(
+          `
+            query AloCollectionSource(
+              $id: ID!
+            ) {
+              collection(id: $id) {
+                id
+                title
+
+                sources {
+                  __typename
+                  id
+                  title
+
+                  ... on CollectionConditionsSource {
+                    targetType
+                    shareable
+
+                    inclusion {
+                      selections(
+                        first: 250
+                      ) {
+                        nodes {
+                          product {
+                            id
+                          }
+
+                          variantIds
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `,
+          {
+            id:
+              collection.id,
+          }
+        );
+
+      const shopifyCollection =
+        collectionData
+          ?.collection;
+
+      if (
+        !shopifyCollection?.id
+      ) {
+        result.skipped.push({
+          collection,
+          reason:
+            "Collection wurde in Shopify nicht gefunden.",
+        });
+
+        continue;
+      }
+
+      const sources =
+        Array.isArray(
+          shopifyCollection.sources
+        )
+          ? shopifyCollection.sources
+          : [];
+
+      const conditionSource =
+        sources.find(
+          (source: any) =>
+            source
+              ?.__typename ===
+              "CollectionConditionsSource" &&
+            (
+              !source.targetType ||
+              source.targetType ===
+                "PRODUCTS"
+            )
+        );
+
+      if (
+        !conditionSource?.id
+      ) {
+        result.skipped.push({
+          collection,
+          reason:
+            "Keine beschreibbare Product-Collection-Source gefunden.",
+        });
+
+        continue;
+      }
+
+      const existingSelections =
+        conditionSource
+          ?.inclusion
+          ?.selections
+          ?.nodes ?? [];
+
+      const alreadySelected =
+        existingSelections.some(
+          (selection: any) =>
+            selection
+              ?.product
+              ?.id ===
+            shopifyProductId
+        );
+
+      if (
+        alreadySelected
+      ) {
+        result.alreadyMember.push(
+          collection
+        );
+
+        continue;
+      }
+
+      const updateData =
+        await shopifyGraphql(
+          `
+            mutation AloAddProductToCollection(
+              $collection:
+                CollectionUpdateInput!
+            ) {
+              collectionUpdate(
+                collection: $collection
+              ) {
+                collection {
+                  id
+                  title
+                }
+
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          {
+            collection: {
+              id:
+                collection.id,
+
+              sourcesToUpdate: [
+                {
+                  condition: {
+                    id:
+                      conditionSource.id,
+
+                    inclusion: {
+                      selectionsToAdd: [
+                        {
+                          productId:
+                            shopifyProductId,
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          }
+        );
+
+      const payload =
+        updateData
+          ?.collectionUpdate;
+
+      const errors =
+        payload
+          ?.userErrors ?? [];
+
+      if (
+        errors.length
+      ) {
+        result.skipped.push({
+          collection,
+          reason:
+            errors
+              .map(
+                (error: any) =>
+                  error?.message
+              )
+              .filter(Boolean)
+              .join(" · ") ||
+            "Unbekannter Shopify Collection-Fehler.",
+        });
+
+        continue;
+      }
+
+      result.added.push(
+        collection
+      );
+    } catch (error) {
+      result.skipped.push({
+        collection,
+        reason:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      });
+    }
+  }
+
+  return result;
+}
+
 router.post(
   "/api/product-master/:id/sync-to-shopify",
   async (req, res) => {
@@ -2174,9 +4124,104 @@ router.post(
       ) {
         res.status(409).json({
           ok: false,
+          code:
+            "SHOPIFY_NOT_LINKED",
           error:
             "Produkt ist noch nicht mit Shopify verknüpft.",
         });
+        return;
+      }
+
+      const linkedProductCheck =
+        await shopifyGraphql(
+          `
+            query AloLinkedProductCheck(
+              $id: ID!
+            ) {
+              product(id: $id) {
+                id
+                title
+                status
+              }
+            }
+          `,
+          {
+            id:
+              row.shopify_product_id,
+          }
+        );
+
+      if (
+        !linkedProductCheck?.product
+      ) {
+        const existingProductData =
+          row.product_data ?? {};
+
+        const existingShopifyData =
+          existingProductData?.shopify ??
+          {};
+
+        const orphanedShopifyData = {
+          ...existingShopifyData,
+          productId:
+            row.shopify_product_id,
+          variantId:
+            row.shopify_variant_id ??
+            existingShopifyData.variantId ??
+            null,
+          linkState:
+            "ORPHANED",
+          linkError:
+            "Shopify product does not exist",
+          checkedAt:
+            new Date().toISOString(),
+        };
+
+        await db.query(
+          `
+            UPDATE products
+            SET
+              shopify_status = $2,
+              product_data =
+                COALESCE(
+                  product_data,
+                  '{}'::jsonb
+                )
+                || jsonb_build_object(
+                  'shopify',
+                  $3::jsonb
+                ),
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [
+            req.params.id,
+            "ORPHANED",
+            JSON.stringify(
+              orphanedShopifyData
+            ),
+          ]
+        );
+
+        res.status(409).json({
+          ok: false,
+          code:
+            "SHOPIFY_PRODUCT_MISSING",
+          productId:
+            req.params.id,
+          shopifyProductId:
+            row.shopify_product_id,
+          shopifyVariantId:
+            row.shopify_variant_id ??
+            null,
+          status:
+            "ORPHANED",
+          recoverable:
+            true,
+          error:
+            "Die gespeicherte Shopify-Verknüpfung ist verwaist: Das Shopify-Produkt existiert nicht mehr.",
+        });
+
         return;
       }
 
@@ -2345,8 +4390,8 @@ router.post(
         | undefined;
 
       const shippingWeightGrams =
-        parseShippingWeightGrams(
-          draft?.netWeight
+        calculateAloShippingWeightGrams(
+          draft
         );
 
       if (
@@ -2400,6 +4445,55 @@ router.post(
             );
         }
 
+
+        /*
+         * ALO SALE PRICING
+         *
+         * regularPrice bleibt der ursprüngliche Verkaufspreis.
+         * sellingPrice ist der aktuell aktive Shopify-Preis.
+         *
+         * Bei 25/50 % Rabatt bekommt Shopify zusätzlich
+         * compareAtPrice, damit der Originalpreis als
+         * Streichpreis dargestellt wird.
+         *
+         * Bei NORMAL wird compareAtPrice explizit auf null
+         * gesetzt, damit ein früherer Sale entfernt wird.
+         */
+        const possibleRegularPrice =
+          Number(
+            draft?.commerce
+              ?.regularPrice ??
+            NaN
+          );
+
+        const discountPercent =
+          Number(
+            draft?.commerce
+              ?.discountPercent ??
+            0
+          );
+
+        const hasActiveDiscount =
+          (
+            discountPercent === 25 ||
+            discountPercent === 50
+          ) &&
+          Number.isFinite(
+            possibleRegularPrice
+          ) &&
+          possibleRegularPrice > 0 &&
+          Number.isFinite(
+            possiblePrice
+          ) &&
+          possiblePrice >= 0 &&
+          possibleRegularPrice >
+            possiblePrice;
+
+        variantInput.compareAtPrice =
+          hasActiveDiscount
+            ? possibleRegularPrice.toFixed(2)
+            : null;
+
         const variantUpdate =
           await shopifyGraphql(
             `
@@ -2418,6 +4512,7 @@ router.post(
                     id
                     barcode
                     price
+                compareAtPrice
 
                     inventoryItem {
                       id
@@ -2542,6 +4637,22 @@ router.post(
         }
       }
 
+      const canonicalCollections =
+        resolveAloCanonicalCollections(
+          draft,
+          shopifyProduct.title ??
+            row.title
+        );
+
+      const collectionSync =
+        await syncAloCanonicalCollections(
+          shopifyProduct.id,
+          canonicalCollections
+        );
+
+      const publicationSync =
+        await inspectAloPublicationAccess();
+
       const nextShopifyData = {
         ...(
           draft.shopify ??
@@ -2558,6 +4669,50 @@ router.post(
           row.shopify_status,
         originalTitle:
           shopifyProduct.title,
+        collections:
+          collectionSync.requested.map(
+            (collection) => ({
+              id: collection.id,
+              handle:
+                collection.handle,
+              title:
+                collection.title,
+            })
+          ),
+        collectionSync: {
+          added:
+            collectionSync.added.map(
+              (collection) =>
+                collection.handle
+            ),
+          alreadyMember:
+            collectionSync.alreadyMember.map(
+              (collection) =>
+                collection.handle
+            ),
+          skipped:
+            collectionSync.skipped.map(
+              (entry) => ({
+                handle:
+                  entry.collection.handle,
+                reason:
+                  entry.reason,
+              })
+            ),
+          syncedAt:
+            new Date().toISOString(),
+        },
+        publicationSync: {
+          status:
+            publicationSync.status,
+          publications:
+            publicationSync.publications,
+          warning:
+            publicationSync.warning ??
+            null,
+          checkedAt:
+            new Date().toISOString(),
+        },
       };
 
       await db.query(
@@ -2616,6 +4771,41 @@ router.post(
         price:
           variant?.price ??
           null,
+        collections: {
+          requested:
+            collectionSync.requested.map(
+              (collection) =>
+                collection.handle
+            ),
+          added:
+            collectionSync.added.map(
+              (collection) =>
+                collection.handle
+            ),
+          alreadyMember:
+            collectionSync.alreadyMember.map(
+              (collection) =>
+                collection.handle
+            ),
+          skipped:
+            collectionSync.skipped.map(
+              (entry) => ({
+                handle:
+                  entry.collection.handle,
+                reason:
+                  entry.reason,
+              })
+            ),
+        },
+        publication: {
+          status:
+            publicationSync.status,
+          publications:
+            publicationSync.publications,
+          warning:
+            publicationSync.warning ??
+            null,
+        },
       });
     } catch (error) {
       console.error(
@@ -2629,6 +4819,434 @@ router.post(
           error instanceof Error
             ? error.message
             : "Produkt konnte nicht mit Shopify synchronisiert werden.",
+      });
+    }
+  }
+);
+
+
+// ============================================================
+// PRODUCT MASTER - SHOPIFY PRODUCT STATUS
+// ACTIVE <-> DRAFT
+// ============================================================
+
+router.post(
+  "/api/product-master/:id/shopify-status",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(
+          req.params.id ?? ""
+        ).trim();
+
+      const requestedStatus =
+        String(
+          req.body?.status ?? ""
+        )
+          .trim()
+          .toUpperCase();
+
+      if (
+        requestedStatus !== "ACTIVE" &&
+        requestedStatus !== "DRAFT"
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Shopify Status muss ACTIVE oder DRAFT sein.",
+        });
+
+        return;
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              id,
+              title,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id,
+              shopify_status,
+              product_data
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const row =
+        result.rows[0];
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt nicht gefunden.",
+        });
+
+        return;
+      }
+
+      const rawShopifyProductId =
+        String(
+          row.shopify_product_id ?? ""
+        ).trim();
+
+      if (!rawShopifyProductId) {
+        res.status(409).json({
+          ok: false,
+          error:
+            "Produkt ist noch nicht mit Shopify verknüpft.",
+        });
+
+        return;
+      }
+
+      const shopifyProductId =
+        rawShopifyProductId.startsWith(
+          "gid://shopify/Product/"
+        )
+          ? rawShopifyProductId
+          : `gid://shopify/Product/${rawShopifyProductId}`;
+
+      const linkedProductCheck =
+        await shopifyGraphql(
+          `
+            query AloStatusLinkedProductCheck(
+              $id: ID!
+            ) {
+              product(id: $id) {
+                id
+                status
+              }
+            }
+          `,
+          {
+            id:
+              shopifyProductId,
+          }
+        );
+
+      if (
+        !linkedProductCheck?.product?.id
+      ) {
+        await db.query(
+          `
+            UPDATE products
+            SET
+              shopify_status = 'ORPHANED',
+              product_data =
+                COALESCE(
+                  product_data,
+                  '{}'::jsonb
+                )
+                ||
+                jsonb_build_object(
+                  'shopify',
+                  COALESCE(
+                    product_data->'shopify',
+                    '{}'::jsonb
+                  )
+                  ||
+                  jsonb_build_object(
+                    'productId',
+                    $2::text,
+                    'linkState',
+                    'ORPHANED',
+                    'linkError',
+                    'Shopify product does not exist',
+                    'checkedAt',
+                    NOW()::text
+                  )
+                ),
+              updated_at = NOW()
+            WHERE id = $1
+          `,
+          [
+            productId,
+            shopifyProductId,
+          ]
+        );
+
+        res.status(409).json({
+          ok: false,
+          code:
+            "SHOPIFY_PRODUCT_MISSING",
+          productId,
+          shopifyProductId,
+          status:
+            "ORPHANED",
+          recoverable: true,
+          error:
+            "Die gespeicherte Shopify-Verknüpfung ist verwaist: Das Shopify-Produkt existiert nicht mehr.",
+        });
+        return;
+      }
+
+      const data =
+        await shopifyGraphql(
+          `
+            mutation AloSetProductStatus(
+              $product: ProductUpdateInput!
+            ) {
+              productUpdate(
+                product: $product
+              ) {
+                product {
+                  id
+                  title
+                  status
+                }
+
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          {
+            product: {
+              id:
+                shopifyProductId,
+
+              status:
+                requestedStatus,
+            },
+          }
+        );
+
+      const payload =
+        data?.productUpdate;
+
+      const userErrors =
+        payload?.userErrors ?? [];
+
+      if (userErrors.length) {
+        throw new Error(
+          userErrors
+            .map(
+              (error: any) =>
+                error.message
+            )
+            .join(" · ")
+        );
+      }
+
+      const shopifyProduct =
+        payload?.product;
+
+      if (!shopifyProduct?.id) {
+        throw new Error(
+          "Shopify hat das aktualisierte Produkt nicht bestätigt."
+        );
+      }
+
+      const confirmedStatus =
+        String(
+          shopifyProduct.status ??
+          requestedStatus
+        )
+          .trim()
+          .toUpperCase();
+
+      let activeCollectionSync:
+        AloCollectionSyncResult | null =
+          null;
+
+      let activePublicationSync:
+        AloPublicationSyncResult | null =
+          null;
+
+      let activeInventory:
+        any = null;
+
+      if (
+        confirmedStatus ===
+        "ACTIVE"
+      ) {
+        /*
+         * ACTIVE bedeutet bei ALO:
+         *
+         * 1. Shopify Produkt ACTIVE
+         * 2. kanonische Collections synchronisieren
+         * 3. auf alle verfügbaren Publications publizieren
+         * 4. zentralen Shopify-Bestand verifizieren
+         *
+         * Die vorhandene Bestandsmenge wird hier
+         * NICHT verändert.
+         */
+
+        const draft =
+          row.product_data ?? {};
+
+        const canonicalCollections =
+          resolveAloCanonicalCollections(
+            draft,
+            shopifyProduct.title ??
+              row.title
+          );
+
+        activeCollectionSync =
+          await syncAloCanonicalCollections(
+            shopifyProduct.id,
+            canonicalCollections
+          );
+
+        activePublicationSync =
+          await publishAloProductToAllPublications(
+            shopifyProduct.id
+          );
+
+        const inventoryItemId =
+          String(
+            row.shopify_inventory_item_id ??
+            draft?.shopify?.inventoryItemId ??
+            ""
+          ).trim();
+
+        if (inventoryItemId) {
+          try {
+            activeInventory =
+              await getShopifyOnlineInventory({
+                inventoryItemId,
+              });
+          } catch (error) {
+            activeInventory = {
+              ok: false,
+              warning:
+                error instanceof Error
+                  ? error.message
+                  : String(error),
+            };
+          }
+        }
+      }
+
+      await db.query(
+        `
+          UPDATE products
+          SET
+            shopify_status = $2,
+
+            product_data =
+              COALESCE(
+                product_data,
+                '{}'::jsonb
+              )
+              ||
+              jsonb_build_object(
+                'shopify',
+                COALESCE(
+                  product_data->'shopify',
+                  '{}'::jsonb
+                )
+                ||
+                jsonb_build_object(
+                  'status',
+                  $2::text,
+                  'productId',
+                  $3::text,
+                  'activeSync',
+                  $4::jsonb
+                )
+              ),
+
+            updated_at = NOW()
+
+          WHERE id = $1
+        `,
+        [
+          productId,
+          confirmedStatus,
+          shopifyProduct.id,
+          JSON.stringify({
+            collections:
+              activeCollectionSync
+                ? {
+                    requested:
+                      activeCollectionSync.requested.map(
+                        (collection) =>
+                          collection.handle
+                      ),
+                    added:
+                      activeCollectionSync.added.map(
+                        (collection) =>
+                          collection.handle
+                      ),
+                    alreadyMember:
+                      activeCollectionSync.alreadyMember.map(
+                        (collection) =>
+                          collection.handle
+                      ),
+                    skipped:
+                      activeCollectionSync.skipped.map(
+                        (entry) => ({
+                          handle:
+                            entry.collection.handle,
+                          reason:
+                            entry.reason,
+                        })
+                      ),
+                  }
+                : null,
+            publications:
+              activePublicationSync,
+            inventory:
+              activeInventory,
+            syncedAt:
+              new Date().toISOString(),
+          }),
+        ]
+      );
+
+      res.json({
+        ok: true,
+
+        productId,
+
+        shopifyProductId:
+          shopifyProduct.id,
+
+        status:
+          confirmedStatus,
+
+        title:
+          shopifyProduct.title ??
+          row.title ??
+          null,
+
+        sync:
+          confirmedStatus ===
+          "ACTIVE"
+            ? {
+                collections:
+                  activeCollectionSync,
+                publications:
+                  activePublicationSync,
+                inventory:
+                  activeInventory,
+              }
+            : null,
+      });
+    } catch (error) {
+      console.error(
+        "Shopify product status error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : "Shopify Status konnte nicht geändert werden.",
       });
     }
   }

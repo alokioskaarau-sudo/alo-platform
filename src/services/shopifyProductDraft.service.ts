@@ -657,24 +657,56 @@ export async function createShopifyProductDraft(
   if (
     row.shopify_product_id
   ) {
-    await syncSupplierArticleMetafieldSafe(
-      row.shopify_product_id,
-      draft?.receiving?.articleNumber
-    );
-    return {
-      ok: true as const,
-      alreadyExists: true,
-      linkedExisting: false,
-      shopifyProductId:
+    const linkedProductCheck =
+      await shopifyGraphql(
+        `
+          query AloExistingDraftProductCheck(
+            $id: ID!
+          ) {
+            product(id: $id) {
+              id
+              status
+            }
+          }
+        `,
+        {
+          id:
+            row.shopify_product_id,
+        }
+      );
+
+    if (
+      linkedProductCheck?.product?.id
+    ) {
+      await syncSupplierArticleMetafieldSafe(
         row.shopify_product_id,
-      shopifyVariantId:
-        row.shopify_variant_id,
-      shopifyInventoryItemId:
-        row.shopify_inventory_item_id,
-      status:
-        row.shopify_status,
-      imageUploaded: false,
-    };
+        draft?.receiving?.articleNumber
+      );
+
+      return {
+        ok: true as const,
+        alreadyExists: true,
+        linkedExisting: false,
+        shopifyProductId:
+          row.shopify_product_id,
+        shopifyVariantId:
+          row.shopify_variant_id,
+        shopifyInventoryItemId:
+          row.shopify_inventory_item_id,
+        status:
+          linkedProductCheck
+            .product
+            .status ??
+          row.shopify_status,
+        imageUploaded: false,
+      };
+    }
+
+    /*
+     * Verwaiste Shopify-ID:
+     * Die bestehende sichere Identity-Pipeline
+     * übernimmt Matching, Relink oder Create.
+     */
   }
 
   const identity =
@@ -1075,6 +1107,55 @@ export async function createShopifyProductDraft(
         );
     }
 
+
+    /*
+     * ALO SALE PRICING
+     *
+     * regularPrice bleibt der ursprüngliche Verkaufspreis.
+     * sellingPrice ist der aktuell aktive Shopify-Preis.
+     *
+     * Bei 25/50 % Rabatt bekommt Shopify zusätzlich
+     * compareAtPrice, damit der Originalpreis als
+     * Streichpreis dargestellt wird.
+     *
+     * Bei NORMAL wird compareAtPrice explizit auf null
+     * gesetzt, damit ein früherer Sale entfernt wird.
+     */
+    const possibleRegularPrice =
+      Number(
+        draft?.commerce
+          ?.regularPrice ??
+        NaN
+      );
+
+    const discountPercent =
+      Number(
+        draft?.commerce
+          ?.discountPercent ??
+        0
+      );
+
+    const hasActiveDiscount =
+      (
+        discountPercent === 25 ||
+        discountPercent === 50
+      ) &&
+      Number.isFinite(
+        possibleRegularPrice
+      ) &&
+      possibleRegularPrice > 0 &&
+      Number.isFinite(
+        possiblePrice
+      ) &&
+      possiblePrice >= 0 &&
+      possibleRegularPrice >
+        possiblePrice;
+
+    variantInput.compareAtPrice =
+      hasActiveDiscount
+        ? possibleRegularPrice.toFixed(2)
+        : null;
+
     const variantUpdate =
       await shopifyGraphql(
         `
@@ -1093,6 +1174,7 @@ export async function createShopifyProductDraft(
                 id
                 barcode
                 price
+                compareAtPrice
                 inventoryItem {
                   id
                 }
