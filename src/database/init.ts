@@ -881,6 +881,48 @@ export async function initializeDatabase() {
   `);
 
   await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_enrollment_tokens (
+      id BIGSERIAL PRIMARY KEY,
+      staff_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      purpose TEXT NOT NULL DEFAULT 'FIRST_PIN',
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_by_staff_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT staff_enrollment_tokens_purpose_check
+        CHECK (
+          purpose IN (
+            'FIRST_PIN'
+          )
+        )
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_enrollment_tokens_user_idx
+    ON staff_enrollment_tokens (
+      staff_user_id,
+      created_at DESC
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_enrollment_tokens_active_idx
+    ON staff_enrollment_tokens (
+      token_hash,
+      expires_at
+    )
+    WHERE used_at IS NULL;
+  `);
+
+  await db.query(`
     CREATE TABLE IF NOT EXISTS staff_activity (
       id BIGSERIAL PRIMARY KEY,
       staff_user_id BIGINT

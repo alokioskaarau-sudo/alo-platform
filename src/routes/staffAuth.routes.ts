@@ -251,6 +251,11 @@ router.post(
           req.body?.pinConfirmation
         );
 
+      const enrollmentToken =
+        cleanText(
+          req.body?.enrollmentToken
+        );
+
       const deviceName =
         cleanText(
           req.body?.deviceName
@@ -264,14 +269,15 @@ router.post(
       if (
         !username ||
         !pin ||
-        !pinConfirmation
+        !pinConfirmation ||
+        !enrollmentToken
       ) {
         return res
           .status(422)
           .json({
             ok: false,
             error:
-              "Mitarbeiter und PIN fehlen.",
+              "Mitarbeiter, PIN oder Einrichtungscode fehlen.",
           });
       }
 
@@ -297,6 +303,9 @@ router.post(
               "Die PIN muss zwischen 4 und 32 Zeichen lang sein.",
           });
       }
+
+      const enrollmentTokenHash =
+        hashToken(enrollmentToken);
 
       await client.query(
         "BEGIN"
@@ -370,6 +379,67 @@ router.post(
             ok: false,
             error:
               "PIN wurde bereits eingerichtet.",
+          });
+      }
+
+      const enrollmentResult =
+        await client.query(
+          `
+            SELECT
+              id,
+              staff_user_id,
+              purpose,
+              expires_at,
+              used_at
+            FROM staff_enrollment_tokens
+            WHERE
+              staff_user_id = $1
+              AND token_hash = $2
+              AND purpose = 'FIRST_PIN'
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
+            user.id,
+            enrollmentTokenHash,
+          ]
+        );
+
+      if (
+        enrollmentResult.rows.length === 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Einrichtungscode ist ungültig.",
+          });
+      }
+
+      const enrollment =
+        enrollmentResult.rows[0];
+
+      if (
+        enrollment.used_at ||
+        new Date(
+          enrollment.expires_at
+        ).getTime() <= Date.now()
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Einrichtungscode ist abgelaufen oder wurde bereits verwendet.",
           });
       }
 
@@ -462,6 +532,39 @@ router.post(
           }),
         ]
       );
+
+      const consumeEnrollment =
+        await client.query(
+          `
+            UPDATE staff_enrollment_tokens
+            SET
+              used_at = NOW()
+            WHERE
+              id = $1
+              AND used_at IS NULL
+              AND expires_at > NOW()
+            RETURNING id
+          `,
+          [
+            enrollment.id,
+          ]
+        );
+
+      if (
+        consumeEnrollment.rowCount !== 1
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res
+          .status(409)
+          .json({
+            ok: false,
+            error:
+              "Einrichtungscode konnte nicht verwendet werden.",
+          });
+      }
 
       await client.query(
         "COMMIT"
