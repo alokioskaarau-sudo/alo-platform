@@ -71,6 +71,7 @@ import productsRouter from "./routes/products.routes.js";
 import productOpsRouter from "./routes/productOps.routes.js";
 import receivingRouter from "./routes/receiving.routes.js";
 import staffNotesRouter from "./routes/staffNotes.routes.js";
+import staffAuthRouter from "./routes/staffAuth.routes.js";
 
 // ============================================================
 // EXPRESS
@@ -137,6 +138,7 @@ app.use(productsRouter);
 app.use(productOpsRouter);
 app.use("/api/receiving", receivingRouter);
 app.use("/api/staff-notes", staffNotesRouter);
+app.use("/api/staff-auth", staffAuthRouter);
 
 
 // ============================================================

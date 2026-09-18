@@ -791,6 +791,130 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // ALO STAFF ACCOUNTS
+  // ==========================================================
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_users (
+      id BIGSERIAL PRIMARY KEY,
+      username TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'STAFF',
+      password_hash TEXT,
+      pin_hash TEXT,
+      default_workspace TEXT NOT NULL DEFAULT 'ONLINE',
+      allowed_workspaces JSONB NOT NULL DEFAULT '[]'::jsonb,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      token_version INTEGER NOT NULL DEFAULT 1,
+      last_login_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+      CONSTRAINT staff_users_role_check
+        CHECK (
+          role IN (
+            'ADMIN',
+            'MANAGER',
+            'STAFF',
+            'PRAKTIKANT'
+          )
+        ),
+
+      CONSTRAINT staff_users_default_workspace_check
+        CHECK (
+          default_workspace IN (
+            'AARAU',
+            'OLTEN',
+            'ONLINE'
+          )
+        )
+    );
+  `);
+
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      staff_users_username_unique
+    ON staff_users (
+      LOWER(username)
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_users_active_idx
+    ON staff_users (
+      active
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_sessions (
+      id BIGSERIAL PRIMARY KEY,
+      staff_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      device_name TEXT,
+      device_platform TEXT,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_sessions_user_idx
+    ON staff_sessions (
+      staff_user_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_sessions_token_active_idx
+    ON staff_sessions (
+      token_hash,
+      expires_at
+    )
+    WHERE revoked_at IS NULL;
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_activity (
+      id BIGSERIAL PRIMARY KEY,
+      staff_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL,
+      workspace TEXT,
+      action TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+      CONSTRAINT staff_activity_workspace_check
+        CHECK (
+          workspace IS NULL OR
+          workspace IN (
+            'AARAU',
+            'OLTEN',
+            'ONLINE'
+          )
+        )
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_activity_user_created_idx
+    ON staff_activity (
+      staff_user_id,
+      created_at DESC
+    );
+  `);
+
+  // ==========================================================
   // ALO PRODUCT MASTER
   // ==========================================================
 

@@ -7,6 +7,11 @@ import {
   normalizeAloSeoTitle,
 } from "../utils/aloSeo.js";
 
+import {
+  getStaffUser,
+  requireStaffAuth,
+} from "../middleware/staffAuth.js";
+
 import { Router } from "express";
 import multer from "multer";
 import { removeBackgroundIsolated } from "../services/backgroundRemoval.service.js";
@@ -2726,6 +2731,238 @@ router.put(
           error instanceof Error
             ? error.message
             : "Bestand konnte nicht aktualisiert werden.",
+      });
+    }
+  }
+);
+
+
+/*
+ * ============================================================
+ * ALO STAFF – SAFE INVENTORY COUNT
+ * ============================================================
+ *
+ * Zentraler, authentifizierter Zähl-Endpunkt für ALO STAFF.
+ *
+ * Wichtig:
+ * - Mitarbeiteridentität kommt ausschließlich aus Staff Auth.
+ * - updatedBy wird NICHT aus dem Request akzeptiert.
+ * - Menge muss eine ganze Zahl >= 0 sein.
+ * - Workspace muss für den Mitarbeiter freigegeben sein.
+ * - Dieser Endpoint verändert Shopify NICHT.
+ * - Damit werden insbesondere keine anderen Shopify Locations
+ *   deaktiviert oder verändert.
+ */
+router.put(
+  "/api/product-master/:id/inventory-count",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const staffUser = getStaffUser(res);
+
+      const productId = String(req.params.id);
+
+      const workspaceRaw =
+        typeof req.body?.workspace === "string"
+          ? req.body.workspace.trim().toUpperCase()
+          : "";
+
+      const workspaceMap: Record<string, string> = {
+        AARAU: "aarau",
+        OLTEN: "olten",
+        ONLINE: "online",
+      };
+
+      const storeId = workspaceMap[workspaceRaw];
+
+      if (!storeId) {
+        res.status(400).json({
+          ok: false,
+          error: "Ungültiger Arbeitsbereich.",
+        });
+        return;
+      }
+
+      if (
+        !staffUser.allowedWorkspaces.includes(
+          workspaceRaw as "AARAU" | "OLTEN" | "ONLINE"
+        )
+      ) {
+        res.status(403).json({
+          ok: false,
+          error: "Kein Zugriff auf diesen Arbeitsbereich.",
+        });
+        return;
+      }
+
+      const quantity = Number(req.body?.quantity);
+
+      if (
+        !Number.isInteger(quantity) ||
+        quantity < 0
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Bestand muss eine ganze Zahl ab 0 sein.",
+        });
+        return;
+      }
+
+      const productResult = await db.query(
+        `
+          SELECT
+            id,
+            barcode,
+            title
+          FROM products
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [productId]
+      );
+
+      if (productResult.rows.length === 0) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      const product = productResult.rows[0];
+
+      const stockLevel =
+        quantity === 0
+          ? "empty"
+          : quantity <= 2
+            ? "almost_empty"
+            : quantity <= 5
+              ? "low"
+              : quantity <= 10
+                ? "medium"
+                : "full";
+
+      await db.query("BEGIN");
+
+      try {
+        await db.query(
+          `
+            INSERT INTO product_stock_snapshots (
+              product_id,
+              store_id,
+              exact_quantity,
+              stock_level,
+              note,
+              updated_by,
+              updated_at
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              NULL,
+              $5,
+              NOW()
+            )
+            ON CONFLICT (
+              product_id,
+              store_id
+            )
+            DO UPDATE SET
+              exact_quantity =
+                EXCLUDED.exact_quantity,
+              stock_level =
+                EXCLUDED.stock_level,
+              note = NULL,
+              updated_by =
+                EXCLUDED.updated_by,
+              updated_at = NOW()
+          `,
+          [
+            productId,
+            storeId,
+            quantity,
+            stockLevel,
+            staffUser.displayName,
+          ]
+        );
+
+        await db.query(
+          `
+            INSERT INTO staff_activity (
+              staff_user_id,
+              workspace,
+              action,
+              entity_type,
+              entity_id,
+              metadata,
+              created_at
+            )
+            VALUES (
+              $1,
+              $2,
+              'INVENTORY_COUNT',
+              'PRODUCT',
+              $3,
+              $4::jsonb,
+              NOW()
+            )
+          `,
+          [
+            staffUser.id,
+            workspaceRaw,
+            productId,
+            JSON.stringify({
+              quantity,
+              stockLevel,
+              barcode: product.barcode ?? null,
+              title: product.title ?? null,
+            }),
+          ]
+        );
+
+        await db.query("COMMIT");
+      } catch (error) {
+        await db.query("ROLLBACK");
+        throw error;
+      }
+
+      res.json({
+        ok: true,
+        count: {
+          productId: productId,
+          barcode: product.barcode ?? null,
+          title: product.title ?? null,
+          workspace: workspaceRaw,
+          storeId,
+          quantity,
+          stockLevel,
+          countedBy: {
+            id: staffUser.id,
+            displayName: staffUser.displayName,
+            role: staffUser.role,
+          },
+        },
+        stock: await getProductStock(
+          productId
+        ),
+      });
+    } catch (error) {
+      console.error(
+        "STAFF INVENTORY COUNT ERROR",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Bestand konnte nicht gezählt werden.",
       });
     }
   }
