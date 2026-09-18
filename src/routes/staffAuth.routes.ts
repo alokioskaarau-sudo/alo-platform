@@ -225,6 +225,268 @@ router.get(
   }
 );
 
+
+/* =========================================================
+   FIRST-PIN ENROLLMENT ISSUE
+
+   Security:
+   - niemals Token-Hashes zurückgeben
+   - bestehende offene FIRST_PIN Tokens werden widerrufen
+   - Token ist kurzlebig
+   - nur für Accounts ohne bestehende PIN
+========================================================= */
+
+router.post(
+  "/enrollment/issue",
+  requireStaffAuth,
+  async (req, res) => {
+    const actor =
+      getStaffUser(res);
+
+    if (
+      actor.role !== "ADMIN" &&
+      actor.role !== "MANAGER"
+    ) {
+      return res
+        .status(403)
+        .json({
+          ok: false,
+          error:
+            "Keine Berechtigung für Mitarbeiter-Einrichtung.",
+        });
+    }
+
+    const username =
+      cleanText(
+        req.body?.username
+      ).toLowerCase();
+
+    if (!username) {
+      return res
+        .status(422)
+        .json({
+          ok: false,
+          error:
+            "Mitarbeiter fehlt.",
+        });
+    }
+
+    const client =
+      await db.connect();
+
+    try {
+      await client.query(
+        "BEGIN"
+      );
+
+      const userResult =
+        await client.query(
+          `
+            SELECT
+              id,
+              username,
+              display_name,
+              role,
+              pin_hash,
+              password_hash,
+              active
+            FROM staff_users
+            WHERE LOWER(username) = $1
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [username]
+        );
+
+      if (
+        userResult.rows.length === 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Mitarbeiter nicht gefunden.",
+          });
+      }
+
+      const user =
+        userResult.rows[0];
+
+      if (!user.active) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Mitarbeiterkonto ist deaktiviert.",
+          });
+      }
+
+      if (
+        user.pin_hash ||
+        user.password_hash
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res
+          .status(409)
+          .json({
+            ok: false,
+            error:
+              "Für diesen Mitarbeiter ist bereits ein PIN eingerichtet.",
+          });
+      }
+
+      /*
+       * Pro Mitarbeiter darf nur ein aktueller
+       * FIRST_PIN Token offen sein.
+       */
+      await client.query(
+        `
+          UPDATE staff_enrollment_tokens
+          SET used_at = NOW()
+          WHERE staff_user_id = $1
+            AND purpose = 'FIRST_PIN'
+            AND used_at IS NULL
+        `,
+        [user.id]
+      );
+
+      const enrollmentToken =
+        randomBytes(32)
+          .toString("base64url");
+
+      const enrollmentTokenHash =
+        hashToken(
+          enrollmentToken
+        );
+
+      /*
+       * 15 Minuten reichen für die
+       * unmittelbare Ersteinrichtung.
+       */
+      const expiresAt =
+        new Date(
+          Date.now() +
+            15 * 60 * 1000
+        );
+
+      await client.query(
+        `
+          INSERT INTO staff_enrollment_tokens (
+            staff_user_id,
+            token_hash,
+            purpose,
+            expires_at,
+            created_by_staff_user_id
+          )
+          VALUES (
+            $1,
+            $2,
+            'FIRST_PIN',
+            $3,
+            $4
+          )
+        `,
+        [
+          user.id,
+          enrollmentTokenHash,
+          expiresAt,
+          actor.id,
+        ]
+      );
+
+      await client.query(
+        `
+          INSERT INTO staff_activity (
+            staff_user_id,
+            workspace,
+            action,
+            entity_type,
+            entity_id,
+            metadata
+          )
+          VALUES (
+            $1,
+            NULL,
+            'FIRST_PIN_ENROLLMENT_ISSUED',
+            'STAFF_USER',
+            $2,
+            $3::jsonb
+          )
+        `,
+        [
+          actor.id,
+          String(user.id),
+          JSON.stringify({
+            username:
+              String(user.username),
+          }),
+        ]
+      );
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res.json({
+        ok: true,
+
+        /*
+         * Raw Token wird genau hier einmalig
+         * an den berechtigten Client geliefert.
+         * In der DB liegt ausschließlich SHA-256.
+         */
+        enrollmentToken,
+
+        expiresAt:
+          expiresAt.toISOString(),
+
+        user: {
+          id:
+            String(user.id),
+          username:
+            String(user.username),
+          displayName:
+            String(user.display_name),
+        },
+      });
+    } catch (error) {
+      try {
+        await client.query(
+          "ROLLBACK"
+        );
+      } catch {}
+
+      console.error(
+        "STAFF ENROLLMENT ISSUE ERROR",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            "Mitarbeiter-Einrichtung konnte nicht vorbereitet werden.",
+        });
+    } finally {
+      client.release();
+    }
+  }
+);
+
 /* =========================================================
    FIRST LOGIN / PIN SETUP
 ========================================================= */
