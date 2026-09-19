@@ -189,8 +189,8 @@ export async function createLiveLabelForOrder(
   const normalizedCity = address.city.trim();
 
   if (normalizedCity) {
-    const addressWords = address1.split(/\\s+/);
-    const cityWords = normalizedCity.split(/\\s+/);
+    const addressWords = address1.split(/\s+/);
+    const cityWords = normalizedCity.split(/\s+/);
 
     if (
       addressWords.length > cityWords.length &&
