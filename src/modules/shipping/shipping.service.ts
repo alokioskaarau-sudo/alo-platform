@@ -175,9 +175,29 @@ export async function createLiveLabelForOrder(
   // Strasse + Hausnummer
   // ----------------------------------------------------------
 
+  const address1 = address.address1.trim();
   const address2 = address.address2?.trim() ?? "";
-  const address2IsHouseNumber = /^\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(address2);
-  const streetAddress = address2IsHouseNumber ? `${address.address1} ${address2}` : address.address1;
+
+  /*
+   * Shopify speichert bei manchen Bestellungen die Hausnummer doppelt:
+   *
+   *   address1 = "Gimermestrasse 27"
+   *   address2 = "27"
+   *
+   * In diesem Fall darf daraus nicht "Gimermestrasse 27 27" werden.
+   * address1 bleibt die primäre Strassenadresse. address2 wird nur
+   * angehängt, wenn address1 selbst noch keine Hausnummer enthält.
+   */
+  const address2IsHouseNumber =
+    /^\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(address2);
+
+  const address1AlreadyHasHouseNumber =
+    /\s+\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(address1);
+
+  const streetAddress =
+    address2IsHouseNumber && !address1AlreadyHasHouseNumber
+      ? `${address1} ${address2}`
+      : address1;
 
   let {
     street,
@@ -235,21 +255,36 @@ export async function createLiveLabelForOrder(
     "USABLE",
   ];
 
-  const allowUnusableForOrder048 =
-    order.name === "#50001048ALO" &&
-    validation?.quality === "UNUSABLE";
+  /*
+   * Swiss Post kann eine syntaktisch vollständige Schweizer Adresse
+   * als UNUSABLE zurückgeben, obwohl ein Versandlabel weiterhin
+   * erstellt werden kann. Das darf die komplette Paid-Order-Pipeline
+   * nicht blockieren.
+   *
+   * Harte/unerwartete Validierungsresultate bleiben weiterhin gesperrt.
+   */
+  const acceptedForLabelCreation = [
+    ...acceptedQualities,
+    "UNUSABLE",
+  ];
 
   if (
     !validation?.quality ||
-    (!acceptedQualities.includes(
+    !acceptedForLabelCreation.includes(
       validation.quality
-    ) && !allowUnusableForOrder048)
+    )
   ) {
     throw new Error(
       `Adresse nicht ausreichend bestätigt: ${
         validation?.quality ??
         "UNKNOWN"
       }`
+    );
+  }
+
+  if (validation.quality === "UNUSABLE") {
+    console.warn(
+      `Swiss Post Adresse ${order.name}: UNUSABLE – Labelerstellung wird mit vollständiger Shopify-Adresse fortgesetzt.`
     );
   }
 
