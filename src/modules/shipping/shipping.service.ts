@@ -175,7 +175,38 @@ export async function createLiveLabelForOrder(
   // Strasse + Hausnummer
   // ----------------------------------------------------------
 
-  const address1 = address.address1.trim();
+  let address1 = address.address1.trim();
+
+  /*
+   * Falls Shopify den bereits separat vorhandenen Ort zusätzlich
+   * ans Ende von address1 geschrieben hat, entfernen wir nur diesen
+   * exakten Ortsnamen vor dem Strassen-/Hausnummer-Parsing.
+   *
+   * Beispiel:
+   *   "Grossmattstrasse 3 menziken" + city "Menziken"
+   *   -> "Grossmattstrasse 3"
+   */
+  const normalizedCity = address.city.trim();
+
+  if (normalizedCity) {
+    const addressWords = address1.split(/\\s+/);
+    const cityWords = normalizedCity.split(/\\s+/);
+
+    if (
+      addressWords.length > cityWords.length &&
+      addressWords
+        .slice(-cityWords.length)
+        .join(" ")
+        .localeCompare(normalizedCity, undefined, {
+          sensitivity: "accent",
+        }) === 0
+    ) {
+      address1 = addressWords
+        .slice(0, -cityWords.length)
+        .join(" ")
+        .trim();
+    }
+  }
   const address2 = address.address2?.trim() ?? "";
 
   /*
