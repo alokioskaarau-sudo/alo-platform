@@ -140,6 +140,17 @@ const ORDER_FIELDS = `
         variant {
           id
           title
+          image {
+            url
+            altText
+          }
+          product {
+            id
+            title
+          }
+          inventoryItem {
+            id
+          }
         }
       }
     }

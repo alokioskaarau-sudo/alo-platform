@@ -28,11 +28,6 @@ import {
   createInvoiceForOrder,
 } from "../invoices/invoice.service.js";
 
-import {
-  fulfillShopifyOrderWithSwissPostTracking,
-} from "./fulfillment.service.js";
-
-
 // ============================================================
 // PICKUP ERKENNEN
 // ============================================================
@@ -426,63 +421,23 @@ export async function processPaidShopifyOrder(
 
 
   // ----------------------------------------------------------
-  // 7. SHOPIFY FULFILLMENT + SWISS POST TRACKING
+  // 7. FULFILLMENT BEWUSST NOCH NICHT AUSLÖSEN
   //
-  // Label existiert zu diesem Zeitpunkt bereits sicher.
-  // Die Fulfillment-Funktion ist idempotent:
-  // Wenn Shopify bereits erfüllt ist bzw. keine offene
-  // Fulfillment Order mehr existiert, wird kein zweites
-  // Fulfillment erzeugt.
+  // orders/paid bedeutet nur:
+  // - Zahlung bestätigt
+  // - Versanddokumente vorbereitet
+  // - Printjobs angelegt
   //
-  // Ein Shopify-Sync-Fehler darf die bereits erfolgreich
-  // erzeugten Versanddokumente nicht zerstören.
+  // Shopify Fulfillment + Swiss Post Tracking werden erst
+  // nach dem operativen Packprozess bei READY_TO_SHIP
+  // serverseitig ausgelöst.
   // ----------------------------------------------------------
 
-  let trackingSync:
-    | {
-        ok: true;
-        result: any;
-      }
-    | {
-        ok: false;
-        error: string;
-      };
-
-  try {
-    const fulfillmentResult =
-      await fulfillShopifyOrderWithSwissPostTracking(
-        order
-      );
-
-    trackingSync = {
-      ok: true,
-      result: fulfillmentResult,
-    };
-
-    console.log(
-      `Shopify Tracking synchronisiert: ${order.name}`,
-      {
-        identCode:
-          storedLabel.swisspost_ident_code,
-        alreadyFulfilled:
-          fulfillmentResult.alreadyFulfilled,
-      }
-    );
-  } catch (error: any) {
-    const message =
-      error?.message ??
-      "Shopify Tracking konnte nicht synchronisiert werden.";
-
-    trackingSync = {
-      ok: false,
-      error: message,
-    };
-
-    console.error(
-      `Shopify Tracking Sync fehlgeschlagen: ${order.name}`,
-      message
-    );
-  }
+  const trackingSync = {
+    ok: false as const,
+    pending: true as const,
+    reason: "WAITING_FOR_READY_TO_SHIP",
+  };
 
 
   // ----------------------------------------------------------

@@ -671,6 +671,180 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
+  // ORDER PACK ITEMS
+  //
+  // Persistenter Packfortschritt pro Shopify Line Item.
+  // Die Shopify Line-Item-ID ist die technische Identität.
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_pack_items (
+      shopify_order_id TEXT NOT NULL,
+      shopify_line_item_id TEXT NOT NULL,
+
+      title TEXT NOT NULL,
+      variant_title TEXT,
+      sku TEXT,
+
+      expected_quantity INTEGER
+        NOT NULL
+        CHECK (expected_quantity >= 0),
+
+      packed_quantity INTEGER
+        NOT NULL
+        DEFAULT 0
+        CHECK (packed_quantity >= 0),
+
+      unavailable_quantity INTEGER
+        NOT NULL
+        DEFAULT 0
+        CHECK (unavailable_quantity >= 0),
+
+      unavailable_reason TEXT,
+
+      unavailable_by_staff_user_id TEXT,
+
+      unavailable_at TIMESTAMPTZ,
+
+      shopify_inventory_item_id TEXT,
+
+      inventory_zero_sync_status TEXT
+        CHECK (
+          inventory_zero_sync_status IS NULL
+          OR inventory_zero_sync_status IN (
+            'PENDING',
+            'SYNCED',
+            'FAILED'
+          )
+        ),
+
+      inventory_zero_synced_at TIMESTAMPTZ,
+
+      inventory_zero_error TEXT,
+
+      last_packed_by_staff_user_id TEXT,
+      last_packed_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+
+      PRIMARY KEY (
+        shopify_order_id,
+        shopify_line_item_id
+      ),
+
+      CHECK (
+        packed_quantity <= expected_quantity
+      )
+    );
+  `);
+
+  await db.query(`
+    ALTER TABLE order_pack_items
+      ADD COLUMN IF NOT EXISTS unavailable_quantity INTEGER
+        NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS unavailable_reason TEXT,
+      ADD COLUMN IF NOT EXISTS unavailable_by_staff_user_id TEXT,
+      ADD COLUMN IF NOT EXISTS unavailable_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS shopify_inventory_item_id TEXT,
+      ADD COLUMN IF NOT EXISTS inventory_zero_sync_status TEXT,
+      ADD COLUMN IF NOT EXISTS inventory_zero_synced_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS inventory_zero_error TEXT;
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_pack_items_order_idx
+    ON order_pack_items (
+      shopify_order_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_pack_items_incomplete_idx
+    ON order_pack_items (
+      shopify_order_id,
+      packed_quantity,
+      expected_quantity
+    );
+  `);
+
+
+  // ==========================================================
+  // ORDER FULFILLMENT WORKFLOW
+  //
+  // Operativer Packstatus fuer ALO STAFF.
+  // Bewusst getrennt vom technischen dashboard_status.
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_fulfillment_workflow (
+      shopify_order_id TEXT PRIMARY KEY,
+
+      pack_status TEXT
+        NOT NULL
+        DEFAULT 'NEW'
+        CHECK (
+          pack_status IN (
+            'NEW',
+            'PACKING',
+            'PACKED',
+            'READY_TO_SHIP',
+            'COMPLETED'
+          )
+        ),
+
+      claimed_by_staff_user_id TEXT,
+      claimed_at TIMESTAMPTZ,
+
+      packing_started_at TIMESTAMPTZ,
+      packed_at TIMESTAMPTZ,
+      ready_to_ship_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+
+      version INTEGER NOT NULL DEFAULT 1,
+
+      created_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_fulfillment_workflow_status_idx
+    ON order_fulfillment_workflow (
+      pack_status
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_fulfillment_workflow_claimed_by_idx
+    ON order_fulfillment_workflow (
+      claimed_by_staff_user_id
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      order_fulfillment_workflow_updated_idx
+    ON order_fulfillment_workflow (
+      updated_at DESC
+    );
+  `);
+
+  // ==========================================================
   // SHOPIFY WEBHOOK EVENTS
   // ==========================================================
 

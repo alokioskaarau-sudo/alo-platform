@@ -108,8 +108,8 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
       ?.nodes ?? [];
 
 
-  const openFulfillmentOrder =
-    fulfillmentOrders.find(
+  const openFulfillmentOrders =
+    fulfillmentOrders.filter(
       (fulfillmentOrder: any) =>
         fulfillmentOrder.status === "OPEN"
     );
@@ -117,11 +117,15 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
 
   // ==========================================================
   // 4. Keine offene Fulfillment Order mehr
+  //
+  // Hier NICHT behaupten, dass die Bestellung fulfilled ist.
+  // Der aufrufende READY_TO_SHIP-Flow lädt Shopify danach
+  // erneut und prüft displayFulfillmentStatus === FULFILLED.
   // ==========================================================
 
-  if (!openFulfillmentOrder) {
+  if (openFulfillmentOrders.length === 0) {
     return {
-      alreadyFulfilled: true,
+      alreadyFulfilled: false,
 
       orderName:
         order.name,
@@ -129,32 +133,52 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
       swissPostIdentCode:
         label.swisspost_ident_code,
 
-      fulfillmentOrderId:
-        null,
+      fulfillmentOrderIds:
+        [],
 
-      fulfillment:
-        null,
+      fulfillments:
+        [],
 
       message:
-        "Keine offene Fulfillment Order vorhanden. Bestellung scheint bereits erfüllt zu sein.",
+        "Keine offene Shopify Fulfillment Order vorhanden. Finaler Shopify Order-Status wird separat verifiziert.",
     };
   }
 
 
   // ==========================================================
-  // 5. Shopify Fulfillment erstellen
+  // 5. Alle offenen Shopify Fulfillment Orders erfüllen
+  //
+  // Relevant für Split-Fulfillments:
+  // Eine Bestellung kann mehrere Fulfillment Orders besitzen.
   // ==========================================================
 
-  const fulfillment =
-    await createShopifyFulfillment({
+  const fulfillments: Array<{
+    fulfillmentOrderId: string;
+    fulfillment: any;
+  }> = [];
+
+  for (
+    const openFulfillmentOrder
+    of openFulfillmentOrders
+  ) {
+    const fulfillment =
+      await createShopifyFulfillment({
+        fulfillmentOrderId:
+          openFulfillmentOrder.id,
+
+        trackingNumber:
+          label.swisspost_ident_code,
+
+        notifyCustomer: false,
+      });
+
+    fulfillments.push({
       fulfillmentOrderId:
         openFulfillmentOrder.id,
 
-      trackingNumber:
-        label.swisspost_ident_code,
-
-      notifyCustomer: false,
+      fulfillment,
     });
+  }
 
 
   return {
@@ -163,12 +187,16 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
     orderName:
       order.name,
 
-    fulfillmentOrderId:
-      openFulfillmentOrder.id,
+    fulfillmentOrderIds:
+      openFulfillmentOrders.map(
+        (fulfillmentOrder: any) =>
+          fulfillmentOrder.id
+      ),
 
     swissPostIdentCode:
       label.swisspost_ident_code,
 
-    fulfillment,
+    fulfillments,
   };
+
 }
