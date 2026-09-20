@@ -28,6 +28,10 @@ import {
   createInvoiceForOrder,
 } from "../invoices/invoice.service.js";
 
+import {
+  fulfillShopifyOrderWithSwissPostTracking,
+} from "./fulfillment.service.js";
+
 
 // ============================================================
 // PICKUP ERKENNEN
@@ -422,6 +426,66 @@ export async function processPaidShopifyOrder(
 
 
   // ----------------------------------------------------------
+  // 7. SHOPIFY FULFILLMENT + SWISS POST TRACKING
+  //
+  // Label existiert zu diesem Zeitpunkt bereits sicher.
+  // Die Fulfillment-Funktion ist idempotent:
+  // Wenn Shopify bereits erfüllt ist bzw. keine offene
+  // Fulfillment Order mehr existiert, wird kein zweites
+  // Fulfillment erzeugt.
+  //
+  // Ein Shopify-Sync-Fehler darf die bereits erfolgreich
+  // erzeugten Versanddokumente nicht zerstören.
+  // ----------------------------------------------------------
+
+  let trackingSync:
+    | {
+        ok: true;
+        result: any;
+      }
+    | {
+        ok: false;
+        error: string;
+      };
+
+  try {
+    const fulfillmentResult =
+      await fulfillShopifyOrderWithSwissPostTracking(
+        order
+      );
+
+    trackingSync = {
+      ok: true,
+      result: fulfillmentResult,
+    };
+
+    console.log(
+      `Shopify Tracking synchronisiert: ${order.name}`,
+      {
+        identCode:
+          storedLabel.swisspost_ident_code,
+        alreadyFulfilled:
+          fulfillmentResult.alreadyFulfilled,
+      }
+    );
+  } catch (error: any) {
+    const message =
+      error?.message ??
+      "Shopify Tracking konnte nicht synchronisiert werden.";
+
+    trackingSync = {
+      ok: false,
+      error: message,
+    };
+
+    console.error(
+      `Shopify Tracking Sync fehlgeschlagen: ${order.name}`,
+      message
+    );
+  }
+
+
+  // ----------------------------------------------------------
   // LOG
   // ----------------------------------------------------------
 
@@ -520,6 +584,8 @@ export async function processPaidShopifyOrder(
         invoice.reused,
     },
 
+
+    trackingSync,
 
     printJobs: {
 
