@@ -175,6 +175,7 @@ export async function claimAloNowDelivery(
           | "ONLINE";
         approved_for_age_restricted: boolean;
         max_active_deliveries: number;
+        home_workspace: AloNowWorkspace;
       }>(
         `
           SELECT
@@ -182,7 +183,8 @@ export async function claimAloNowDelivery(
             approved,
             availability_status,
             approved_for_age_restricted,
-            max_active_deliveries
+            max_active_deliveries,
+            home_workspace
           FROM alo_driver_profiles
           WHERE staff_user_id = $1
           FOR UPDATE
@@ -268,6 +270,12 @@ export async function claimAloNowDelivery(
       (
         delivery.requires_age_check &&
         !driver.approved_for_age_restricted
+      ) ||
+      (
+        driver &&
+        driver.home_workspace !== "ONLINE" &&
+        delivery.fulfillment_workspace !==
+          driver.home_workspace
       )
     ) {
       await client.query("ROLLBACK");
@@ -989,4 +997,127 @@ export async function markAloNowReadyForPickup(
   } finally {
     client.release();
   }
+}
+
+export async function listAvailableAloNowDeliveriesForDriver(
+  staffUserId: string
+): Promise<AloNowDelivery[]> {
+  const result =
+    await db.query<AloNowDelivery>(
+      `
+        SELECT
+          delivery.id,
+          delivery.shopify_order_id,
+          delivery.shopify_order_name,
+          delivery.fulfillment_workspace,
+          delivery.delivery_status,
+          delivery.assigned_driver_user_id,
+          delivery.requires_age_check,
+          delivery.temperature_class,
+          delivery.service_priority,
+          delivery.promised_delivery_at,
+          delivery.estimated_delivery_at,
+          delivery.assigned_at,
+          delivery.ready_for_pickup_at,
+          delivery.picked_up_at,
+          delivery.on_the_way_at,
+          delivery.delivered_at,
+          delivery.cancelled_at,
+          delivery.version,
+          delivery.created_at,
+          delivery.updated_at
+        FROM alo_now_deliveries delivery
+        INNER JOIN alo_driver_profiles driver
+          ON driver.staff_user_id = $1
+        WHERE
+          driver.approved = TRUE
+          AND driver.availability_status = 'ONLINE'
+          AND delivery.delivery_status =
+            'WAITING_FOR_DRIVER'
+          AND delivery.assigned_driver_user_id IS NULL
+          AND (
+            driver.home_workspace = 'ONLINE'
+            OR delivery.fulfillment_workspace =
+              driver.home_workspace
+          )
+          AND (
+            delivery.requires_age_check = FALSE
+            OR driver.approved_for_age_restricted = TRUE
+          )
+          AND (
+            SELECT COUNT(*)::INTEGER
+            FROM alo_now_deliveries active_delivery
+            WHERE
+              active_delivery.assigned_driver_user_id =
+                driver.staff_user_id
+              AND active_delivery.delivery_status IN (
+                'DRIVER_ASSIGNED',
+                'READY_FOR_PICKUP',
+                'PICKED_UP',
+                'ON_THE_WAY'
+              )
+          ) < driver.max_active_deliveries
+        ORDER BY
+          delivery.service_priority DESC,
+          delivery.promised_delivery_at ASC NULLS LAST,
+          delivery.created_at ASC
+      `,
+      [staffUserId]
+    );
+
+  return result.rows;
+}
+
+export async function listActiveAloNowDeliveriesForDriver(
+  staffUserId: string
+): Promise<AloNowDelivery[]> {
+  const result =
+    await db.query<AloNowDelivery>(
+      `
+        SELECT
+          id,
+          shopify_order_id,
+          shopify_order_name,
+          fulfillment_workspace,
+          delivery_status,
+          assigned_driver_user_id,
+          requires_age_check,
+          temperature_class,
+          service_priority,
+          promised_delivery_at,
+          estimated_delivery_at,
+          assigned_at,
+          ready_for_pickup_at,
+          picked_up_at,
+          on_the_way_at,
+          delivered_at,
+          cancelled_at,
+          version,
+          created_at,
+          updated_at
+        FROM alo_now_deliveries
+        WHERE
+          assigned_driver_user_id = $1
+          AND delivery_status IN (
+            'DRIVER_ASSIGNED',
+            'READY_FOR_PICKUP',
+            'PICKED_UP',
+            'ON_THE_WAY'
+          )
+        ORDER BY
+          CASE delivery_status
+            WHEN 'ON_THE_WAY' THEN 1
+            WHEN 'PICKED_UP' THEN 2
+            WHEN 'READY_FOR_PICKUP' THEN 3
+            WHEN 'DRIVER_ASSIGNED' THEN 4
+            ELSE 5
+          END,
+          promised_delivery_at ASC NULLS LAST,
+          assigned_at ASC NULLS LAST,
+          created_at ASC
+      `,
+      [staffUserId]
+    );
+
+  return result.rows;
 }

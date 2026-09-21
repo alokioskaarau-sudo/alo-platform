@@ -12,6 +12,8 @@ import {
   setAloDriverAvailability,
 } from "../database/aloNowDrivers.js";
 import {
+  listActiveAloNowDeliveriesForDriver,
+  listAvailableAloNowDeliveriesForDriver,
   setAloNowDriverDeliveryStatus,
 } from "../database/aloNowDeliveries.js";
 
@@ -172,6 +174,72 @@ aloNowRouter.patch(
         ok: false,
         error:
           "ALO_DRIVER_AVAILABILITY_FAILED",
+      });
+    }
+  }
+);
+
+aloNowRouter.get(
+  "/deliveries/available",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const staffUser =
+        getStaffUser(res);
+
+      const deliveries =
+        await listAvailableAloNowDeliveriesForDriver(
+          staffUser.id
+        );
+
+      return res.json({
+        ok: true,
+        deliveries,
+        count: deliveries.length,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW AVAILABLE DELIVERIES ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "ALO_NOW_AVAILABLE_DELIVERIES_FAILED",
+      });
+    }
+  }
+);
+
+aloNowRouter.get(
+  "/deliveries/mine",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const staffUser =
+        getStaffUser(res);
+
+      const deliveries =
+        await listActiveAloNowDeliveriesForDriver(
+          staffUser.id
+        );
+
+      return res.json({
+        ok: true,
+        deliveries,
+        count: deliveries.length,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW MY DELIVERIES ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "ALO_NOW_MY_DELIVERIES_FAILED",
       });
     }
   }
