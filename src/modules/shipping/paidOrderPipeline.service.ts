@@ -35,71 +35,15 @@ import {
 import {
   sendNewOrderStaffPush,
 } from "../staff/staffPush.service.js";
+import {
+  ensureAloNowDelivery,
+} from "../../database/aloNowDeliveries.js";
+import {
+  getOrderFulfillmentType,
+} from "../orders/orderFulfillmentType.js";
 
 // ============================================================
 // PICKUP ERKENNEN
-// ============================================================
-
-function isPickupOrder(
-  order: any
-): boolean {
-
-  const fulfillmentOrders =
-    order
-      ?.fulfillmentOrders
-      ?.edges
-      ?.map(
-        (edge: any) =>
-          edge?.node
-      )
-      ?.filter(Boolean) ??
-    [];
-
-  if (
-    fulfillmentOrders.length ===
-    0
-  ) {
-    return false;
-  }
-
-  return fulfillmentOrders.some(
-    (fulfillmentOrder: any) => {
-
-      const methodType =
-        String(
-          fulfillmentOrder
-            ?.deliveryMethod
-            ?.methodType ??
-          ""
-        ).toUpperCase();
-
-      const presentedName =
-        String(
-          fulfillmentOrder
-            ?.deliveryMethod
-            ?.presentedName ??
-          ""
-        ).toLowerCase();
-
-      return (
-        methodType ===
-          "PICK_UP" ||
-        methodType ===
-          "PICKUP" ||
-        presentedName.includes(
-          "abholung"
-        ) ||
-        presentedName.includes(
-          "pickup"
-        )
-      );
-    }
-  );
-}
-
-
-// ============================================================
-// PAID ORDER PIPELINE
 // ============================================================
 
 export async function processPaidShopifyOrder(
@@ -172,20 +116,193 @@ export async function processPaidShopifyOrder(
   // VERSANDART
   // ----------------------------------------------------------
 
-  const pickup =
-    isPickupOrder(
+  const fulfillmentType =
+    getOrderFulfillmentType(
       order
     );
+
+  const pickup =
+    fulfillmentType === "PICKUP";
 
   console.log(
     `Bestellung ${order.name}:`,
     {
-      fulfillmentType:
-        pickup
-          ? "PICKUP"
-          : "SHIPPING",
+      fulfillmentType,
     }
   );
+
+  if (
+    fulfillmentType === "ALO_NOW"
+  ) {
+    console.log(
+      `ALO NOW Bestellung erkannt: ${order.name}`
+    );
+
+    const packingSlip =
+      await createPackingSlipForOrder(
+        order
+      );
+
+    if (
+      !packingSlip?.id ||
+      !packingSlip?.pdfBase64
+    ) {
+      throw new Error(
+        `ALO NOW Lieferschein für ${order.name} wurde nicht vollständig erstellt.`
+      );
+    }
+
+    const packingSlipPrintJob =
+      await createPackingSlipPrintJob(
+        packingSlip.id,
+        "HP7C4D8F71B318(HP Color Laser MFP 178 179)"
+      );
+
+    const invoice =
+      await createInvoiceForOrder(
+        order
+      );
+
+    if (
+      !invoice?.id ||
+      !invoice?.pdfBase64
+    ) {
+      throw new Error(
+        `ALO NOW Rechnung für ${order.name} wurde nicht vollständig erstellt.`
+      );
+    }
+
+    const invoicePrintJob =
+      await createInvoicePrintJob(
+        invoice.id,
+        "HP7C4D8F71B318(HP Color Laser MFP 178 179)"
+      );
+
+    const workflow =
+      await ensureOrderFulfillmentWorkflow(
+        order.id
+      );
+
+    const delivery =
+      await ensureAloNowDelivery(
+        order.id,
+        order.name,
+        "AARAU",
+        false
+      );
+
+    try {
+      const pushResult =
+        await sendNewOrderStaffPush({
+          orderId: order.id,
+          orderName: order.name,
+          totalAmount:
+            order?.currentTotalPriceSet
+              ?.shopMoney
+              ?.amount ??
+            order?.totalPriceSet
+              ?.shopMoney
+              ?.amount ??
+            null,
+          currency:
+            order?.currentTotalPriceSet
+              ?.shopMoney
+              ?.currencyCode ??
+            order?.totalPriceSet
+              ?.shopMoney
+              ?.currencyCode ??
+            null,
+        });
+
+      console.log(
+        `ALO NOW Staff Push: ${order.name}`,
+        pushResult
+      );
+    } catch (error) {
+      console.error(
+        `ALO NOW Staff Push fehlgeschlagen: ${order.name}`,
+        error
+      );
+    }
+
+    console.log(
+      `ALO NOW Pipeline bereit: ${order.name}`,
+      {
+        deliveryId:
+          delivery.id,
+        deliveryStatus:
+          delivery.delivery_status,
+        workspace:
+          delivery.fulfillment_workspace,
+        workflowStatus:
+          workflow.pack_status,
+        packingSlipId:
+          packingSlip.id,
+        invoiceId:
+          invoice.id,
+      }
+    );
+
+    return {
+      skipped: false,
+      orderId:
+        order.id,
+      orderName:
+        order.name,
+      fulfillmentType:
+        "ALO_NOW",
+      delivery: {
+        id:
+          delivery.id,
+        status:
+          delivery.delivery_status,
+        workspace:
+          delivery.fulfillment_workspace,
+        requiresAgeCheck:
+          delivery.requires_age_check,
+      },
+      packingSlip: {
+        id:
+          packingSlip.id,
+        reused:
+          packingSlip.reused,
+      },
+      invoice: {
+        id:
+          invoice.id,
+        invoiceNumber:
+          invoice.invoiceNumber,
+        reused:
+          invoice.reused,
+      },
+      workflow: {
+        status:
+          workflow.pack_status,
+      },
+      printJobs: {
+        packingSlip: {
+          created:
+            packingSlipPrintJob.created,
+          id:
+            packingSlipPrintJob.job?.id ??
+            null,
+          status:
+            packingSlipPrintJob.job?.status ??
+            null,
+        },
+        invoice: {
+          created:
+            invoicePrintJob.created,
+          id:
+            invoicePrintJob.job?.id ??
+            null,
+          status:
+            invoicePrintJob.job?.status ??
+            null,
+        },
+      },
+    };
+  }
 
 
   // ==========================================================

@@ -36,6 +36,13 @@ import {
   getOrderFulfillmentWorkflow,
   type OrderPackStatus,
 } from "../database/orderFulfillmentWorkflow.js";
+import {
+  getAloNowDelivery,
+  markAloNowReadyForPickup,
+} from "../database/aloNowDeliveries.js";
+import {
+  getOrderFulfillmentType,
+} from "../modules/orders/orderFulfillmentType.js";
 
 const router = Router();
 
@@ -1301,23 +1308,152 @@ router.patch(
       // ------------------------------------------------------
 
       if (status === "PACKED") {
-        const packedWorkflow =
-          await setOrderPackStatus(
-            orderId,
-            staffUser.id,
-            "PACKED"
-          );
+        let packedWorkflow =
+          workflow;
 
-        if (!packedWorkflow) {
+        if (
+          workflow.pack_status !==
+          "PACKED"
+        ) {
+          const transitionedWorkflow =
+            await setOrderPackStatus(
+              orderId,
+              staffUser.id,
+              "PACKED"
+            );
+
+          if (!transitionedWorkflow) {
+            return res.status(409).json({
+              ok: false,
+              error:
+                "ORDER_STATUS_CHANGE_NOT_ALLOWED",
+            });
+          }
+
+          packedWorkflow =
+            transitionedWorkflow;
+        } else if (
+          workflow.claimed_by_staff_user_id !==
+          staffUser.id
+        ) {
           return res.status(409).json({
             ok: false,
             error:
-              "ORDER_STATUS_CHANGE_NOT_ALLOWED",
+              "ORDER_NOT_CLAIMED_BY_STAFF",
+          });
+        }
+
+        const shopifyOrder =
+          await getShopifyOrderById(
+            orderId
+          );
+
+        if (!shopifyOrder) {
+          return res.status(502).json({
+            ok: false,
+            error:
+              "SHOPIFY_ORDER_NOT_FOUND",
+            workflow:
+              packedWorkflow,
+            retryable: true,
+          });
+        }
+
+        const fulfillmentType =
+          getOrderFulfillmentType(
+            shopifyOrder
+          );
+
+        if (
+          fulfillmentType === "ALO_NOW"
+        ) {
+          const delivery =
+            await getAloNowDelivery(
+              orderId
+            );
+
+          if (!delivery) {
+            return res.status(409).json({
+              ok: false,
+              error:
+                "ALO_NOW_DELIVERY_NOT_FOUND",
+              workflow:
+                packedWorkflow,
+              retryable: true,
+            });
+          }
+
+          if (
+            delivery.delivery_status ===
+              "DRIVER_ASSIGNED" ||
+            delivery.delivery_status ===
+              "READY_FOR_PICKUP" ||
+            delivery.delivery_status ===
+              "PICKED_UP" ||
+            delivery.delivery_status ===
+              "ON_THE_WAY" ||
+            delivery.delivery_status ===
+              "DELIVERED"
+          ) {
+            const readyResult =
+              await markAloNowReadyForPickup(
+                orderId
+              );
+
+            if (!readyResult.ok) {
+              return res.status(409).json({
+                ok: false,
+                error:
+                  "ALO_NOW_READY_FOR_PICKUP_FAILED",
+                reason:
+                  readyResult.reason,
+                workflow:
+                  packedWorkflow,
+                delivery:
+                  readyResult.delivery,
+                retryable: true,
+              });
+            }
+
+            return res.json({
+              ok: true,
+              fulfillmentType:
+                "ALO_NOW",
+              workflow:
+                packedWorkflow,
+              delivery:
+                readyResult.delivery,
+            });
+          }
+
+          if (
+            delivery.delivery_status ===
+            "WAITING_FOR_DRIVER"
+          ) {
+            return res.json({
+              ok: true,
+              fulfillmentType:
+                "ALO_NOW",
+              workflow:
+                packedWorkflow,
+              delivery,
+            });
+          }
+
+          return res.status(409).json({
+            ok: false,
+            error:
+              "ALO_NOW_INVALID_DELIVERY_STATUS",
+            workflow:
+              packedWorkflow,
+            delivery,
+            retryable: true,
           });
         }
 
         return res.json({
           ok: true,
+          fulfillmentType,
           workflow:
             packedWorkflow,
         });
@@ -1335,6 +1471,41 @@ router.patch(
       // direkt der idempotente Shopify-Fulfillment-Schritt
       // erneut versucht.
       // ------------------------------------------------------
+
+      const readyToShipShopifyOrder =
+        await getShopifyOrderById(
+          orderId
+        );
+
+      if (!readyToShipShopifyOrder) {
+        return res.status(502).json({
+          ok: false,
+          error:
+            "SHOPIFY_ORDER_NOT_FOUND",
+          workflow,
+          retryable: true,
+        });
+      }
+
+      const readyToShipFulfillmentType =
+        getOrderFulfillmentType(
+          readyToShipShopifyOrder
+        );
+
+      if (
+        readyToShipFulfillmentType ===
+        "ALO_NOW"
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "ALO_NOW_READY_TO_SHIP_NOT_ALLOWED",
+          fulfillmentType:
+            "ALO_NOW",
+          workflow,
+          retryable: false,
+        });
+      }
 
       if (
         workflow.pack_status !==

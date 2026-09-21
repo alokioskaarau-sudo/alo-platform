@@ -1020,6 +1020,219 @@ export async function initializeDatabase() {
     );
   `);
 
+  // ==========================================================
+  // ALO NOW - DRIVER PROFILES
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS alo_driver_profiles (
+      staff_user_id BIGINT PRIMARY KEY
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+
+      approved BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      availability_status TEXT
+        NOT NULL
+        DEFAULT 'OFFLINE'
+        CHECK (
+          availability_status IN (
+            'OFFLINE',
+            'ONLINE'
+          )
+        ),
+
+      home_workspace TEXT
+        NOT NULL
+        DEFAULT 'ONLINE'
+        CHECK (
+          home_workspace IN (
+            'AARAU',
+            'OLTEN',
+            'ONLINE'
+          )
+        ),
+
+      transport_type TEXT
+        CHECK (
+          transport_type IS NULL OR
+          transport_type IN (
+            'CAR',
+            'SCOOTER',
+            'BIKE',
+            'OTHER'
+          )
+        ),
+
+      approved_for_age_restricted BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      max_active_deliveries INTEGER
+        NOT NULL
+        DEFAULT 3
+        CHECK (
+          max_active_deliveries >= 1
+          AND max_active_deliveries <= 10
+        ),
+
+      online_since TIMESTAMPTZ,
+      last_seen_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      alo_driver_profiles_availability_idx
+    ON alo_driver_profiles (
+      approved,
+      availability_status
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      alo_driver_profiles_workspace_idx
+    ON alo_driver_profiles (
+      home_workspace,
+      availability_status
+    );
+  `);
+
+
+  // ==========================================================
+  // ALO NOW - DELIVERIES
+  //
+  // Eigener Delivery-Workflow.
+  // Bewusst getrennt vom Pack-Workflow.
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS alo_now_deliveries (
+      id BIGSERIAL PRIMARY KEY,
+
+      shopify_order_id TEXT
+        NOT NULL
+        UNIQUE,
+
+      shopify_order_name TEXT
+        NOT NULL,
+
+      fulfillment_workspace TEXT
+        NOT NULL
+        DEFAULT 'ONLINE'
+        CHECK (
+          fulfillment_workspace IN (
+            'AARAU',
+            'OLTEN',
+            'ONLINE'
+          )
+        ),
+
+      delivery_status TEXT
+        NOT NULL
+        DEFAULT 'WAITING_FOR_DRIVER'
+        CHECK (
+          delivery_status IN (
+            'WAITING_FOR_DRIVER',
+            'DRIVER_ASSIGNED',
+            'READY_FOR_PICKUP',
+            'PICKED_UP',
+            'ON_THE_WAY',
+            'DELIVERED',
+            'CANCELLED'
+          )
+        ),
+
+      assigned_driver_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL,
+
+      requires_age_check BOOLEAN
+        NOT NULL
+        DEFAULT FALSE,
+
+      temperature_class TEXT
+        NOT NULL
+        DEFAULT 'AMBIENT'
+        CHECK (
+          temperature_class IN (
+            'AMBIENT',
+            'CHILLED',
+            'FROZEN'
+          )
+        ),
+
+      service_priority INTEGER
+        NOT NULL
+        DEFAULT 50
+        CHECK (
+          service_priority >= 0
+          AND service_priority <= 100
+        ),
+
+      promised_delivery_at TIMESTAMPTZ,
+      estimated_delivery_at TIMESTAMPTZ,
+
+      assigned_at TIMESTAMPTZ,
+      ready_for_pickup_at TIMESTAMPTZ,
+      picked_up_at TIMESTAMPTZ,
+      on_the_way_at TIMESTAMPTZ,
+      delivered_at TIMESTAMPTZ,
+      cancelled_at TIMESTAMPTZ,
+
+      version INTEGER
+        NOT NULL
+        DEFAULT 1,
+
+      created_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL
+        DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      alo_now_deliveries_status_idx
+    ON alo_now_deliveries (
+      delivery_status,
+      created_at
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      alo_now_deliveries_driver_idx
+    ON alo_now_deliveries (
+      assigned_driver_user_id,
+      delivery_status
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      alo_now_deliveries_workspace_idx
+    ON alo_now_deliveries (
+      fulfillment_workspace,
+      delivery_status
+    );
+  `);
+
+
   await db.query(`
     CREATE TABLE IF NOT EXISTS staff_sessions (
       id BIGSERIAL PRIMARY KEY,
