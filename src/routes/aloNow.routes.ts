@@ -29,8 +29,80 @@ import {
 } from "../modules/aloNow/aloNowDriverView.service.js";
 
 
+import {
+  getAloNowAvailability,
+} from "../modules/aloNow/aloNowAvailability.service.js";
+
 const aloNowRouter =
   Router();
+
+aloNowRouter.get(
+  "/availability",
+  async (req, res) => {
+    try {
+      const workspace =
+        String(req.query.workspace ?? "AARAU")
+          .trim()
+          .toUpperCase();
+
+      if (
+        workspace !== "AARAU" &&
+        workspace !== "OLTEN"
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "INVALID_ALO_NOW_WORKSPACE",
+          allowedWorkspaces: [
+            "AARAU",
+            "OLTEN",
+          ],
+        });
+      }
+
+      const requiresAgeCheckRaw =
+        String(
+          req.query.requiresAgeCheck ?? "false"
+        )
+          .trim()
+          .toLowerCase();
+
+      if (
+        requiresAgeCheckRaw !== "true" &&
+        requiresAgeCheckRaw !== "false"
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "INVALID_REQUIRES_AGE_CHECK",
+        });
+      }
+
+      const requiresAgeCheck =
+        requiresAgeCheckRaw === "true";
+
+      const availability =
+        await getAloNowAvailability(
+          workspace,
+          requiresAgeCheck
+        );
+
+      return res.json({
+        ok: true,
+        ...availability,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW AVAILABILITY ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: "ALO_NOW_AVAILABILITY_FAILED",
+      });
+    }
+  }
+);
 
 aloNowRouter.get(
   "/driver/profile",
