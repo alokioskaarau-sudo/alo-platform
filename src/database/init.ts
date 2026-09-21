@@ -1130,6 +1130,81 @@ export async function initializeDatabase() {
     );
   `);
 
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_push_tokens (
+      id BIGSERIAL PRIMARY KEY,
+      staff_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      staff_session_id BIGINT
+        REFERENCES staff_sessions(id)
+        ON DELETE SET NULL,
+      expo_push_token TEXT NOT NULL UNIQUE,
+      platform TEXT NOT NULL,
+      device_name TEXT,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      last_registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      disabled_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT staff_push_tokens_platform_check
+        CHECK (
+          platform IN (
+            'ios',
+            'android'
+          )
+        )
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_push_tokens_active_idx
+    ON staff_push_tokens (
+      active
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_push_tokens_user_idx
+    ON staff_push_tokens (
+      staff_user_id,
+      active
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_push_events (
+      id BIGSERIAL PRIMARY KEY,
+      event_key TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL,
+      shopify_order_id TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      sent_at TIMESTAMPTZ,
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT staff_push_events_status_check
+        CHECK (
+          status IN (
+            'PENDING',
+            'SENT',
+            'FAILED'
+          )
+        )
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_push_events_order_idx
+    ON staff_push_events (
+      shopify_order_id,
+      created_at DESC
+    );
+  `);
+
   // ==========================================================
   // ALO PRODUCT MASTER
   // ==========================================================

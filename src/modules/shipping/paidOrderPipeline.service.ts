@@ -28,6 +28,14 @@ import {
   createInvoiceForOrder,
 } from "../invoices/invoice.service.js";
 
+import {
+  ensureOrderFulfillmentWorkflow,
+} from "../../database/orderFulfillmentWorkflow.js";
+
+import {
+  sendNewOrderStaffPush,
+} from "../staff/staffPush.service.js";
+
 // ============================================================
 // PICKUP ERKENNEN
 // ============================================================
@@ -433,11 +441,50 @@ export async function processPaidShopifyOrder(
   // serverseitig ausgelöst.
   // ----------------------------------------------------------
 
+  const workflow =
+    await ensureOrderFulfillmentWorkflow(
+      order.id
+    );
+
   const trackingSync = {
     ok: false as const,
     pending: true as const,
     reason: "WAITING_FOR_READY_TO_SHIP",
   };
+
+  try {
+    const pushResult =
+      await sendNewOrderStaffPush({
+        orderId: order.id,
+        orderName: order.name,
+        totalAmount:
+          order?.currentTotalPriceSet
+            ?.shopMoney
+            ?.amount ??
+          order?.totalPriceSet
+            ?.shopMoney
+            ?.amount ??
+          null,
+        currency:
+          order?.currentTotalPriceSet
+            ?.shopMoney
+            ?.currencyCode ??
+          order?.totalPriceSet
+            ?.shopMoney
+            ?.currencyCode ??
+          null,
+      });
+
+    console.log(
+      `ALO STAFF Push: ${order.name}`,
+      pushResult
+    );
+  } catch (error) {
+    console.error(
+      `ALO STAFF Push fehlgeschlagen: ${order.name}`,
+      error
+    );
+  }
 
 
   // ----------------------------------------------------------
@@ -477,6 +524,8 @@ export async function processPaidShopifyOrder(
 
       invoicePrintJobCreated:
         invoicePrintJob.created,
+      workflowStatus:
+        workflow.pack_status,
     }
   );
 

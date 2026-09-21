@@ -2055,3 +2055,146 @@ export async function restoreArchivedOrder(
     false
   );
 }
+
+
+// ==========================================================
+// STAFF INVOICE CENTER
+//
+// Rein lesender Rechnungsindex + Sammel-PDF.
+// Vorhandene Rechnungen werden NICHT neu erzeugt.
+// ==========================================================
+
+export type StaffInvoiceArchiveRecord = {
+  id: string;
+  invoice_number: string;
+  shopify_order_id: string;
+  shopify_order_name: string;
+  order_created_at: Date | null;
+  currency: string;
+  subtotal_amount: string | null;
+  discount_amount: string | null;
+  shipping_amount: string | null;
+  tax_amount: string | null;
+  total_amount: string | null;
+  status: string;
+  print_status: string;
+  print_count: number;
+  printed_at: Date | null;
+  created_at: Date;
+};
+
+
+export async function getStaffInvoicesByPeriod(
+  from: Date,
+  toExclusive: Date
+): Promise<StaffInvoiceArchiveRecord[]> {
+  const result =
+    await db.query<StaffInvoiceArchiveRecord>(
+      `
+        SELECT
+          id,
+          invoice_number,
+          shopify_order_id,
+          shopify_order_name,
+          order_created_at,
+          currency,
+          subtotal_amount,
+          discount_amount,
+          shipping_amount,
+          tax_amount,
+          total_amount,
+          status,
+          print_status,
+          print_count,
+          printed_at,
+          created_at
+        FROM invoices
+        WHERE
+          status = 'COMPLETED'
+          AND pdf_base64 IS NOT NULL
+          AND COALESCE(
+            order_created_at,
+            created_at
+          ) >= $1
+          AND COALESCE(
+            order_created_at,
+            created_at
+          ) < $2
+        ORDER BY
+          COALESCE(
+            order_created_at,
+            created_at
+          ) ASC,
+          id ASC
+      `,
+      [from, toExclusive]
+    );
+
+  return result.rows;
+}
+
+
+export async function getStaffInvoicesByIds(
+  invoiceIds: string[]
+): Promise<
+  Array<
+    StaffInvoiceArchiveRecord & {
+      pdf_base64: string;
+    }
+  >
+> {
+  const ids =
+    Array.from(
+      new Set(
+        invoiceIds
+          .map((id) => String(id).trim())
+          .filter(Boolean)
+      )
+    );
+
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const result =
+    await db.query<
+      StaffInvoiceArchiveRecord & {
+        pdf_base64: string;
+      }
+    >(
+      `
+        SELECT
+          id,
+          invoice_number,
+          shopify_order_id,
+          shopify_order_name,
+          order_created_at,
+          currency,
+          subtotal_amount,
+          discount_amount,
+          shipping_amount,
+          tax_amount,
+          total_amount,
+          status,
+          print_status,
+          print_count,
+          printed_at,
+          created_at,
+          pdf_base64
+        FROM invoices
+        WHERE
+          id = ANY($1::bigint[])
+          AND status = 'COMPLETED'
+          AND pdf_base64 IS NOT NULL
+        ORDER BY
+          COALESCE(
+            order_created_at,
+            created_at
+          ) ASC,
+          id ASC
+      `,
+      [ids]
+    );
+
+  return result.rows;
+}

@@ -22,6 +22,8 @@ const ORDER_FIELDS = `
   createdAt
   displayFinancialStatus
   displayFulfillmentStatus
+  cancelledAt
+  closedAt
   email
 
   subtotalPriceSet {
@@ -95,6 +97,13 @@ const ORDER_FIELDS = `
         id
         status
 
+        lineItems(first: 100) {
+          nodes {
+            totalQuantity
+            remainingQuantity
+          }
+        }
+
         deliveryMethod {
           methodType
           presentedName
@@ -147,6 +156,10 @@ const ORDER_FIELDS = `
           product {
             id
             title
+            featuredImage {
+              url
+              altText
+            }
           }
           inventoryItem {
             id
@@ -264,6 +277,137 @@ export async function getLatestShopifyOrders(
     (edge: any) =>
       edge.node
   );
+}
+
+
+
+// ============================================================
+// SHOPIFY BESTELLUNGEN NACH IDS
+//
+// Staff-Bestellmanager:
+// Lädt den aktuellen Shopify-Status mehrerer bereits bekannter
+// Orders in EINEM GraphQL-Request.
+//
+// Bewusst schlanke Felder:
+// Die Listenansicht braucht keine Adressen, Positionen oder
+// Fulfillment-Details. Dadurch bleibt der Sync schnell.
+// ============================================================
+
+export type ShopifyOrderStatusSnapshot = {
+  id: string;
+  name: string;
+  createdAt: string;
+  displayFinancialStatus: string;
+  displayFulfillmentStatus: string;
+  cancelledAt: string | null;
+  closedAt: string | null;
+  fulfillmentOrders: {
+    nodes: Array<{
+      id: string;
+      status: string;
+      lineItems: {
+        nodes: Array<{
+          totalQuantity: number;
+          remainingQuantity: number;
+        }>;
+      };
+    }>;
+  };
+};
+
+export async function getShopifyOrdersByIds(
+  orderIds: string[]
+): Promise<ShopifyOrderStatusSnapshot[]> {
+
+  const ids = [
+    ...new Set(
+      orderIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+        .map((id) =>
+          id.startsWith("gid://shopify/Order/")
+            ? id
+            : `gid://shopify/Order/${id}`
+        )
+    ),
+  ];
+
+  if (ids.length === 0) {
+    return [];
+  }
+
+  /*
+   * Shopify GraphQL unterstützt nodes(ids: ...).
+   *
+   * Wir teilen bewusst in kleine Batches auf:
+   * - robuste Request-Größe
+   * - kein N+1 pro Bestellung
+   * - Staff-Liste kann trotzdem hunderte Orders enthalten
+   */
+  const BATCH_SIZE = 50;
+
+  const orders: ShopifyOrderStatusSnapshot[] = [];
+
+  for (
+    let offset = 0;
+    offset < ids.length;
+    offset += BATCH_SIZE
+  ) {
+    const batch = ids.slice(
+      offset,
+      offset + BATCH_SIZE
+    );
+
+    const query = `
+      query GetOrdersByIds(
+        $ids: [ID!]!
+      ) {
+        nodes(ids: $ids) {
+          ... on Order {
+            id
+            name
+            createdAt
+            displayFinancialStatus
+            displayFulfillmentStatus
+            cancelledAt
+            closedAt
+            fulfillmentOrders(first: 50) {
+              nodes {
+                id
+                status
+                lineItems(first: 100) {
+                  nodes {
+                    totalQuantity
+                    remainingQuantity
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const data =
+      await shopifyGraphQL(
+        query,
+        {
+          ids: batch,
+        }
+      );
+
+    for (const node of data?.nodes ?? []) {
+      if (!node?.id) {
+        continue;
+      }
+
+      orders.push(
+        node as ShopifyOrderStatusSnapshot
+      );
+    }
+  }
+
+  return orders;
 }
 
 

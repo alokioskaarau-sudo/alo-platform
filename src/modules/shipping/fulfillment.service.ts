@@ -108,10 +108,44 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
       ?.nodes ?? [];
 
 
-  const openFulfillmentOrders =
+  const fulfillableFulfillmentOrders =
     fulfillmentOrders.filter(
-      (fulfillmentOrder: any) =>
-        fulfillmentOrder.status === "OPEN"
+      (fulfillmentOrder: any) => {
+        const status =
+          String(
+            fulfillmentOrder.status ?? ""
+          ).toUpperCase();
+
+        const remainingQuantity =
+          (
+            fulfillmentOrder
+              ?.lineItems
+              ?.nodes ?? []
+          ).reduce(
+            (
+              total: number,
+              lineItem: any
+            ) =>
+              total +
+              Math.max(
+                0,
+                Number(
+                  lineItem
+                    ?.remainingQuantity ??
+                    0
+                )
+              ),
+            0
+          );
+
+        return (
+          (
+            status === "OPEN" ||
+            status === "IN_PROGRESS"
+          ) &&
+          remainingQuantity > 0
+        );
+      }
     );
 
 
@@ -123,7 +157,7 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
   // erneut und prüft displayFulfillmentStatus === FULFILLED.
   // ==========================================================
 
-  if (openFulfillmentOrders.length === 0) {
+  if (fulfillableFulfillmentOrders.length === 0) {
     return {
       alreadyFulfilled: false,
 
@@ -159,7 +193,7 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
 
   for (
     const openFulfillmentOrder
-    of openFulfillmentOrders
+    of fulfillableFulfillmentOrders
   ) {
     const fulfillment =
       await createShopifyFulfillment({
@@ -188,7 +222,7 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
       order.name,
 
     fulfillmentOrderIds:
-      openFulfillmentOrders.map(
+      fulfillableFulfillmentOrders.map(
         (fulfillmentOrder: any) =>
           fulfillmentOrder.id
       ),

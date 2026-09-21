@@ -1,7 +1,10 @@
 import { Router } from "express";
+import { PDFDocument } from "pdf-lib";
 import { db } from "../database/db.js";
 import {
   getShopifyOrderById,
+  getShopifyOrdersByIds,
+  getLatestShopifyOrders,
 } from "../integrations/shopify/orders.js";
 
 import {
@@ -21,6 +24,9 @@ import {
 
 import {
   getOrderDashboard,
+  createManualReprintJob,
+  getStaffInvoicesByPeriod,
+  getStaffInvoicesByIds,
 } from "../database/shippingDashboard.js";
 import {
   claimOrderForPacking,
@@ -32,6 +38,45 @@ import {
 } from "../database/orderFulfillmentWorkflow.js";
 
 const router = Router();
+
+type OperationalOrderStatus =
+  | "NEW"
+  | "PACKING"
+  | "PACKED"
+  | "READY_TO_SHIP"
+  | "COMPLETED"
+  | "CANCELLED";
+
+function getOperationalOrderStatus(
+  shopify: any,
+  workflow: {
+    pack_status: OrderPackStatus;
+  } | null
+): OperationalOrderStatus {
+  if (shopify?.cancelledAt) {
+    return "CANCELLED";
+  }
+
+  const fulfillmentStatus =
+    String(
+      shopify?.displayFulfillmentStatus ?? ""
+    ).toUpperCase();
+
+  if (fulfillmentStatus === "FULFILLED") {
+    return "COMPLETED";
+  }
+
+  if (workflow?.pack_status === "COMPLETED") {
+    return "COMPLETED";
+  }
+
+  if (workflow) {
+    return workflow.pack_status;
+  }
+
+  return "NEW";
+}
+
 
 /*
  * ALO STAFF – BESTELLMANAGER
@@ -49,15 +94,63 @@ router.get(
       const staffUser =
         getStaffUser(res);
 
-      const dashboardOrders =
-        await getOrderDashboard(500);
+      const [
+        dashboardOrders,
+        latestShopifyOrders,
+      ] = await Promise.all([
+        getOrderDashboard(500),
+        getLatestShopifyOrders(50),
+      ]);
+
+      const dashboardOrderIds =
+        dashboardOrders.map(
+          (order) =>
+            String(order.shopify_order_id)
+        );
+
+      const latestShopifyOrderIds =
+        latestShopifyOrders.map(
+          (order: any) =>
+            String(order.id)
+        );
+
+      const orderIds = [
+        ...new Set([
+          ...dashboardOrderIds,
+          ...latestShopifyOrderIds,
+        ]),
+      ];
 
       const workflows =
         await getOrderFulfillmentWorkflows(
-          dashboardOrders.map(
-            (order) => order.shopify_order_id
-          )
+          orderIds
         );
+
+      const dashboardIdSet =
+        new Set(
+          dashboardOrderIds
+        );
+
+      const missingDashboardIds =
+        orderIds.filter(
+          (orderId) =>
+            !dashboardIdSet.has(orderId)
+        );
+
+      const dashboardShopifyOrders =
+        await getShopifyOrdersByIds(
+          dashboardOrderIds
+        );
+
+      const shopifyOrders = [
+        ...dashboardShopifyOrders,
+        ...latestShopifyOrders.filter(
+          (order: any) =>
+            missingDashboardIds.includes(
+              String(order.id)
+            )
+        ),
+      ];
 
       const workflowByOrderId =
         new Map(
@@ -67,14 +160,164 @@ router.get(
           ])
         );
 
+      const shopifyByOrderId =
+        new Map(
+          shopifyOrders.map((order) => [
+            String(order.id),
+            order,
+          ])
+        );
+
+      const dashboardByOrderId =
+        new Map(
+          dashboardOrders.map((order) => [
+            String(order.shopify_order_id),
+            order,
+          ])
+        );
+
+      const listOrders =
+        orderIds.map((orderId) => {
+          const dashboard =
+            dashboardByOrderId.get(
+              orderId
+            );
+
+          if (dashboard) {
+            return dashboard;
+          }
+
+          const shopify =
+            shopifyByOrderId.get(
+              orderId
+            );
+
+          return {
+            shopify_order_id:
+              orderId,
+            shopify_order_name:
+              shopify?.name ?? null,
+            order_created_at:
+              shopify?.createdAt
+                ? new Date(
+                    shopify.createdAt
+                  )
+                : null,
+            latest_created_at:
+              shopify?.createdAt
+                ? new Date(
+                    shopify.createdAt
+                  )
+                : null,
+            label_id: null,
+            label_mode: null,
+            service: null,
+            weight_grams: null,
+            tracking_number: null,
+            swisspost_ident_code: null,
+            shipment_status: null,
+            label_status: null,
+            label_print_status: null,
+            label_print_count: null,
+            label_error_message: null,
+            packing_slip_id: null,
+            packing_slip_status: null,
+            packing_slip_print_status: null,
+            packing_slip_print_count: null,
+            packing_slip_error_message: null,
+            invoice_id: null,
+            invoice_number: null,
+            currency: null,
+            total_amount: null,
+            invoice_status: null,
+            invoice_print_status: null,
+            invoice_print_count: null,
+            invoice_error_message: null,
+            is_archived: false,
+            is_test: false,
+            archived_at: null,
+            dashboard_status:
+              "CURRENT" as const,
+          };
+        });
+
       const orders =
-        dashboardOrders.map((order) => ({
-          ...order,
-          fulfillment_workflow:
+        listOrders.map((order) => {
+          const shopify =
+            shopifyByOrderId.get(
+              order.shopify_order_id
+            ) ?? null;
+
+          const workflow =
             workflowByOrderId.get(
               order.shopify_order_id
-            ) ?? null,
-        }));
+            ) ?? null;
+
+          const fulfillmentStatus =
+            String(
+              shopify?.displayFulfillmentStatus ??
+                ""
+            ).toUpperCase();
+
+          const financialStatus =
+            String(
+              shopify?.displayFinancialStatus ??
+                ""
+            ).toUpperCase();
+
+          const cancelled =
+            Boolean(
+              shopify?.cancelledAt
+            );
+
+          const operationalStatus =
+            getOperationalOrderStatus(
+              shopify,
+              workflow
+            );
+
+          return {
+            ...order,
+
+            fulfillment_workflow:
+              workflow,
+
+            operational_status:
+              operationalStatus,
+
+            shopify_status: shopify
+              ? {
+                  financial_status:
+                    financialStatus,
+
+                  fulfillment_status:
+                    fulfillmentStatus,
+
+                  cancelled,
+
+                  cancelled_at:
+                    shopify.cancelledAt,
+
+                  closed_at:
+                    shopify.closedAt,
+
+                  exists: true,
+                }
+              : {
+                  financial_status: null,
+
+                  fulfillment_status: null,
+
+                  cancelled: false,
+
+                  cancelled_at: null,
+
+                  closed_at: null,
+
+                  exists: false,
+                },
+          };
+        });
 
       const stats = {
         total:
@@ -83,14 +326,18 @@ router.get(
         current:
           orders.filter(
             (order) =>
-              order.dashboard_status ===
-              "CURRENT"
+              order.operational_status !==
+                "COMPLETED" &&
+              order.operational_status !==
+                "CANCELLED" &&
+              order.dashboard_status !==
+                "ARCHIVED"
           ).length,
 
         completed:
           orders.filter(
             (order) =>
-              order.dashboard_status ===
+              order.operational_status ===
               "COMPLETED"
           ).length,
 
@@ -160,6 +407,412 @@ router.get(
  * - kein Druckjob
  * - keine Statusänderung
  */
+
+// ==========================================================
+// STAFF INVOICE CENTER
+// ==========================================================
+
+function parseInvoiceDate(
+  value: unknown
+): Date | null {
+  const raw =
+    String(value ?? "").trim();
+
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(raw)
+  ) {
+    return null;
+  }
+
+  const date =
+    new Date(`${raw}T00:00:00.000Z`);
+
+  if (
+    Number.isNaN(date.getTime())
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+
+router.get(
+  "/invoices",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const from =
+        parseInvoiceDate(
+          req.query.from
+        );
+
+      const to =
+        parseInvoiceDate(
+          req.query.to
+        );
+
+      if (!from || !to) {
+        return res.status(400).json({
+          ok: false,
+          error: "INVALID_DATE_RANGE",
+        });
+      }
+
+      if (
+        from.getTime() >
+        to.getTime()
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "INVALID_DATE_RANGE",
+        });
+      }
+
+      const toExclusive =
+        new Date(to);
+
+      toExclusive.setUTCDate(
+        toExclusive.getUTCDate() + 1
+      );
+
+      const invoices =
+        await getStaffInvoicesByPeriod(
+          from,
+          toExclusive
+        );
+
+      const totals =
+        invoices.reduce<
+          Record<string, number>
+        >(
+          (acc, invoice) => {
+            const currency =
+              invoice.currency || "CHF";
+
+            const amount =
+              Number(
+                invoice.total_amount ??
+                  0
+              );
+
+            acc[currency] =
+              (acc[currency] ?? 0) +
+              (
+                Number.isFinite(amount)
+                  ? amount
+                  : 0
+              );
+
+            return acc;
+          },
+          {}
+        );
+
+      return res.json({
+        ok: true,
+        from:
+          String(req.query.from),
+        to:
+          String(req.query.to),
+        count: invoices.length,
+        totals,
+        invoices,
+      });
+    } catch (error: any) {
+      console.error(
+        "STAFF INVOICE LIST ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "INVOICE_LIST_FAILED",
+      });
+    }
+  }
+);
+
+
+router.post(
+  "/invoices/print",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const invoiceIds: string[] =
+        Array.isArray(
+          req.body?.invoiceIds
+        )
+          ? req.body.invoiceIds
+              .map((id: unknown) =>
+                String(id).trim()
+              )
+              .filter(Boolean)
+          : [];
+
+      const uniqueIds: string[] =
+        Array.from(
+          new Set<string>(invoiceIds)
+        );
+
+      if (
+        uniqueIds.length === 0
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "NO_INVOICES_SELECTED",
+        });
+      }
+
+      if (
+        uniqueIds.length > 500
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "TOO_MANY_INVOICES",
+        });
+      }
+
+      const invoices =
+        await getStaffInvoicesByIds(
+          uniqueIds
+        );
+
+      const foundIds =
+        new Set(
+          invoices.map(
+            (invoice) =>
+              String(invoice.id)
+          )
+        );
+
+      const missingIds =
+        uniqueIds.filter(
+          (id) =>
+            !foundIds.has(
+              String(id)
+            )
+        );
+
+      if (
+        missingIds.length > 0
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "INVOICES_NOT_AVAILABLE",
+          missingIds,
+        });
+      }
+
+      const results = [];
+
+      for (
+        const invoice of invoices
+      ) {
+        const result =
+          await createManualReprintJob(
+            "INVOICE",
+            String(invoice.id)
+          );
+
+        results.push({
+          invoiceId:
+            String(invoice.id),
+          invoiceNumber:
+            invoice.invoice_number,
+          result,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        count: results.length,
+        results,
+      });
+    } catch (error: any) {
+      console.error(
+        "STAFF INVOICE BATCH PRINT ERROR",
+        error
+      );
+
+      return res.status(400).json({
+        ok: false,
+        error:
+          "INVOICE_BATCH_PRINT_FAILED",
+        message:
+          error?.message ??
+          String(error),
+      });
+    }
+  }
+);
+
+
+router.post(
+  "/invoices/pdf",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const invoiceIds: string[] =
+        Array.isArray(
+          req.body?.invoiceIds
+        )
+          ? req.body.invoiceIds
+              .map((id: unknown) =>
+                String(id).trim()
+              )
+              .filter(Boolean)
+          : [];
+
+      const uniqueIds: string[] =
+        Array.from(
+          new Set<string>(invoiceIds)
+        );
+
+      if (
+        uniqueIds.length === 0
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "NO_INVOICES_SELECTED",
+        });
+      }
+
+      if (
+        uniqueIds.length > 500
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "TOO_MANY_INVOICES",
+        });
+      }
+
+      const invoices =
+        await getStaffInvoicesByIds(
+          uniqueIds
+        );
+
+      const foundIds =
+        new Set(
+          invoices.map(
+            (invoice) =>
+              String(invoice.id)
+          )
+        );
+
+      const missingIds =
+        uniqueIds.filter(
+          (id) =>
+            !foundIds.has(
+              String(id)
+            )
+        );
+
+      if (
+        missingIds.length > 0
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "INVOICES_NOT_AVAILABLE",
+          missingIds,
+        });
+      }
+
+      const merged =
+        await PDFDocument.create();
+
+      for (
+        const invoice of invoices
+      ) {
+        const bytes =
+          Buffer.from(
+            invoice.pdf_base64,
+            "base64"
+          );
+
+        const source =
+          await PDFDocument.load(
+            bytes
+          );
+
+        const pages =
+          await merged.copyPages(
+            source,
+            source.getPageIndices()
+          );
+
+        for (
+          const page of pages
+        ) {
+          merged.addPage(page);
+        }
+      }
+
+      if (
+        merged.getPageCount() === 0
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "EMPTY_INVOICE_PDF",
+        });
+      }
+
+      const pdfBytes =
+        await merged.save();
+
+      const date =
+        new Date()
+          .toISOString()
+          .slice(0, 10);
+
+      const filename =
+        `ALO-Rechnungen-${date}.pdf`;
+
+      res.setHeader(
+        "Content-Type",
+        "application/pdf"
+      );
+
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${filename}"`
+      );
+
+      res.setHeader(
+        "Content-Length",
+        String(pdfBytes.length)
+      );
+
+      return res.send(
+        Buffer.from(pdfBytes)
+      );
+    } catch (error: any) {
+      console.error(
+        "STAFF INVOICE PDF ERROR",
+        error
+      );
+
+      return res.status(400).json({
+        ok: false,
+        error:
+          "INVOICE_PDF_FAILED",
+        message:
+          error?.message ??
+          String(error),
+      });
+    }
+  }
+);
+
+
 router.get(
   "/:orderId",
   requireStaffAuth,
@@ -242,11 +895,20 @@ router.get(
         packProgress.packed ===
           packProgress.expected;
 
+      const operationalStatus =
+        getOperationalOrderStatus(
+          shopifyOrder,
+          workflow
+        );
+
       return res.json({
         ok: true,
 
         order: {
           ...shopifyOrder,
+
+          operational_status:
+            operationalStatus,
 
           lineItems,
 
@@ -906,6 +1568,94 @@ router.patch(
         ok: false,
         error:
           "Bestellstatus konnte nicht geändert werden.",
+      });
+    }
+  }
+);
+
+
+router.post(
+  "/:orderId/reprint",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const orderId =
+        String(req.params.orderId || "").trim();
+
+      const documentType =
+        String(req.body?.documentType || "")
+          .trim()
+          .toUpperCase();
+
+      if (
+        documentType !== "SHIPPING_LABEL" &&
+        documentType !== "PACKING_SLIP" &&
+        documentType !== "INVOICE"
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "INVALID_DOCUMENT_TYPE",
+        });
+      }
+
+      const dashboardOrders =
+        await getOrderDashboard(500);
+
+      const order =
+        dashboardOrders.find(
+          (item) =>
+            item.shopify_order_id === orderId
+        );
+
+      if (!order) {
+        return res.status(404).json({
+          ok: false,
+          error: "ORDER_NOT_FOUND",
+        });
+      }
+
+      const documentId =
+        documentType === "SHIPPING_LABEL"
+          ? order.label_id
+          : documentType === "PACKING_SLIP"
+            ? order.packing_slip_id
+            : order.invoice_id;
+
+      if (!documentId) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            documentType === "SHIPPING_LABEL"
+              ? "SHIPPING_LABEL_NOT_AVAILABLE"
+              : documentType === "PACKING_SLIP"
+                ? "PACKING_SLIP_NOT_AVAILABLE"
+                : "INVOICE_NOT_AVAILABLE",
+        });
+      }
+
+      const result =
+        await createManualReprintJob(
+          documentType,
+          documentId
+        );
+
+      return res.json({
+        ok: true,
+        documentType,
+        documentId,
+        result,
+      });
+    } catch (error: any) {
+      console.error(
+        "STAFF ORDER REPRINT ERROR",
+        error
+      );
+
+      return res.status(400).json({
+        ok: false,
+        error:
+          error?.message ||
+          "REPRINT_FAILED",
       });
     }
   }
