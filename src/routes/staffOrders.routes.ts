@@ -51,7 +51,8 @@ function getOperationalOrderStatus(
   shopify: any,
   workflow: {
     pack_status: OrderPackStatus;
-  } | null
+  } | null,
+  dashboardStatus?: string | null
 ): OperationalOrderStatus {
   if (shopify?.cancelledAt) {
     return "CANCELLED";
@@ -72,6 +73,14 @@ function getOperationalOrderStatus(
 
   if (workflow) {
     return workflow.pack_status;
+  }
+
+  if (
+    String(
+      dashboardStatus ?? ""
+    ).toUpperCase() === "COMPLETED"
+  ) {
+    return "COMPLETED";
   }
 
   return "NEW";
@@ -273,7 +282,8 @@ router.get(
           const operationalStatus =
             getOperationalOrderStatus(
               shopify,
-              workflow
+              workflow,
+              order.dashboard_status
             );
 
           return {
