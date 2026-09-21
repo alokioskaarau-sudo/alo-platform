@@ -23,6 +23,10 @@ import {
 import {
   completeAloNowDeliveryForDriver,
 } from "../modules/aloNow/aloNowCompletion.service.js";
+import {
+  toAloNowAssignedDeliveryView,
+  toAloNowAvailableDeliveryView,
+} from "../modules/aloNow/aloNowDriverView.service.js";
 
 
 const aloNowRouter =
@@ -192,10 +196,15 @@ aloNowRouter.get(
           staffUser.id
         );
 
+      const deliveryViews =
+        deliveries.map(
+          toAloNowAvailableDeliveryView
+        );
+
       return res.json({
         ok: true,
-        deliveries,
-        count: deliveries.length,
+        deliveries: deliveryViews,
+        count: deliveryViews.length,
       });
     } catch (error) {
       console.error(
@@ -225,10 +234,20 @@ aloNowRouter.get(
           staffUser.id
         );
 
+      const deliveryViews =
+        await Promise.all(
+          deliveries.map((delivery) =>
+            toAloNowAssignedDeliveryView(
+              delivery,
+              staffUser.id
+            )
+          )
+        );
+
       return res.json({
         ok: true,
-        deliveries,
-        count: deliveries.length,
+        deliveries: deliveryViews,
+        count: deliveryViews.length,
       });
     } catch (error) {
       console.error(
