@@ -374,3 +374,80 @@ export async function getOrderFulfillmentWorkflows(
 
   return result.rows;
 }
+
+export async function completeAloNowOrderWorkflow(
+  shopifyOrderId: string
+): Promise<OrderFulfillmentWorkflow | null> {
+  const existing =
+    await getOrderFulfillmentWorkflow(
+      shopifyOrderId
+    );
+
+  if (!existing) {
+    return null;
+  }
+
+  if (
+    existing.pack_status ===
+    "COMPLETED"
+  ) {
+    return existing;
+  }
+
+  if (
+    existing.pack_status !==
+    "PACKED"
+  ) {
+    return null;
+  }
+
+  const result =
+    await db.query<OrderFulfillmentWorkflow>(
+      `
+        UPDATE order_fulfillment_workflow
+        SET
+          pack_status = 'COMPLETED',
+          completed_at =
+            COALESCE(
+              completed_at,
+              NOW()
+            ),
+          version = version + 1,
+          updated_at = NOW()
+        WHERE
+          shopify_order_id = $1
+          AND pack_status = 'PACKED'
+        RETURNING
+          shopify_order_id,
+          pack_status,
+          claimed_by_staff_user_id,
+          claimed_at,
+          packing_started_at,
+          packed_at,
+          ready_to_ship_at,
+          completed_at,
+          version,
+          created_at,
+          updated_at
+      `,
+      [shopifyOrderId]
+    );
+
+  if (result.rows[0]) {
+    return result.rows[0];
+  }
+
+  const current =
+    await getOrderFulfillmentWorkflow(
+      shopifyOrderId
+    );
+
+  if (
+    current?.pack_status ===
+    "COMPLETED"
+  ) {
+    return current;
+  }
+
+  return null;
+}

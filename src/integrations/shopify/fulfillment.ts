@@ -156,6 +156,92 @@ export async function getFulfillmentOrdersForOrder(
 // SHOPIFY FULFILLMENT ERSTELLEN
 // ============================================================
 
+export async function createShopifyLocalFulfillment(
+  input: {
+    fulfillmentOrderId: string;
+    notifyCustomer?: boolean;
+  }
+) {
+  const mutation = `
+    mutation CreateLocalFulfillment(
+      $fulfillment: FulfillmentInput!
+    ) {
+      fulfillmentCreate(
+        fulfillment: $fulfillment
+      ) {
+        fulfillment {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const variables = {
+    fulfillment: {
+      lineItemsByFulfillmentOrder: [
+        {
+          fulfillmentOrderId:
+            input.fulfillmentOrderId,
+        },
+      ],
+      notifyCustomer:
+        input.notifyCustomer ?? false,
+    },
+  };
+
+  const data =
+    await shopifyGraphQL(
+      mutation,
+      variables
+    );
+
+  const result =
+    data?.fulfillmentCreate;
+
+  if (!result) {
+    throw new Error(
+      "Shopify hat keine Local-Fulfillment-Antwort geliefert."
+    );
+  }
+
+  if (
+    Array.isArray(result.userErrors) &&
+    result.userErrors.length > 0
+  ) {
+    console.error(
+      "Shopify local fulfillmentCreate userErrors:",
+      JSON.stringify(
+        result.userErrors,
+        null,
+        2
+      )
+    );
+
+    throw new Error(
+      result.userErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join("; ")
+    );
+  }
+
+  if (!result.fulfillment) {
+    throw new Error(
+      "Shopify Local Fulfillment wurde nicht erstellt."
+    );
+  }
+
+  return result.fulfillment;
+}
+
+
 export async function createShopifyFulfillment(
   input: {
     fulfillmentOrderId: string;

@@ -11,10 +11,17 @@ import {
   getAloDriverProfile,
   setAloDriverAvailability,
 } from "../database/aloNowDrivers.js";
+import {
+  setAloNowDriverDeliveryStatus,
+} from "../database/aloNowDeliveries.js";
 
 import {
   claimAloNowDeliveryForDriver,
 } from "../modules/aloNow/aloNowDelivery.service.js";
+import {
+  completeAloNowDeliveryForDriver,
+} from "../modules/aloNow/aloNowCompletion.service.js";
+
 
 const aloNowRouter =
   Router();
@@ -241,5 +248,194 @@ aloNowRouter.post(
     }
   }
 );
+
+
+aloNowRouter.post(
+  "/deliveries/:orderId/pickup",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const staffUser =
+        getStaffUser(res);
+
+      const orderId =
+        String(
+          req.params.orderId ?? ""
+        ).trim();
+
+      if (!orderId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "SHOPIFY_ORDER_ID_REQUIRED",
+        });
+      }
+
+      const result =
+        await setAloNowDriverDeliveryStatus(
+          orderId,
+          staffUser.id,
+          "PICKED_UP"
+        );
+
+      if (!result.ok) {
+        const httpStatus =
+          result.reason === "NOT_FOUND"
+            ? 404
+            : 409;
+
+        return res.status(
+          httpStatus
+        ).json({
+          ok: false,
+          error:
+            result.reason,
+          delivery:
+            result.delivery,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        delivery:
+          result.delivery,
+        alreadyApplied:
+          result.alreadyApplied,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW DELIVERY PICKUP ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "ALO_NOW_DELIVERY_PICKUP_FAILED",
+      });
+    }
+  }
+);
+
+
+
+aloNowRouter.post(
+  "/deliveries/:orderId/start",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const staffUser =
+        getStaffUser(res);
+
+      const orderId =
+        String(
+          req.params.orderId ?? ""
+        ).trim();
+
+      if (!orderId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "SHOPIFY_ORDER_ID_REQUIRED",
+        });
+      }
+
+      const result =
+        await setAloNowDriverDeliveryStatus(
+          orderId,
+          staffUser.id,
+          "ON_THE_WAY"
+        );
+
+      if (!result.ok) {
+        const httpStatus =
+          result.reason === "NOT_FOUND"
+            ? 404
+            : 409;
+
+        return res.status(
+          httpStatus
+        ).json({
+          ok: false,
+          error:
+            result.reason,
+          delivery:
+            result.delivery,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        delivery:
+          result.delivery,
+        alreadyApplied:
+          result.alreadyApplied,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW DELIVERY START ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "ALO_NOW_DELIVERY_START_FAILED",
+      });
+    }
+  }
+);
+
+
+
+aloNowRouter.post(
+  "/deliveries/:orderId/deliver",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const staffUser =
+        getStaffUser(res);
+
+      const orderId =
+        String(
+          req.params.orderId ?? ""
+        ).trim();
+
+      if (!orderId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "SHOPIFY_ORDER_ID_REQUIRED",
+        });
+      }
+
+      const result =
+        await completeAloNowDeliveryForDriver(
+          orderId,
+          staffUser.id
+        );
+
+      return res.json({
+        ok: true,
+        delivery:
+          result.delivery,
+        alreadyDelivered:
+          result.alreadyDelivered,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW DELIVERY DELIVER ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "ALO_NOW_DELIVERY_DELIVER_FAILED",
+      });
+    }
+  }
+);
+
 
 export default aloNowRouter;

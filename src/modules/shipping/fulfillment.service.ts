@@ -1,6 +1,7 @@
 import {
   getFulfillmentOrdersForOrder,
   createShopifyFulfillment,
+  createShopifyLocalFulfillment,
 } from "../../integrations/shopify/fulfillment.js";
 
 import {
@@ -233,4 +234,117 @@ export async function fulfillShopifyOrderWithSwissPostTracking(
     fulfillments,
   };
 
+}
+
+export async function fulfillShopifyAloNowOrder(
+  order: ShopifyOrder
+) {
+  const normalizedStatus =
+    String(
+      order.displayFulfillmentStatus || ""
+    ).toUpperCase();
+
+  if (normalizedStatus === "FULFILLED") {
+    return {
+      alreadyFulfilled: true,
+      orderName: order.name,
+      fulfillmentOrderIds: [],
+      fulfillments: [],
+    };
+  }
+
+  const fulfillmentData =
+    await getFulfillmentOrdersForOrder(
+      order.id
+    );
+
+  const fulfillmentOrders =
+    fulfillmentData
+      ?.fulfillmentOrders
+      ?.nodes ?? [];
+
+  const fulfillableFulfillmentOrders =
+    fulfillmentOrders.filter(
+      (fulfillmentOrder: any) => {
+        const status =
+          String(
+            fulfillmentOrder.status ?? ""
+          ).toUpperCase();
+
+        const remainingQuantity =
+          (
+            fulfillmentOrder
+              ?.lineItems
+              ?.nodes ?? []
+          ).reduce(
+            (
+              total: number,
+              lineItem: any
+            ) =>
+              total +
+              Math.max(
+                0,
+                Number(
+                  lineItem
+                    ?.remainingQuantity ??
+                    0
+                )
+              ),
+            0
+          );
+
+        return (
+          (
+            status === "OPEN" ||
+            status === "IN_PROGRESS"
+          ) &&
+          remainingQuantity > 0
+        );
+      }
+    );
+
+  if (
+    fulfillableFulfillmentOrders.length === 0
+  ) {
+    return {
+      alreadyFulfilled: false,
+      orderName: order.name,
+      fulfillmentOrderIds: [],
+      fulfillments: [],
+    };
+  }
+
+  const fulfillments: Array<{
+    fulfillmentOrderId: string;
+    fulfillment: any;
+  }> = [];
+
+  for (
+    const openFulfillmentOrder
+    of fulfillableFulfillmentOrders
+  ) {
+    const fulfillment =
+      await createShopifyLocalFulfillment({
+        fulfillmentOrderId:
+          openFulfillmentOrder.id,
+        notifyCustomer: false,
+      });
+
+    fulfillments.push({
+      fulfillmentOrderId:
+        openFulfillmentOrder.id,
+      fulfillment,
+    });
+  }
+
+  return {
+    alreadyFulfilled: false,
+    orderName: order.name,
+    fulfillmentOrderIds:
+      fulfillableFulfillmentOrders.map(
+        (fulfillmentOrder: any) =>
+          fulfillmentOrder.id
+      ),
+    fulfillments,
+  };
 }
