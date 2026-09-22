@@ -246,6 +246,20 @@ router.post(
     }
 
     if (
+      actor.role === "MANAGER" &&
+      (
+        role === "ADMIN" ||
+        role === "MANAGER"
+      )
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error:
+          "Manager dürfen nur STAFF- oder PRAKTIKANT-Profile erstellen.",
+      });
+    }
+
+    if (
       actor.role !== "ADMIN" &&
       (
         role === "ADMIN" ||
