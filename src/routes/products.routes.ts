@@ -1,6 +1,10 @@
 import { Router } from "express";
 
 import {
+  requireStaffAuth,
+} from "../middleware/staffAuth.js";
+
+import {
   getProductByBarcode,
   getProductById,
   saveProduct,
@@ -83,6 +87,7 @@ productsRouter.get(
 
 productsRouter.post(
   "/api/products",
+  requireStaffAuth,
   async (req, res) => {
     try {
       if (!req.body || typeof req.body !== "object") {
