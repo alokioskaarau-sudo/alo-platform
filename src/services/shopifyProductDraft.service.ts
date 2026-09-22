@@ -164,6 +164,80 @@ async function syncSupplierArticleMetafieldSafe(
   }
 }
 
+async function syncAgeRequirementMetafieldSafe(
+  shopifyProductId: string,
+  ageRequirement: unknown
+): Promise<boolean> {
+  const value =
+    ageRequirement === "AGE_16" ||
+    ageRequirement === "AGE_18"
+      ? ageRequirement
+      : "NONE";
+
+  if (!shopifyProductId) {
+    return false;
+  }
+
+  try {
+    const result = await shopifyGraphql(
+      `
+        mutation AloSyncAgeRequirement(
+          $metafields: [MetafieldsSetInput!]!
+        ) {
+          metafieldsSet(
+            metafields: $metafields
+          ) {
+            metafields {
+              id
+              namespace
+              key
+              value
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        metafields: [
+          {
+            ownerId: shopifyProductId,
+            namespace: "alo",
+            key: "age_requirement",
+            type: "single_line_text_field",
+            value,
+          },
+        ],
+      }
+    );
+
+    const errors =
+      result?.metafieldsSet?.userErrors ?? [];
+
+    if (errors.length) {
+      throw new Error(
+        errors
+          .map(
+            (error: any) =>
+              error.message
+          )
+          .join(" · ")
+      );
+    }
+
+    return true;
+  } catch (error: any) {
+    console.warn(
+      "[Shopify] Altersanforderung konnte nicht synchronisiert werden:",
+      error?.message ?? error
+    );
+
+    return false;
+  }
+}
+
 async function getProduct(
   id: string
 ) {
@@ -174,6 +248,7 @@ async function getProduct(
           id,
           barcode,
           title,
+          age_requirement,
           product_data,
           source_type,
           review_status,
@@ -216,7 +291,11 @@ function aloJoin(
 }
 
 function buildShopifyProductMetafields(
-  draft: any
+  draft: any,
+  ageRequirement:
+    | "NONE"
+    | "AGE_16"
+    | "AGE_18" = "NONE"
 ) {
   const nutrition =
     draft?.nutritionPer100 ?? {};
@@ -268,6 +347,12 @@ function buildShopifyProductMetafields(
       : 1;
 
   const metafields = [
+    {
+      namespace: "alo",
+      key: "age_requirement",
+      type: "single_line_text_field",
+      value: ageRequirement,
+    },
     {
       namespace: "alo",
       key: "supplier_article_number",
@@ -683,6 +768,11 @@ export async function createShopifyProductDraft(
         draft?.receiving?.articleNumber
       );
 
+      await syncAgeRequirementMetafieldSafe(
+        row.shopify_product_id,
+        row.age_requirement
+      );
+
       return {
         ok: true as const,
         alreadyExists: true,
@@ -871,6 +961,11 @@ export async function createShopifyProductDraft(
       draft?.receiving?.articleNumber
     );
 
+    await syncAgeRequirementMetafieldSafe(
+      match.productId,
+      row.age_requirement
+    );
+
     return {
       ok: true as const,
       alreadyExists: true,
@@ -968,7 +1063,8 @@ export async function createShopifyProductDraft(
 
   const productMetafields =
     buildShopifyProductMetafields(
-      draft
+      draft,
+      row.age_requirement
     );
 
   if (

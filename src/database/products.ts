@@ -1,8 +1,14 @@
 import { db } from "./db.js";
 
+export type ProductAgeRequirement =
+  | "NONE"
+  | "AGE_16"
+  | "AGE_18";
+
 export type ProductMasterInput = {
   barcode: string;
   title: string;
+  ageRequirement?: ProductAgeRequirement;
   brand?: string | null;
   productName?: string | null;
   flavor?: string | null;
@@ -36,6 +42,7 @@ export type ProductMasterRecord = {
   id: number;
   barcode: string;
   title: string;
+  age_requirement: ProductAgeRequirement;
   brand: string | null;
   product_name: string | null;
   flavor: string | null;
@@ -188,6 +195,7 @@ export async function saveProduct(
           INSERT INTO products (
             barcode,
             title,
+            age_requirement,
             brand,
             product_name,
             flavor,
@@ -220,16 +228,22 @@ export async function saveProduct(
             updated_at
           )
           VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15::jsonb,$16::jsonb,
-            $17::jsonb,$18::jsonb,$19,$20,$21,$22,
-            $23,$24::jsonb,$25::jsonb,
-            'REVIEWED',$26,NOW(),$27,$28::jsonb,$29::jsonb,NOW()
+            $1,$2,COALESCE($3::text, 'NONE'),$4,$5,$6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,$16::jsonb,$17::jsonb,
+            $18::jsonb,$19::jsonb,$20,$21,$22,$23,
+            $24,$25::jsonb,$26::jsonb,
+            'REVIEWED',$27,NOW(),$28,$29::jsonb,$30::jsonb,NOW()
           )
 
           ON CONFLICT (barcode)
           DO UPDATE SET
             title = EXCLUDED.title,
+            age_requirement =
+              CASE
+                WHEN $3::text IS NULL
+                  THEN products.age_requirement
+                ELSE EXCLUDED.age_requirement
+              END,
             brand = EXCLUDED.brand,
             product_name = EXCLUDED.product_name,
             flavor = EXCLUDED.flavor,
@@ -266,6 +280,7 @@ export async function saveProduct(
         [
           barcode,
           title,
+          input.ageRequirement ?? null,
           cleanText(input.brand),
           cleanText(input.productName),
           cleanText(input.flavor),

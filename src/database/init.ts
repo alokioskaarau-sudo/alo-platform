@@ -1532,6 +1532,14 @@ export async function initializeDatabase() {
       id BIGSERIAL PRIMARY KEY,
       barcode TEXT UNIQUE,
       title TEXT NOT NULL,
+      age_requirement TEXT NOT NULL DEFAULT 'NONE'
+        CHECK (
+          age_requirement IN (
+            'NONE',
+            'AGE_16',
+            'AGE_18'
+          )
+        ),
       brand TEXT,
       product_name TEXT,
       flavor TEXT,
@@ -1568,6 +1576,38 @@ export async function initializeDatabase() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await db.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
+        age_requirement TEXT
+        NOT NULL
+        DEFAULT 'NONE'
+  `);
+
+  await db.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname =
+          'products_age_requirement_check'
+      ) THEN
+        ALTER TABLE products
+          ADD CONSTRAINT
+            products_age_requirement_check
+          CHECK (
+            age_requirement IN (
+              'NONE',
+              'AGE_16',
+              'AGE_18'
+            )
+          );
+      END IF;
+    END
+    $$;
   `);
 
   await db.query(`
