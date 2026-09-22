@@ -385,6 +385,10 @@ function toApiProduct(
       row.source_type ?? null,
     reviewStatus:
       row.review_status ?? null,
+    ageRequirement:
+      row.age_requirement ?? "NONE",
+    ageRequirementReviewedAt:
+      row.age_requirement_reviewed_at ?? null,
     shopifyStatus:
       row.shopify_status ??
       "NOT_SYNCED",
@@ -938,6 +942,28 @@ router.post(
             "ALO STAFF"
         );
 
+      const ageRequirementReviewed =
+        req.body?.ageRequirementReviewed === true;
+
+      const ageRequirement =
+        req.body?.ageRequirement;
+
+      if (
+        ageRequirementReviewed &&
+        ageRequirement !== "NONE" &&
+        ageRequirement !== "AGE_16" &&
+        ageRequirement !== "AGE_18"
+      ) {
+        res.status(400).json({
+          ok: false,
+          code:
+            "PRODUCT_AGE_REQUIREMENT_REQUIRED_FOR_REVIEW",
+          error:
+            "Für die Altersprüfung muss NONE, AGE_16 oder AGE_18 gewählt werden.",
+        });
+        return;
+      }
+
       const result =
         await db.query(
           `
@@ -945,6 +971,8 @@ router.post(
               barcode,
               title,
               product_data,
+              age_requirement,
+              age_requirement_reviewed_at,
               source_type,
               review_status,
               reviewed_by,
@@ -955,6 +983,16 @@ router.post(
               $1,
               $2,
               $3::jsonb,
+              CASE
+                WHEN $6::boolean
+                  THEN $7::text
+                ELSE 'NONE'
+              END,
+              CASE
+                WHEN $6::boolean
+                  THEN NOW()
+                ELSE NULL
+              END,
               $4,
               'REVIEWED',
               $5,
@@ -987,6 +1025,8 @@ router.post(
               barcode,
               title,
               product_data,
+              age_requirement,
+              age_requirement_reviewed_at,
               source_type,
               review_status,
               shopify_status,
@@ -1005,6 +1045,10 @@ router.post(
             }),
             sourceType,
             reviewedBy,
+            ageRequirementReviewed,
+            ageRequirementReviewed
+              ? ageRequirement
+              : null,
           ]
         );
 
@@ -1064,6 +1108,8 @@ router.put(
               barcode,
               title,
               product_data,
+              age_requirement,
+              age_requirement_reviewed_at,
               source_type,
               review_status,
               archived_at,
@@ -1266,6 +1312,28 @@ router.put(
           "ALO STAFF"
         );
 
+      const ageRequirementReviewed =
+        req.body?.ageRequirementReviewed === true;
+
+      const ageRequirement =
+        req.body?.ageRequirement;
+
+      if (
+        ageRequirementReviewed &&
+        ageRequirement !== "NONE" &&
+        ageRequirement !== "AGE_16" &&
+        ageRequirement !== "AGE_18"
+      ) {
+        res.status(400).json({
+          ok: false,
+          code:
+            "PRODUCT_AGE_REQUIREMENT_REQUIRED_FOR_REVIEW",
+          error:
+            "Für die Altersprüfung muss NONE, AGE_16 oder AGE_18 gewählt werden.",
+        });
+        return;
+      }
+
       const result =
         await db.query(
           `
@@ -1274,6 +1342,18 @@ router.put(
               barcode = $2,
               title = $3,
               product_data = $4::jsonb,
+              age_requirement =
+                CASE
+                  WHEN $6::boolean
+                    THEN $7::text
+                  ELSE age_requirement
+                END,
+              age_requirement_reviewed_at =
+                CASE
+                  WHEN $6::boolean
+                    THEN NOW()
+                  ELSE age_requirement_reviewed_at
+                END,
               review_status = 'REVIEWED',
               reviewed_by = $5,
               reviewed_at = NOW(),
@@ -1284,6 +1364,8 @@ router.put(
               barcode,
               title,
               product_data,
+              age_requirement,
+              age_requirement_reviewed_at,
               source_type,
               review_status,
               shopify_status,
@@ -1298,6 +1380,10 @@ router.put(
             title || existing.title,
             JSON.stringify(mergedData),
             reviewedBy,
+            ageRequirementReviewed,
+            ageRequirementReviewed
+              ? ageRequirement
+              : null,
           ]
         );
 
@@ -1382,6 +1468,8 @@ router.get(
               barcode,
               title,
               product_data,
+              age_requirement,
+              age_requirement_reviewed_at,
               source_type,
               review_status,
               shopify_status,
@@ -1509,6 +1597,8 @@ router.get(
             barcode,
             title,
             product_data,
+            age_requirement,
+            age_requirement_reviewed_at,
             source_type,
             review_status,
             shopify_status,
