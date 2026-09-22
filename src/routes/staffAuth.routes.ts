@@ -163,6 +163,343 @@ export async function createStaffCredentialHash(
 }
 
 /* =========================================================
+   CREATE STAFF / DRIVER PROFILE
+
+   ADMIN / MANAGER only.
+
+   Creates the staff account and optional ALO NOW driver
+   profile in one database transaction.
+========================================================= */
+
+router.post(
+  "/users",
+  requireStaffAuth,
+  async (req, res) => {
+    const actor =
+      getStaffUser(res);
+
+    if (
+      actor.role !== "ADMIN" &&
+      actor.role !== "MANAGER"
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error: "Keine Berechtigung zum Erstellen von Profilen.",
+      });
+    }
+
+    const displayName =
+      cleanText(req.body?.displayName);
+
+    const requestedUsername =
+      cleanText(req.body?.username)
+        .toLowerCase();
+
+    const pin =
+      cleanText(req.body?.pin);
+
+    const role =
+      cleanText(req.body?.role || "STAFF")
+        .toUpperCase();
+
+    const defaultWorkspace =
+      cleanText(
+        req.body?.defaultWorkspace || "AARAU"
+      ).toUpperCase();
+
+    const isDriver =
+      req.body?.isDriver === true;
+
+    const transportTypeRaw =
+      cleanText(req.body?.transportType)
+        .toUpperCase();
+
+    if (!displayName) {
+      return res.status(422).json({
+        ok: false,
+        error: "Name fehlt.",
+      });
+    }
+
+    if (
+      pin.length < 4 ||
+      pin.length > 32
+    ) {
+      return res.status(422).json({
+        ok: false,
+        error: "Die PIN muss zwischen 4 und 32 Zeichen lang sein.",
+      });
+    }
+
+    if (
+      ![
+        "ADMIN",
+        "MANAGER",
+        "STAFF",
+        "PRAKTIKANT",
+      ].includes(role)
+    ) {
+      return res.status(422).json({
+        ok: false,
+        error: "Ungültige Mitarbeiterrolle.",
+      });
+    }
+
+    if (
+      actor.role !== "ADMIN" &&
+      (
+        role === "ADMIN" ||
+        role === "MANAGER"
+      )
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error:
+          "Nur ein Admin darf Admin- oder Managerprofile erstellen.",
+      });
+    }
+
+    if (
+      ![
+        "AARAU",
+        "OLTEN",
+        "ONLINE",
+      ].includes(defaultWorkspace)
+    ) {
+      return res.status(422).json({
+        ok: false,
+        error: "Ungültiger Workspace.",
+      });
+    }
+
+    if (
+      transportTypeRaw &&
+      ![
+        "CAR",
+        "SCOOTER",
+        "BIKE",
+        "OTHER",
+      ].includes(transportTypeRaw)
+    ) {
+      return res.status(422).json({
+        ok: false,
+        error: "Ungültiges Transportmittel.",
+      });
+    }
+
+    const generatedUsername =
+      displayName
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ".")
+        .replace(/^\.+|\.+$/g, "");
+
+    const username =
+      requestedUsername ||
+      generatedUsername;
+
+    if (!username) {
+      return res.status(422).json({
+        ok: false,
+        error: "Benutzername konnte nicht erstellt werden.",
+      });
+    }
+
+    const pinHash =
+      await hashCredential(pin);
+
+    const allowedWorkspaces =
+      defaultWorkspace === "ONLINE"
+        ? ["ONLINE"]
+        : [defaultWorkspace, "ONLINE"];
+
+    const client =
+      await db.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const duplicate =
+        await client.query(
+          `
+            SELECT 1
+            FROM staff_users
+            WHERE LOWER(username) = $1
+            LIMIT 1
+          `,
+          [username]
+        );
+
+      if (duplicate.rows[0]) {
+        await client.query("ROLLBACK");
+
+        return res.status(409).json({
+          ok: false,
+          error:
+            "Dieser Profilname ist bereits vergeben.",
+        });
+      }
+
+      const created =
+        await client.query(
+          `
+            INSERT INTO staff_users (
+              username,
+              display_name,
+              role,
+              pin_hash,
+              default_workspace,
+              allowed_workspaces,
+              active
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6::jsonb,
+              TRUE
+            )
+            RETURNING
+              id,
+              username,
+              display_name,
+              role,
+              default_workspace,
+              allowed_workspaces
+          `,
+          [
+            username,
+            displayName,
+            role,
+            pinHash,
+            defaultWorkspace,
+            JSON.stringify(allowedWorkspaces),
+          ]
+        );
+
+      const user =
+        created.rows[0];
+
+      if (isDriver) {
+        const driverWorkspace =
+          defaultWorkspace === "ONLINE"
+            ? "AARAU"
+            : defaultWorkspace;
+
+        await client.query(
+          `
+            INSERT INTO alo_driver_profiles (
+              staff_user_id,
+              approved,
+              availability_status,
+              home_workspace,
+              transport_type,
+              approved_for_age_restricted,
+              max_active_deliveries
+            )
+            VALUES (
+              $1,
+              TRUE,
+              'OFFLINE',
+              $2,
+              $3,
+              FALSE,
+              3
+            )
+          `,
+          [
+            user.id,
+            driverWorkspace,
+            transportTypeRaw || null,
+          ]
+        );
+      }
+
+      await client.query(
+        `
+          INSERT INTO staff_activity (
+            staff_user_id,
+            workspace,
+            action,
+            entity_type,
+            entity_id,
+            metadata
+          )
+          VALUES (
+            $1,
+            $2,
+            'STAFF_PROFILE_CREATED',
+            'STAFF_USER',
+            $3,
+            $4::jsonb
+          )
+        `,
+        [
+          actor.id,
+          defaultWorkspace,
+          String(user.id),
+          JSON.stringify({
+            username,
+            displayName,
+            role,
+            isDriver,
+          }),
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(201).json({
+        ok: true,
+        user: publicUser(user),
+        driver: isDriver
+          ? {
+              enabled: true,
+              approved: true,
+              availabilityStatus: "OFFLINE",
+              workspace:
+                defaultWorkspace === "ONLINE"
+                  ? "AARAU"
+                  : defaultWorkspace,
+              transportType:
+                transportTypeRaw || null,
+              maxActiveDeliveries: 3,
+            }
+          : null,
+      });
+    } catch (error: any) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
+
+      if (error?.code === "23505") {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "Dieser Profilname ist bereits vergeben.",
+        });
+      }
+
+      console.error(
+        "STAFF PROFILE CREATE ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Profil konnte nicht erstellt werden.",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/* =========================================================
    STAFF USER PICKER
 ========================================================= */
 
