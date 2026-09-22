@@ -156,6 +156,12 @@ const ORDER_FIELDS = `
           product {
             id
             title
+            ageRequirement: metafield(
+              namespace: "alo"
+              key: "age_requirement"
+            ) {
+              value
+            }
             featuredImage {
               url
               altText

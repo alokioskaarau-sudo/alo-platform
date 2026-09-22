@@ -42,6 +42,10 @@ import {
   getOrderFulfillmentType,
 } from "../orders/orderFulfillmentType.js";
 
+import {
+  getAloNowOrderAgeRequirement,
+} from "../aloNow/aloNowOrderAgeRequirement.js";
+
 // ============================================================
 // PICKUP ERKENNEN
 // ============================================================
@@ -138,6 +142,25 @@ export async function processPaidShopifyOrder(
       `ALO NOW Bestellung erkannt: ${order.name}`
     );
 
+    const ageClassification =
+      getAloNowOrderAgeRequirement(
+        order
+      );
+
+    if (!ageClassification.classified) {
+      console.error(
+        `ALO NOW Altersklassifizierung unvollständig: ${order.name}`,
+        {
+          unclassifiedLineItems:
+            ageClassification.unclassifiedLineItems,
+        }
+      );
+
+      throw new Error(
+        "ALO_NOW_PRODUCT_AGE_CLASSIFICATION_REQUIRED"
+      );
+    }
+
     const packingSlip =
       await createPackingSlipForOrder(
         order
@@ -188,7 +211,8 @@ export async function processPaidShopifyOrder(
         order.id,
         order.name,
         "AARAU",
-        false
+        ageClassification.requiresAgeCheck,
+        ageClassification.ageRequirement
       );
 
     try {
