@@ -146,6 +146,64 @@ app.use("/api/staff-auth", staffAuthRouter);
 app.use("/api/staff-orders", staffOrdersRouter);
 app.use("/api/staff-push", staffPushRouter);
 
+
+// ============================================================
+// ALO NOW STOREFRONT CORS
+// ============================================================
+
+const aloNowStorefrontOrigins =
+  new Set([
+    "https:" + "//alo-kiosk.myshopify.com",
+    "https:" + "//alokiosk.ch",
+    "https:" + "//www.alokiosk.ch",
+  ]);
+
+app.use(
+  "/api/alo-now",
+  (req, res, next) => {
+    const origin =
+      req.headers.origin;
+
+    if (
+      origin &&
+      aloNowStorefrontOrigins.has(origin)
+    ) {
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        origin
+      );
+
+      res.setHeader(
+        "Vary",
+        "Origin"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET, OPTIONS"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type"
+      );
+    }
+
+    if (req.method === "OPTIONS") {
+      if (
+        !origin ||
+        !aloNowStorefrontOrigins.has(origin)
+      ) {
+        return res.sendStatus(403);
+      }
+
+      return res.sendStatus(204);
+    }
+
+    next();
+  }
+);
+
 app.use("/api/alo-now", aloNowRouter);
 
 
