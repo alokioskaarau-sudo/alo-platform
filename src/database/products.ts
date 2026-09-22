@@ -9,6 +9,7 @@ export type ProductMasterInput = {
   barcode: string;
   title: string;
   ageRequirement?: ProductAgeRequirement;
+  ageRequirementReviewed?: boolean;
   brand?: string | null;
   productName?: string | null;
   flavor?: string | null;
@@ -43,6 +44,7 @@ export type ProductMasterRecord = {
   barcode: string;
   title: string;
   age_requirement: ProductAgeRequirement;
+  age_requirement_reviewed_at: string | null;
   brand: string | null;
   product_name: string | null;
   flavor: string | null;
@@ -140,6 +142,16 @@ export async function getProductById(
 export async function saveProduct(
   input: ProductMasterInput
 ): Promise<ProductMasterRecord> {
+  if (
+    input.ageRequirementReviewed === true &&
+    input.ageRequirement !== "NONE" &&
+    input.ageRequirement !== "AGE_16" &&
+    input.ageRequirement !== "AGE_18"
+  ) {
+    throw new Error(
+      "PRODUCT_AGE_REQUIREMENT_REQUIRED_FOR_REVIEW"
+    );
+  }
   const barcode = cleanBarcode(input.barcode);
   const title = cleanText(input.title)?.toUpperCase();
 
@@ -196,6 +208,7 @@ export async function saveProduct(
             barcode,
             title,
             age_requirement,
+            age_requirement_reviewed_at,
             brand,
             product_name,
             flavor,
@@ -228,11 +241,13 @@ export async function saveProduct(
             updated_at
           )
           VALUES (
-            $1,$2,COALESCE($3::text, 'NONE'),$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,$16::jsonb,$17::jsonb,
-            $18::jsonb,$19::jsonb,$20,$21,$22,$23,
-            $24,$25::jsonb,$26::jsonb,
-            'REVIEWED',$27,NOW(),$28,$29::jsonb,$30::jsonb,NOW()
+            $1,$2,COALESCE($3::text, 'NONE'),
+            CASE WHEN $4::boolean THEN NOW() ELSE NULL END,
+            $5,$6,$7,$8,$9,$10,$11,
+            $12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,
+            $19::jsonb,$20::jsonb,$21,$22,$23,$24,
+            $25,$26::jsonb,$27::jsonb,
+            'REVIEWED',$28,NOW(),$29,$30::jsonb,$31::jsonb,NOW()
           )
 
           ON CONFLICT (barcode)
@@ -243,6 +258,12 @@ export async function saveProduct(
                 WHEN $3::text IS NULL
                   THEN products.age_requirement
                 ELSE EXCLUDED.age_requirement
+              END,
+            age_requirement_reviewed_at =
+              CASE
+                WHEN $4::boolean
+                  THEN NOW()
+                ELSE products.age_requirement_reviewed_at
               END,
             brand = EXCLUDED.brand,
             product_name = EXCLUDED.product_name,
@@ -280,7 +301,10 @@ export async function saveProduct(
         [
           barcode,
           title,
-          input.ageRequirement ?? null,
+          input.ageRequirementReviewed === true
+            ? input.ageRequirement ?? null
+            : null,
+          input.ageRequirementReviewed === true,
           cleanText(input.brand),
           cleanText(input.productName),
           cleanText(input.flavor),

@@ -1540,6 +1540,7 @@ export async function initializeDatabase() {
             'AGE_18'
           )
         ),
+      age_requirement_reviewed_at TIMESTAMPTZ,
       brand TEXT,
       product_name TEXT,
       flavor TEXT,
@@ -1584,6 +1585,12 @@ export async function initializeDatabase() {
         age_requirement TEXT
         NOT NULL
         DEFAULT 'NONE'
+  `);
+
+  await db.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS
+        age_requirement_reviewed_at TIMESTAMPTZ
   `);
 
   await db.query(`

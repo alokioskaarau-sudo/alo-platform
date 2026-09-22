@@ -166,13 +166,22 @@ async function syncSupplierArticleMetafieldSafe(
 
 async function syncAgeRequirementMetafieldSafe(
   shopifyProductId: string,
-  ageRequirement: unknown
+  ageRequirement: unknown,
+  ageRequirementReviewedAt: unknown
 ): Promise<boolean> {
-  const value =
-    ageRequirement === "AGE_16" ||
-    ageRequirement === "AGE_18"
-      ? ageRequirement
-      : "NONE";
+  if (!ageRequirementReviewedAt) {
+    return false;
+  }
+
+  if (
+    ageRequirement !== "NONE" &&
+    ageRequirement !== "AGE_16" &&
+    ageRequirement !== "AGE_18"
+  ) {
+    return false;
+  }
+
+  const value = ageRequirement;
 
   if (!shopifyProductId) {
     return false;
@@ -249,6 +258,7 @@ async function getProduct(
           barcode,
           title,
           age_requirement,
+          age_requirement_reviewed_at,
           product_data,
           source_type,
           review_status,
@@ -295,7 +305,8 @@ function buildShopifyProductMetafields(
   ageRequirement:
     | "NONE"
     | "AGE_16"
-    | "AGE_18" = "NONE"
+    | "AGE_18"
+    | null
 ) {
   const nutrition =
     draft?.nutritionPer100 ?? {};
@@ -347,12 +358,16 @@ function buildShopifyProductMetafields(
       : 1;
 
   const metafields = [
-    {
-      namespace: "alo",
-      key: "age_requirement",
-      type: "single_line_text_field",
-      value: ageRequirement,
-    },
+    ...(ageRequirement
+      ? [
+          {
+            namespace: "alo",
+            key: "age_requirement",
+            type: "single_line_text_field",
+            value: ageRequirement,
+          },
+        ]
+      : []),
     {
       namespace: "alo",
       key: "supplier_article_number",
@@ -770,7 +785,8 @@ export async function createShopifyProductDraft(
 
       await syncAgeRequirementMetafieldSafe(
         row.shopify_product_id,
-        row.age_requirement
+        row.age_requirement,
+        row.age_requirement_reviewed_at
       );
 
       return {
@@ -963,7 +979,8 @@ export async function createShopifyProductDraft(
 
     await syncAgeRequirementMetafieldSafe(
       match.productId,
-      row.age_requirement
+      row.age_requirement,
+      row.age_requirement_reviewed_at
     );
 
     return {
@@ -1064,7 +1081,9 @@ export async function createShopifyProductDraft(
   const productMetafields =
     buildShopifyProductMetafields(
       draft,
-      row.age_requirement
+      row.age_requirement_reviewed_at
+        ? row.age_requirement
+        : null
     );
 
   if (
