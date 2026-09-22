@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { requireStaffAuth } from '../middleware/staffAuth.js';
 import multer from 'multer';
 import OpenAI, { toFile } from 'openai';
 import {
@@ -6,6 +7,8 @@ import {
 } from "../services/productOnlineVerification.service.js";
 
 const router = Router();
+
+router.use(requireStaffAuth);
 
 const upload = multer({
   storage: multer.memoryStorage(),

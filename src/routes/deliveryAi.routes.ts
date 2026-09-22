@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import { Router } from 'express';
+import { requireStaffAuth } from '../middleware/staffAuth.js';
 import multer from 'multer';
 import OpenAI, { toFile } from 'openai';
 
 import { db } from '../database/db.js';
 
 const router = Router();
+
+router.use(requireStaffAuth);
 
 const DELIVERY_PARSER_VERSION =
   'delivery-v4';
