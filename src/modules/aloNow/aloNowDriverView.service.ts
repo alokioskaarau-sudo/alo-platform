@@ -12,6 +12,9 @@ export type AloNowAvailableDeliveryView = {
   workspace: AloNowDelivery["fulfillment_workspace"];
   status: AloNowDelivery["delivery_status"];
   requiresAgeCheck: boolean;
+  ageRequirement: AloNowDelivery["age_requirement"];
+  ageVerificationStatus:
+    AloNowDelivery["age_verification_status"];
   temperatureClass: AloNowDelivery["temperature_class"];
   servicePriority: number;
   promisedDeliveryAt: Date | null;
@@ -55,6 +58,9 @@ export function toAloNowAvailableDeliveryView(
     workspace: delivery.fulfillment_workspace,
     status: delivery.delivery_status,
     requiresAgeCheck: delivery.requires_age_check,
+    ageRequirement: delivery.age_requirement,
+    ageVerificationStatus:
+      delivery.age_verification_status,
     temperatureClass: delivery.temperature_class,
     servicePriority: delivery.service_priority,
     promisedDeliveryAt: delivery.promised_delivery_at,
