@@ -15,6 +15,7 @@ import {
   listActiveAloNowDeliveriesForDriver,
   listAvailableAloNowDeliveriesForDriver,
   setAloNowDriverDeliveryStatus,
+  verifyAloNowAgeAtHandoff,
 } from "../database/aloNowDeliveries.js";
 
 import {
@@ -546,6 +547,70 @@ aloNowRouter.post(
 );
 
 
+
+aloNowRouter.post(
+  "/deliveries/:orderId/verify-age",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const staffUser =
+        getStaffUser(res);
+
+      const orderId =
+        String(
+          req.params.orderId ?? ""
+        ).trim();
+
+      if (!orderId) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "SHOPIFY_ORDER_ID_REQUIRED",
+        });
+      }
+
+      const result =
+        await verifyAloNowAgeAtHandoff(
+          orderId,
+          staffUser.id
+        );
+
+      if (!result.ok) {
+        const status =
+          result.reason === "NOT_FOUND"
+            ? 404
+            : result.reason ===
+                "NOT_ASSIGNED_TO_DRIVER"
+              ? 403
+              : 409;
+
+        return res.status(status).json({
+          ok: false,
+          error: result.reason,
+          delivery: result.delivery,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        delivery: result.delivery,
+        alreadyVerified:
+          result.alreadyVerified,
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW AGE VERIFY ERROR",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "ALO_NOW_AGE_VERIFY_FAILED",
+      });
+    }
+  }
+);
 
 aloNowRouter.post(
   "/deliveries/:orderId/deliver",

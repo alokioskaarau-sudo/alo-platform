@@ -23,7 +23,7 @@ type AvailableDriverRow = {
 
 export async function getAloNowAvailability(
   workspace: AloNowWorkspace,
-  requiresAgeCheck = false
+  _requiresAgeCheck = false
 ): Promise<AloNowAvailabilityResult> {
   const result =
     await db.query<AvailableDriverRow>(
@@ -52,11 +52,6 @@ export async function getAloNowAvailability(
             driver.home_workspace = 'ONLINE'
             OR driver.home_workspace = $1
           )
-          AND (
-            $2 = FALSE
-            OR driver.approved_for_age_restricted =
-              TRUE
-          )
         GROUP BY
           driver.staff_user_id,
           driver.max_active_deliveries
@@ -70,7 +65,6 @@ export async function getAloNowAvailability(
       `,
       [
         workspace,
-        requiresAgeCheck,
       ]
     );
 

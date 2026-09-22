@@ -54,7 +54,7 @@ export async function getAloDriverProfile(
 
 export async function isAloDriverAvailable(
   staffUserId: string,
-  requiresAgeCheck = false
+  _requiresAgeCheck = false
 ): Promise<boolean> {
   const result =
     await db.query(
@@ -66,11 +66,6 @@ export async function isAloDriverAvailable(
           AND driver.approved = TRUE
           AND driver.availability_status =
             'ONLINE'
-          AND (
-            $2 = FALSE
-            OR driver.approved_for_age_restricted =
-              TRUE
-          )
           AND (
             SELECT COUNT(*)::INTEGER
             FROM alo_now_deliveries delivery
@@ -88,7 +83,6 @@ export async function isAloDriverAvailable(
       `,
       [
         staffUserId,
-        requiresAgeCheck,
       ]
     );
 

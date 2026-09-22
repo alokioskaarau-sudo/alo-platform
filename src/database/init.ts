@@ -1161,6 +1161,39 @@ export async function initializeDatabase() {
       requires_age_check BOOLEAN
         NOT NULL
         DEFAULT FALSE,
+      age_requirement TEXT
+        NOT NULL
+        DEFAULT 'NONE'
+        CHECK (
+          age_requirement IN (
+            'NONE',
+            'AGE_16',
+            'AGE_18'
+          )
+        ),
+      age_verification_status TEXT
+        NOT NULL
+        DEFAULT 'NOT_REQUIRED'
+        CHECK (
+          age_verification_status IN (
+            'NOT_REQUIRED',
+            'PENDING',
+            'VERIFIED_ONLINE',
+            'VERIFIED_AT_HANDOFF'
+          )
+        ),
+      age_verification_method TEXT
+        CHECK (
+          age_verification_method IS NULL
+          OR age_verification_method IN (
+            'ONLINE_IDENTITY',
+            'ID_CHECK'
+          )
+        ),
+      age_verified_at TIMESTAMPTZ,
+      age_verified_by_driver_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL,
 
       temperature_class TEXT
         NOT NULL
@@ -1203,6 +1236,78 @@ export async function initializeDatabase() {
         NOT NULL
         DEFAULT NOW()
     );
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_deliveries
+      ADD COLUMN IF NOT EXISTS age_requirement TEXT
+        NOT NULL DEFAULT 'NONE',
+      ADD COLUMN IF NOT EXISTS age_verification_status TEXT
+        NOT NULL DEFAULT 'NOT_REQUIRED',
+      ADD COLUMN IF NOT EXISTS age_verification_method TEXT,
+      ADD COLUMN IF NOT EXISTS age_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS age_verified_by_driver_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname =
+          'alo_now_deliveries_age_requirement_check'
+      ) THEN
+        ALTER TABLE alo_now_deliveries
+          ADD CONSTRAINT
+            alo_now_deliveries_age_requirement_check
+          CHECK (
+            age_requirement IN (
+              'NONE',
+              'AGE_16',
+              'AGE_18'
+            )
+          );
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname =
+          'alo_now_deliveries_age_verification_status_check'
+      ) THEN
+        ALTER TABLE alo_now_deliveries
+          ADD CONSTRAINT
+            alo_now_deliveries_age_verification_status_check
+          CHECK (
+            age_verification_status IN (
+              'NOT_REQUIRED',
+              'PENDING',
+              'VERIFIED_ONLINE',
+              'VERIFIED_AT_HANDOFF'
+            )
+          );
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname =
+          'alo_now_deliveries_age_verification_method_check'
+      ) THEN
+        ALTER TABLE alo_now_deliveries
+          ADD CONSTRAINT
+            alo_now_deliveries_age_verification_method_check
+          CHECK (
+            age_verification_method IS NULL
+            OR age_verification_method IN (
+              'ONLINE_IDENTITY',
+              'ID_CHECK'
+            )
+          );
+      END IF;
+    END
+    $$;
   `);
 
   await db.query(`

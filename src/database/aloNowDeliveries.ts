@@ -14,6 +14,21 @@ export type AloNowWorkspace =
   | "OLTEN"
   | "ONLINE";
 
+export type AloNowAgeRequirement =
+  | "NONE"
+  | "AGE_16"
+  | "AGE_18";
+
+export type AloNowAgeVerificationStatus =
+  | "NOT_REQUIRED"
+  | "PENDING"
+  | "VERIFIED_ONLINE"
+  | "VERIFIED_AT_HANDOFF";
+
+export type AloNowAgeVerificationMethod =
+  | "ONLINE_IDENTITY"
+  | "ID_CHECK";
+
 export type AloNowDelivery = {
   id: string;
   shopify_order_id: string;
@@ -22,6 +37,14 @@ export type AloNowDelivery = {
   delivery_status: AloNowDeliveryStatus;
   assigned_driver_user_id: string | null;
   requires_age_check: boolean;
+  age_requirement: AloNowAgeRequirement;
+  age_verification_status:
+    AloNowAgeVerificationStatus;
+  age_verification_method:
+    AloNowAgeVerificationMethod | null;
+  age_verified_at: Date | null;
+  age_verified_by_driver_user_id:
+    string | null;
   temperature_class:
     | "AMBIENT"
     | "CHILLED"
@@ -54,6 +77,11 @@ export async function getAloNowDelivery(
           delivery_status,
           assigned_driver_user_id,
           requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
           temperature_class,
           service_priority,
           promised_delivery_at,
@@ -81,7 +109,9 @@ export async function ensureAloNowDelivery(
   shopifyOrderId: string,
   shopifyOrderName: string,
   fulfillmentWorkspace: AloNowWorkspace = "ONLINE",
-  requiresAgeCheck = false
+  requiresAgeCheck = false,
+  ageRequirement: AloNowAgeRequirement =
+    requiresAgeCheck ? "AGE_18" : "NONE"
 ): Promise<AloNowDelivery> {
   const result =
     await db.query<AloNowDelivery>(
@@ -90,13 +120,21 @@ export async function ensureAloNowDelivery(
           shopify_order_id,
           shopify_order_name,
           fulfillment_workspace,
-          requires_age_check
+          requires_age_check,
+          age_requirement,
+          age_verification_status
         )
         VALUES (
           $1,
           $2,
           $3,
-          $4
+          $4,
+          $5,
+          CASE
+            WHEN $5 = 'NONE'
+              THEN 'NOT_REQUIRED'
+            ELSE 'PENDING'
+          END
         )
         ON CONFLICT (shopify_order_id)
         DO UPDATE SET
@@ -107,6 +145,40 @@ export async function ensureAloNowDelivery(
           requires_age_check =
             alo_now_deliveries.requires_age_check
             OR EXCLUDED.requires_age_check,
+          age_requirement =
+            CASE
+              WHEN
+                alo_now_deliveries.age_requirement =
+                  'AGE_18'
+                OR EXCLUDED.age_requirement =
+                  'AGE_18'
+                THEN 'AGE_18'
+              WHEN
+                alo_now_deliveries.age_requirement =
+                  'AGE_16'
+                OR EXCLUDED.age_requirement =
+                  'AGE_16'
+                THEN 'AGE_16'
+              ELSE 'NONE'
+            END,
+          age_verification_status =
+            CASE
+              WHEN
+                alo_now_deliveries.age_verification_status
+                  IN (
+                    'VERIFIED_ONLINE',
+                    'VERIFIED_AT_HANDOFF'
+                  )
+                THEN
+                  alo_now_deliveries.age_verification_status
+              WHEN
+                alo_now_deliveries.age_requirement <>
+                  'NONE'
+                OR EXCLUDED.age_requirement <>
+                  'NONE'
+                THEN 'PENDING'
+              ELSE 'NOT_REQUIRED'
+            END,
           updated_at = NOW()
         RETURNING
           id,
@@ -116,6 +188,11 @@ export async function ensureAloNowDelivery(
           delivery_status,
           assigned_driver_user_id,
           requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
           temperature_class,
           service_priority,
           promised_delivery_at,
@@ -134,7 +211,8 @@ export async function ensureAloNowDelivery(
         shopifyOrderId,
         shopifyOrderName,
         fulfillmentWorkspace,
-        requiresAgeCheck,
+        requiresAgeCheck || ageRequirement !== "NONE",
+        ageRequirement,
       ]
     );
 
@@ -173,7 +251,6 @@ export async function claimAloNowDelivery(
         availability_status:
           | "OFFLINE"
           | "ONLINE";
-        approved_for_age_restricted: boolean;
         max_active_deliveries: number;
         home_workspace: AloNowWorkspace;
       }>(
@@ -182,7 +259,6 @@ export async function claimAloNowDelivery(
             staff_user_id,
             approved,
             availability_status,
-            approved_for_age_restricted,
             max_active_deliveries,
             home_workspace
           FROM alo_driver_profiles
@@ -206,6 +282,11 @@ export async function claimAloNowDelivery(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -267,10 +348,6 @@ export async function claimAloNowDelivery(
       !driver.approved ||
       driver.availability_status !==
         "ONLINE" ||
-      (
-        delivery.requires_age_check &&
-        !driver.approved_for_age_restricted
-      ) ||
       (
         driver &&
         driver.home_workspace !== "ONLINE" &&
@@ -372,6 +449,11 @@ export async function claimAloNowDelivery(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -442,6 +524,7 @@ export type CompleteAloNowDeliveryResult =
       reason:
         | "NOT_FOUND"
         | "NOT_ASSIGNED_TO_DRIVER"
+        | "AGE_VERIFICATION_REQUIRED"
         | "INVALID_STATUS";
       delivery: AloNowDelivery | null;
     };
@@ -467,6 +550,11 @@ export async function completeAloNowDelivery(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -540,6 +628,22 @@ export async function completeAloNowDelivery(
       };
     }
 
+    if (
+      delivery.age_requirement !== "NONE" &&
+      delivery.age_verification_status !==
+        "VERIFIED_ONLINE" &&
+      delivery.age_verification_status !==
+        "VERIFIED_AT_HANDOFF"
+    ) {
+      await client.query("ROLLBACK");
+
+      return {
+        ok: false,
+        reason: "AGE_VERIFICATION_REQUIRED",
+        delivery,
+      };
+    }
+
     const completedResult =
       await client.query<AloNowDelivery>(
         `
@@ -559,6 +663,13 @@ export async function completeAloNowDelivery(
             AND assigned_driver_user_id = $2
             AND delivery_status =
               'ON_THE_WAY'
+            AND (
+              age_requirement = 'NONE'
+              OR age_verification_status IN (
+                'VERIFIED_ONLINE',
+                'VERIFIED_AT_HANDOFF'
+              )
+            )
           RETURNING
             id,
             shopify_order_id,
@@ -567,6 +678,11 @@ export async function completeAloNowDelivery(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -602,6 +718,216 @@ export async function completeAloNowDelivery(
       ok: true,
       delivery: completed,
       alreadyDelivered: false,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+    }
+
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export type VerifyAloNowAgeAtHandoffResult =
+  | {
+      ok: true;
+      delivery: AloNowDelivery;
+      alreadyVerified: boolean;
+    }
+  | {
+      ok: false;
+      reason:
+        | "NOT_FOUND"
+        | "NOT_ASSIGNED_TO_DRIVER"
+        | "AGE_VERIFICATION_NOT_REQUIRED"
+        | "INVALID_STATUS";
+      delivery: AloNowDelivery | null;
+    };
+
+export async function verifyAloNowAgeAtHandoff(
+  shopifyOrderId: string,
+  staffUserId: string
+): Promise<VerifyAloNowAgeAtHandoffResult> {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const result =
+      await client.query<AloNowDelivery>(
+        `
+          SELECT
+            id,
+            shopify_order_id,
+            shopify_order_name,
+            fulfillment_workspace,
+            delivery_status,
+            assigned_driver_user_id,
+            requires_age_check,
+            age_requirement,
+            age_verification_status,
+            age_verification_method,
+            age_verified_at,
+            age_verified_by_driver_user_id,
+            temperature_class,
+            service_priority,
+            promised_delivery_at,
+            estimated_delivery_at,
+            assigned_at,
+            ready_for_pickup_at,
+            picked_up_at,
+            on_the_way_at,
+            delivered_at,
+            cancelled_at,
+            version,
+            created_at,
+            updated_at
+          FROM alo_now_deliveries
+          WHERE shopify_order_id = $1
+          FOR UPDATE
+        `,
+        [shopifyOrderId]
+      );
+
+    const delivery = result.rows[0];
+
+    if (!delivery) {
+      await client.query("ROLLBACK");
+
+      return {
+        ok: false,
+        reason: "NOT_FOUND",
+        delivery: null,
+      };
+    }
+
+    if (
+      delivery.assigned_driver_user_id !==
+      staffUserId
+    ) {
+      await client.query("ROLLBACK");
+
+      return {
+        ok: false,
+        reason: "NOT_ASSIGNED_TO_DRIVER",
+        delivery,
+      };
+    }
+
+    if (delivery.age_requirement === "NONE") {
+      await client.query("ROLLBACK");
+
+      return {
+        ok: false,
+        reason: "AGE_VERIFICATION_NOT_REQUIRED",
+        delivery,
+      };
+    }
+
+    if (
+      delivery.age_verification_status ===
+        "VERIFIED_ONLINE" ||
+      delivery.age_verification_status ===
+        "VERIFIED_AT_HANDOFF"
+    ) {
+      await client.query("COMMIT");
+
+      return {
+        ok: true,
+        delivery,
+        alreadyVerified: true,
+      };
+    }
+
+    if (
+      delivery.delivery_status !==
+      "ON_THE_WAY"
+    ) {
+      await client.query("ROLLBACK");
+
+      return {
+        ok: false,
+        reason: "INVALID_STATUS",
+        delivery,
+      };
+    }
+
+    const verifiedResult =
+      await client.query<AloNowDelivery>(
+        `
+          UPDATE alo_now_deliveries
+          SET
+            age_verification_status =
+              'VERIFIED_AT_HANDOFF',
+            age_verification_method =
+              'ID_CHECK',
+            age_verified_at = NOW(),
+            age_verified_by_driver_user_id =
+              $2,
+            version = version + 1,
+            updated_at = NOW()
+          WHERE
+            shopify_order_id = $1
+            AND assigned_driver_user_id = $2
+            AND delivery_status =
+              'ON_THE_WAY'
+            AND age_requirement IN (
+              'AGE_16',
+              'AGE_18'
+            )
+            AND age_verification_status =
+              'PENDING'
+          RETURNING
+            id,
+            shopify_order_id,
+            shopify_order_name,
+            fulfillment_workspace,
+            delivery_status,
+            assigned_driver_user_id,
+            requires_age_check,
+            age_requirement,
+            age_verification_status,
+            age_verification_method,
+            age_verified_at,
+            age_verified_by_driver_user_id,
+            temperature_class,
+            service_priority,
+            promised_delivery_at,
+            estimated_delivery_at,
+            assigned_at,
+            ready_for_pickup_at,
+            picked_up_at,
+            on_the_way_at,
+            delivered_at,
+            cancelled_at,
+            version,
+            created_at,
+            updated_at
+        `,
+        [
+          shopifyOrderId,
+          staffUserId,
+        ]
+      );
+
+    const verified =
+      verifiedResult.rows[0];
+
+    if (!verified) {
+      throw new Error(
+        "ALO_NOW_AGE_VERIFY_FAILED_AFTER_LOCK"
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      ok: true,
+      delivery: verified,
+      alreadyVerified: false,
     };
   } catch (error) {
     try {
@@ -666,6 +992,11 @@ export async function setAloNowDriverDeliveryStatus(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -764,6 +1095,11 @@ export async function setAloNowDriverDeliveryStatus(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -849,6 +1185,11 @@ export async function markAloNowReadyForPickup(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -954,6 +1295,11 @@ export async function markAloNowReadyForPickup(
             delivery_status,
             assigned_driver_user_id,
             requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
             temperature_class,
             service_priority,
             promised_delivery_at,
@@ -1041,10 +1387,6 @@ export async function listAvailableAloNowDeliveriesForDriver(
               driver.home_workspace
           )
           AND (
-            delivery.requires_age_check = FALSE
-            OR driver.approved_for_age_restricted = TRUE
-          )
-          AND (
             SELECT COUNT(*)::INTEGER
             FROM alo_now_deliveries active_delivery
             WHERE
@@ -1082,6 +1424,11 @@ export async function listActiveAloNowDeliveriesForDriver(
           delivery_status,
           assigned_driver_user_id,
           requires_age_check,
+          age_requirement,
+          age_verification_status,
+          age_verification_method,
+          age_verified_at,
+          age_verified_by_driver_user_id,
           temperature_class,
           service_priority,
           promised_delivery_at,

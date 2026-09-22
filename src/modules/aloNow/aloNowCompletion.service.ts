@@ -55,6 +55,24 @@ export async function completeAloNowDeliveryForDriver(
     );
   }
 
+  const ageVerificationRequired =
+    delivery.age_requirement !== "NONE";
+
+  const ageVerificationComplete =
+    delivery.age_verification_status ===
+      "VERIFIED_ONLINE" ||
+    delivery.age_verification_status ===
+      "VERIFIED_AT_HANDOFF";
+
+  if (
+    ageVerificationRequired &&
+    !ageVerificationComplete
+  ) {
+    throw new Error(
+      "ALO_NOW_AGE_VERIFICATION_REQUIRED"
+    );
+  }
+
   const workflow =
     await getOrderFulfillmentWorkflow(
       shopifyOrderId
