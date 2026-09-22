@@ -39,7 +39,31 @@ import {
 
 const router = Router();
 
-router.use(requireStaffAuth);
+router.use((req, res, next) => {
+  const path = req.path;
+
+  const isProductOpsPath =
+    path === "/api/product-master" ||
+    path.startsWith("/api/product-master/") ||
+    path === "/api/product-image" ||
+    path.startsWith("/api/product-image/") ||
+    path === "/api/product-ops" ||
+    path.startsWith("/api/product-ops/");
+
+  if (!isProductOpsPath) {
+    return next();
+  }
+
+  const isPublicProductImage =
+    req.method === "GET" &&
+    /^\/api\/product-master\/[^/]+\/image$/.test(path);
+
+  if (isPublicProductImage) {
+    return next();
+  }
+
+  return requireStaffAuth(req, res, next);
+});
 
 const productStudioOpenAI = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
