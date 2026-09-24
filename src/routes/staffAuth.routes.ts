@@ -22,6 +22,10 @@ import {
   requireStaffAuth,
 } from "../middleware/staffAuth.js";
 
+import {
+  capabilitiesForRole,
+} from "../middleware/staffRbac.js";
+
 const router =
   Router();
 
@@ -126,33 +130,44 @@ async function verifyCredential(
 function publicUser(
   row: any
 ) {
+  const role =
+    String(row.role) as
+      import("../middleware/staffAuth.js").StaffRole;
+
   return {
     id: String(row.id),
+
     username:
       String(row.username),
+
     displayName:
       String(row.display_name),
-    role:
-      String(row.role),
+
+    role,
+
     defaultWorkspace:
       String(
         row.default_workspace
       ),
+
     allowedWorkspaces:
       Array.isArray(
         row.allowed_workspaces
       )
         ? row.allowed_workspaces
         : [],
+
+    capabilities:
+      capabilitiesForRole(role),
   };
 }
 
 /*
  * Bootstrap-Helfer:
- * wird später für die initialen
+ * wird spÃƒÂ¤ter fÃƒÂ¼r die initialen
  * Mitarbeiterkonten genutzt.
  *
- * Keine Route gibt Hashes zurück.
+ * Keine Route gibt Hashes zurÃƒÂ¼ck.
  */
 export async function createStaffCredentialHash(
   credential: string
@@ -162,6 +177,361 @@ export async function createStaffCredentialHash(
   );
 }
 
+
+/* =========================================================
+   SELF REGISTRATION
+
+   Jeder neue Crew-Mitarbeiter darf sein eigenes Profil
+   erstellen.
+
+   Sicherheitsregeln:
+   - keine Selbstvergabe von ADMIN / MANAGER
+   - normale Crew -> STAFF
+   - Praktikant -> PRAKTIKANT
+   - Fahrer -> DRIVER
+   - PIN/Credential wird nur als scrypt Hash gespeichert
+   - Username muss eindeutig sein
+   - Driver-Profil startet OFFLINE
+========================================================= */
+
+router.post(
+  "/register",
+  async (req, res) => {
+    const displayName =
+      cleanText(
+        req.body?.displayName
+      );
+
+    const username =
+      cleanText(
+        req.body?.username
+      )
+        .toLowerCase();
+
+    const credential =
+      cleanText(
+        req.body?.credential
+      );
+
+    const requestedProfile =
+      cleanText(
+        req.body?.profileType
+      )
+        .toUpperCase();
+
+    const requestedWorkspace =
+      cleanText(
+        req.body?.workspace
+      )
+        .toUpperCase();
+
+    const transportType =
+      cleanText(
+        req.body?.transportType
+      )
+        .toUpperCase();
+
+    if (
+      displayName.length < 2 ||
+      displayName.length > 80
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Bitte einen gültigen Namen eingeben.",
+      });
+    }
+
+    if (
+      !/^[a-z0-9._-]{3,32}$/.test(
+        username
+      )
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Benutzername muss 3-32 Zeichen haben und darf nur Buchstaben, Zahlen, Punkt, Minus und Unterstrich enthalten.",
+      });
+    }
+
+    if (
+      credential.length < 4 ||
+      credential.length > 64
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "PIN muss mindestens 4 Zeichen haben.",
+      });
+    }
+
+    /*
+     * Niemals ADMIN/MANAGER aus einem
+     * öffentlichen Request übernehmen.
+     */
+    let role:
+      | "STAFF"
+      | "PRAKTIKANT"
+      | "DRIVER" =
+        "STAFF";
+
+    if (
+      requestedProfile ===
+      "PRAKTIKANT"
+    ) {
+      role =
+        "PRAKTIKANT";
+    }
+
+    if (
+      requestedProfile ===
+      "DRIVER"
+    ) {
+      role =
+        "DRIVER";
+    }
+
+    const validWorkspaces =
+      new Set([
+        "AARAU",
+        "OLTEN",
+        "ONLINE",
+      ]);
+
+    const defaultWorkspace =
+      validWorkspaces.has(
+        requestedWorkspace
+      )
+        ? requestedWorkspace
+        : "ONLINE";
+
+    /*
+     * Normale Crew kann zwischen den
+     * operativen Workspaces wechseln.
+     *
+     * Das ist KEINE Admin-Berechtigung.
+     * Die tatsächlichen Funktionen kommen
+     * weiterhin aus capabilitiesForRole().
+     */
+    const allowedWorkspaces =
+      role === "DRIVER"
+        ? [
+            defaultWorkspace,
+          ]
+        : [
+            "AARAU",
+            "OLTEN",
+            "ONLINE",
+          ];
+
+    const credentialHash =
+      await hashCredential(
+        credential
+      );
+
+    const client =
+      await db.connect();
+
+    try {
+      await client.query(
+        "BEGIN"
+      );
+
+      const existing =
+        await client.query(
+          `
+            SELECT id
+            FROM staff_users
+            WHERE LOWER(username) =
+              LOWER($1)
+            LIMIT 1
+          `,
+          [
+            username,
+          ]
+        );
+
+      if (
+        existing.rowCount &&
+        existing.rowCount > 0
+      ) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        return res.status(409).json({
+          ok: false,
+          error:
+            "Dieser Benutzername ist bereits vergeben.",
+        });
+      }
+
+      const inserted =
+        await client.query(
+          `
+            INSERT INTO staff_users (
+              username,
+              display_name,
+              credential_hash,
+              role,
+              default_workspace,
+              allowed_workspaces,
+              active
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5,
+              $6::TEXT[],
+              TRUE
+            )
+            RETURNING *
+          `,
+          [
+            username,
+            displayName,
+            credentialHash,
+            role,
+            defaultWorkspace,
+            allowedWorkspaces,
+          ]
+        );
+
+      const user =
+        inserted.rows[0];
+
+      /*
+       * Fahrer bekommt automatisch sein
+       * ALO-NOW-Profil.
+       *
+       * approved bleibt bewusst FALSE:
+       * Profil selbst erstellen = erlaubt,
+       * aber Delivery-Freigabe bleibt
+       * kontrolliert.
+       */
+      if (
+        role === "DRIVER"
+      ) {
+        await client.query(
+          `
+            INSERT INTO alo_driver_profiles (
+              staff_user_id,
+              approved,
+              availability_status,
+              home_workspace,
+              transport_type,
+              approved_for_age_restricted,
+              max_active_deliveries
+            )
+            VALUES (
+              $1,
+              FALSE,
+              'OFFLINE',
+              $2,
+              $3,
+              FALSE,
+              3
+            )
+            ON CONFLICT (
+              staff_user_id
+            )
+            DO NOTHING
+          `,
+          [
+            user.id,
+            defaultWorkspace,
+            transportType ||
+              null,
+          ]
+        );
+      }
+
+      /*
+       * Direkt eine Session erzeugen,
+       * damit Registrierung -> Workspace
+       * ohne zweiten Login funktioniert.
+       */
+      const token =
+        randomBytes(32)
+          .toString("hex");
+
+      const tokenHash =
+        hashToken(token);
+
+      await client.query(
+        `
+          INSERT INTO staff_sessions (
+            staff_user_id,
+            token_hash,
+            expires_at
+          )
+          VALUES (
+            $1,
+            $2,
+            NOW() +
+              ($3 || ' days')::INTERVAL
+          )
+        `,
+        [
+          user.id,
+          tokenHash,
+          SESSION_DAYS,
+        ]
+      );
+
+      await client.query(
+        "COMMIT"
+      );
+
+      return res.status(201).json({
+        ok: true,
+
+        token,
+
+        user:
+          publicUser(user),
+
+        requiresDriverApproval:
+          role === "DRIVER",
+      });
+    }
+    catch (error: any) {
+      await client.query(
+        "ROLLBACK"
+      );
+
+      /*
+       * PostgreSQL unique violation.
+       */
+      if (
+        error?.code ===
+        "23505"
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "Dieser Benutzername ist bereits vergeben.",
+        });
+      }
+
+      console.error(
+        "[staff-auth/register]",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Profil konnte nicht erstellt werden.",
+      });
+    }
+    finally {
+      client.release();
+    }
+  }
+);
 /* =========================================================
    CREATE STAFF / DRIVER PROFILE
 
@@ -241,7 +611,7 @@ router.post(
     ) {
       return res.status(422).json({
         ok: false,
-        error: "Ungültige Mitarbeiterrolle.",
+        error: "UngÃƒÂ¼ltige Mitarbeiterrolle.",
       });
     }
 
@@ -255,7 +625,7 @@ router.post(
       return res.status(403).json({
         ok: false,
         error:
-          "Manager dürfen nur STAFF- oder PRAKTIKANT-Profile erstellen.",
+          "Manager dÃƒÂ¼rfen nur STAFF- oder PRAKTIKANT-Profile erstellen.",
       });
     }
 
@@ -282,7 +652,7 @@ router.post(
     ) {
       return res.status(422).json({
         ok: false,
-        error: "Ungültiger Workspace.",
+        error: "UngÃƒÂ¼ltiger Workspace.",
       });
     }
 
@@ -297,7 +667,7 @@ router.post(
     ) {
       return res.status(422).json({
         ok: false,
-        error: "Ungültiges Transportmittel.",
+        error: "UngÃƒÂ¼ltiges Transportmittel.",
       });
     }
 
@@ -581,10 +951,10 @@ router.get(
    FIRST-PIN ENROLLMENT ISSUE
 
    Security:
-   - niemals Token-Hashes zurückgeben
+   - niemals Token-Hashes zurÃƒÂ¼ckgeben
    - bestehende offene FIRST_PIN Tokens werden widerrufen
    - Token ist kurzlebig
-   - nur für Accounts ohne bestehende PIN
+   - nur fÃƒÂ¼r Accounts ohne bestehende PIN
 ========================================================= */
 
 router.post(
@@ -603,7 +973,7 @@ router.post(
         .json({
           ok: false,
           error:
-            "Keine Berechtigung für Mitarbeiter-Einrichtung.",
+            "Keine Berechtigung fÃƒÂ¼r Mitarbeiter-Einrichtung.",
         });
     }
 
@@ -695,7 +1065,7 @@ router.post(
           .json({
             ok: false,
             error:
-              "Für diesen Mitarbeiter ist bereits ein PIN eingerichtet.",
+              "FÃƒÂ¼r diesen Mitarbeiter ist bereits ein PIN eingerichtet.",
           });
       }
 
@@ -724,7 +1094,7 @@ router.post(
         );
 
       /*
-       * 15 Minuten reichen für die
+       * 15 Minuten reichen fÃƒÂ¼r die
        * unmittelbare Ersteinrichtung.
        */
       const expiresAt =
@@ -797,7 +1167,7 @@ router.post(
         /*
          * Raw Token wird genau hier einmalig
          * an den berechtigten Client geliefert.
-         * In der DB liegt ausschließlich SHA-256.
+         * In der DB liegt ausschlieÃƒÅ¸lich SHA-256.
          */
         enrollmentToken,
 
@@ -894,7 +1264,7 @@ router.post(
           .json({
             ok: false,
             error:
-              "Die PINs stimmen nicht überein.",
+              "Die PINs stimmen nicht ÃƒÂ¼berein.",
           });
       }
 
@@ -1364,7 +1734,7 @@ router.post(
         .json({
           ok: false,
           error:
-            "Anmeldung konnte nicht durchgeführt werden.",
+            "Anmeldung konnte nicht durchgefÃƒÂ¼hrt werden.",
         });
     }
   }
@@ -1378,10 +1748,20 @@ router.get(
   "/me",
   requireStaffAuth,
   async (_req, res) => {
+    const user =
+      getStaffUser(res);
+
     return res.json({
       ok: true,
-      user:
-        getStaffUser(res),
+
+      user: {
+        ...user,
+
+        capabilities:
+          capabilitiesForRole(
+            user.role
+          ),
+      },
     });
   }
 );
@@ -1466,10 +1846,12 @@ router.post(
         .json({
           ok: false,
           error:
-            "Abmeldung konnte nicht durchgeführt werden.",
+            "Abmeldung konnte nicht durchgefÃƒÂ¼hrt werden.",
         });
     }
   }
 );
 
 export default router;
+
+
