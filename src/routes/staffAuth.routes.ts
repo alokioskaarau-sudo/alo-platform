@@ -1,4 +1,4 @@
-import {
+﻿import {
   Router,
 } from "express";
 
@@ -127,6 +127,77 @@ async function verifyCredential(
   );
 }
 
+function stringArray(
+  value: unknown
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) =>
+      String(item).trim()
+    )
+    .filter(Boolean);
+}
+
+
+function capabilitiesForStaff(
+  input: {
+    role: string;
+    jobKey?: string | null;
+    permissions?: unknown;
+    deniedPermissions?: unknown;
+  }
+): string[] {
+
+  /*
+   * ADMIN bleibt uneingeschränkt.
+   * Damit kann Maxim als Admin weiterhin alles.
+   */
+  if (input.role === "ADMIN") {
+    return Array.from(
+      new Set(
+        capabilitiesForRole(
+          "ADMIN"
+        )
+      )
+    );
+  }
+
+  /*
+   * Bestehendes Rollenmodell bleibt Baseline.
+   * Job-Rechte werden später feiner erweitert.
+   */
+  const base =
+    capabilitiesForRole(
+      input.role as any
+    );
+
+  const allow =
+    stringArray(
+      input.permissions
+    );
+
+  const deny =
+    new Set(
+      stringArray(
+        input.deniedPermissions
+      )
+    );
+
+  return Array.from(
+    new Set([
+      ...base,
+      ...allow,
+    ])
+  ).filter(
+    (capability) =>
+      !deny.has(capability)
+  );
+}
+
+
 function publicUser(
   row: any
 ) {
@@ -134,8 +205,31 @@ function publicUser(
     String(row.role) as
       import("../middleware/staffAuth.js").StaffRole;
 
+  const jobKey =
+    String(
+      row.job_key ||
+      (
+        role === "ADMIN"
+          ? "admin"
+          : role === "MANAGER"
+          ? "management"
+          : "sales"
+      )
+    );
+
+  const permissions =
+    stringArray(
+      row.permissions
+    );
+
+  const deniedPermissions =
+    stringArray(
+      row.denied_permissions
+    );
+
   return {
-    id: String(row.id),
+    id:
+      String(row.id),
 
     username:
       String(row.username),
@@ -145,30 +239,65 @@ function publicUser(
 
     role,
 
+    jobKey,
+
     defaultWorkspace:
       String(
         row.default_workspace
       ),
 
     allowedWorkspaces:
-      Array.isArray(
+      stringArray(
         row.allowed_workspaces
-      )
-        ? row.allowed_workspaces
-        : [],
+      ),
+
+    permissions,
+
+    deniedPermissions,
+
+    active:
+      row.active === undefined
+        ? true
+        : Boolean(row.active),
+
+    profileNote:
+      row.profile_note == null
+        ? null
+        : String(
+            row.profile_note
+          ),
+
+    avatarUrl:
+      row.avatar_url == null
+        ? null
+        : String(
+            row.avatar_url
+          ),
+
+    approvedAt:
+      row.approved_at == null
+        ? null
+        : String(
+            row.approved_at
+          ),
+
+    approvedBy:
+      row.approved_by == null
+        ? null
+        : String(
+            row.approved_by
+          ),
 
     capabilities:
-      capabilitiesForRole(role),
+      capabilitiesForStaff({
+        role,
+        jobKey,
+        permissions,
+        deniedPermissions,
+      }),
   };
 }
 
-/*
- * Bootstrap-Helfer:
- * wird spÃƒÂ¤ter fÃƒÂ¼r die initialen
- * Mitarbeiterkonten genutzt.
- *
- * Keine Route gibt Hashes zurÃƒÂ¼ck.
- */
 export async function createStaffCredentialHash(
   credential: string
 ) {
@@ -238,7 +367,7 @@ router.post(
       return res.status(400).json({
         ok: false,
         error:
-          "Bitte einen gültigen Namen eingeben.",
+          "Bitte einen gÃ¼ltigen Namen eingeben.",
       });
     }
 
@@ -267,7 +396,7 @@ router.post(
 
     /*
      * Niemals ADMIN/MANAGER aus einem
-     * öffentlichen Request übernehmen.
+     * Ã¶ffentlichen Request Ã¼bernehmen.
      */
     let role:
       | "STAFF"
@@ -310,7 +439,7 @@ router.post(
      * operativen Workspaces wechseln.
      *
      * Das ist KEINE Admin-Berechtigung.
-     * Die tatsächlichen Funktionen kommen
+     * Die tatsÃ¤chlichen Funktionen kommen
      * weiterhin aus capabilitiesForRole().
      */
     const allowedWorkspaces =
@@ -372,7 +501,7 @@ router.post(
             INSERT INTO staff_users (
               username,
               display_name,
-              credential_hash,
+              pin_hash,
               role,
               default_workspace,
               allowed_workspaces,
@@ -611,7 +740,7 @@ router.post(
     ) {
       return res.status(422).json({
         ok: false,
-        error: "UngÃƒÂ¼ltige Mitarbeiterrolle.",
+        error: "UngÃƒÆ’Ã‚Â¼ltige Mitarbeiterrolle.",
       });
     }
 
@@ -625,7 +754,7 @@ router.post(
       return res.status(403).json({
         ok: false,
         error:
-          "Manager dÃƒÂ¼rfen nur STAFF- oder PRAKTIKANT-Profile erstellen.",
+          "Manager dÃƒÆ’Ã‚Â¼rfen nur STAFF- oder PRAKTIKANT-Profile erstellen.",
       });
     }
 
@@ -652,7 +781,7 @@ router.post(
     ) {
       return res.status(422).json({
         ok: false,
-        error: "UngÃƒÂ¼ltiger Workspace.",
+        error: "UngÃƒÆ’Ã‚Â¼ltiger Workspace.",
       });
     }
 
@@ -667,7 +796,7 @@ router.post(
     ) {
       return res.status(422).json({
         ok: false,
-        error: "UngÃƒÂ¼ltiges Transportmittel.",
+        error: "UngÃƒÆ’Ã‚Â¼ltiges Transportmittel.",
       });
     }
 
@@ -889,6 +1018,7 @@ router.post(
 
 router.get(
   "/users",
+  requireStaffAuth,
   async (_req, res) => {
     try {
       const result =
@@ -951,10 +1081,10 @@ router.get(
    FIRST-PIN ENROLLMENT ISSUE
 
    Security:
-   - niemals Token-Hashes zurÃƒÂ¼ckgeben
+   - niemals Token-Hashes zurÃƒÆ’Ã‚Â¼ckgeben
    - bestehende offene FIRST_PIN Tokens werden widerrufen
    - Token ist kurzlebig
-   - nur fÃƒÂ¼r Accounts ohne bestehende PIN
+   - nur fÃƒÆ’Ã‚Â¼r Accounts ohne bestehende PIN
 ========================================================= */
 
 router.post(
@@ -973,7 +1103,7 @@ router.post(
         .json({
           ok: false,
           error:
-            "Keine Berechtigung fÃƒÂ¼r Mitarbeiter-Einrichtung.",
+            "Keine Berechtigung fÃƒÆ’Ã‚Â¼r Mitarbeiter-Einrichtung.",
         });
     }
 
@@ -1065,7 +1195,7 @@ router.post(
           .json({
             ok: false,
             error:
-              "FÃƒÂ¼r diesen Mitarbeiter ist bereits ein PIN eingerichtet.",
+              "FÃƒÆ’Ã‚Â¼r diesen Mitarbeiter ist bereits ein PIN eingerichtet.",
           });
       }
 
@@ -1094,7 +1224,7 @@ router.post(
         );
 
       /*
-       * 15 Minuten reichen fÃƒÂ¼r die
+       * 15 Minuten reichen fÃƒÆ’Ã‚Â¼r die
        * unmittelbare Ersteinrichtung.
        */
       const expiresAt =
@@ -1167,7 +1297,7 @@ router.post(
         /*
          * Raw Token wird genau hier einmalig
          * an den berechtigten Client geliefert.
-         * In der DB liegt ausschlieÃƒÅ¸lich SHA-256.
+         * In der DB liegt ausschlieÃƒÆ’Ã…Â¸lich SHA-256.
          */
         enrollmentToken,
 
@@ -1264,7 +1394,7 @@ router.post(
           .json({
             ok: false,
             error:
-              "Die PINs stimmen nicht ÃƒÂ¼berein.",
+              "Die PINs stimmen nicht ÃƒÆ’Ã‚Â¼berein.",
           });
       }
 
@@ -1734,7 +1864,7 @@ router.post(
         .json({
           ok: false,
           error:
-            "Anmeldung konnte nicht durchgefÃƒÂ¼hrt werden.",
+            "Anmeldung konnte nicht durchgefÃƒÆ’Ã‚Â¼hrt werden.",
         });
     }
   }
@@ -1748,21 +1878,654 @@ router.get(
   "/me",
   requireStaffAuth,
   async (_req, res) => {
-    const user =
+    try {
+      const actor =
+        getStaffUser(res);
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              id,
+              username,
+              display_name,
+              role,
+              job_key,
+              default_workspace,
+              allowed_workspaces,
+              permissions,
+              denied_permissions,
+              profile_note,
+              avatar_url,
+              active,
+              approved_at,
+              approved_by
+            FROM staff_users
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [actor.id]
+        );
+
+      if (
+        result.rows.length === 0
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Mitarbeiter nicht gefunden.",
+          });
+      }
+
+      return res.json({
+        ok: true,
+        user:
+          publicUser(
+            result.rows[0]
+          ),
+      });
+
+    } catch (error) {
+
+      console.error(
+        "STAFF ME ERROR",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            "Profil konnte nicht geladen werden.",
+        });
+    }
+  }
+);
+
+
+router.patch(
+  "/me",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const actor =
+        getStaffUser(res);
+
+      const displayName =
+        typeof req.body?.displayName ===
+        "string"
+          ? req.body.displayName.trim()
+          : undefined;
+
+      const profileNote =
+        typeof req.body?.profileNote ===
+        "string"
+          ? req.body.profileNote.trim()
+          : undefined;
+
+      const avatarUrl =
+        typeof req.body?.avatarUrl ===
+        "string"
+          ? req.body.avatarUrl.trim()
+          : undefined;
+
+      if (
+        displayName !== undefined &&
+        !displayName
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Anzeigename darf nicht leer sein.",
+          });
+      }
+
+      const result =
+        await db.query(
+          `
+            UPDATE staff_users
+            SET
+              display_name =
+                COALESCE(
+                  $2,
+                  display_name
+                ),
+
+              profile_note =
+                CASE
+                  WHEN $3::boolean
+                    THEN $4
+                  ELSE profile_note
+                END,
+
+              avatar_url =
+                CASE
+                  WHEN $5::boolean
+                    THEN $6
+                  ELSE avatar_url
+                END,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+
+            RETURNING
+              id,
+              username,
+              display_name,
+              role,
+              job_key,
+              default_workspace,
+              allowed_workspaces,
+              permissions,
+              denied_permissions,
+              profile_note,
+              avatar_url,
+              active,
+              approved_at,
+              approved_by
+          `,
+          [
+            actor.id,
+
+            displayName ??
+              null,
+
+            profileNote !==
+              undefined,
+
+            profileNote ===
+              undefined
+              ? null
+              : profileNote ||
+                null,
+
+            avatarUrl !==
+              undefined,
+
+            avatarUrl ===
+              undefined
+              ? null
+              : avatarUrl ||
+                null,
+          ]
+        );
+
+      return res.json({
+        ok: true,
+        user:
+          publicUser(
+            result.rows[0]
+          ),
+      });
+
+    } catch (error) {
+
+      console.error(
+        "STAFF PROFILE UPDATE ERROR",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            "Profil konnte nicht gespeichert werden.",
+        });
+    }
+  }
+);
+
+
+/*
+ * ALO_STAFF_V2_ADMIN_UPDATE
+ *
+ * Central admin endpoint for:
+ * - role
+ * - operational job
+ * - workspaces
+ * - allow / deny permissions
+ * - active state
+ * - profile metadata
+ */
+
+router.patch(
+  "/users/:id",
+  requireStaffAuth,
+  async (req, res) => {
+    const actor =
       getStaffUser(res);
 
-    return res.json({
-      ok: true,
+    if (
+      actor.role !== "ADMIN"
+    ) {
+      return res
+        .status(403)
+        .json({
+          ok: false,
+          error:
+            "Nur Administratoren dürfen Mitarbeiterrechte ändern.",
+        });
+    }
 
-      user: {
-        ...user,
+    const targetId =
+      String(
+        req.params.id || ""
+      ).trim();
 
-        capabilities:
-          capabilitiesForRole(
-            user.role
+    if (
+      !/^\d+$/.test(
+        targetId
+      )
+    ) {
+      return res
+        .status(422)
+        .json({
+          ok: false,
+          error:
+            "Ungültige Mitarbeiter-ID.",
+        });
+    }
+
+    const validRoles =
+      new Set([
+        "ADMIN",
+        "MANAGER",
+        "STAFF",
+        "PRAKTIKANT",
+      ]);
+
+    const validJobs =
+      new Set([
+        "admin",
+        "management",
+        "store_manager",
+        "sales",
+        "warehouse",
+        "online_shop",
+        "packing",
+        "live_team",
+        "driver",
+      ]);
+
+    const validWorkspaces =
+      new Set([
+        "AARAU",
+        "OLTEN",
+        "ONLINE",
+      ]);
+
+    try {
+
+      const currentResult =
+        await db.query(
+          `
+            SELECT *
+            FROM staff_users
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [targetId]
+        );
+
+      if (
+        currentResult.rows.length === 0
+      ) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Mitarbeiter nicht gefunden.",
+          });
+      }
+
+      const current =
+        currentResult.rows[0];
+
+      const role =
+        req.body?.role ===
+        undefined
+          ? String(
+              current.role
+            )
+          : String(
+              req.body.role
+            ).toUpperCase();
+
+      if (
+        !validRoles.has(role)
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Ungültige Rolle.",
+          });
+      }
+
+      const jobKey =
+        req.body?.jobKey ===
+        undefined
+          ? String(
+              current.job_key ||
+              "sales"
+            )
+          : String(
+              req.body.jobKey
+            );
+
+      if (
+        !validJobs.has(jobKey)
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Ungültiger Job.",
+          });
+      }
+
+      const defaultWorkspace =
+        req.body
+          ?.defaultWorkspace ===
+        undefined
+          ? String(
+              current
+                .default_workspace
+            )
+          : String(
+              req.body
+                .defaultWorkspace
+            ).toUpperCase();
+
+      if (
+        !validWorkspaces.has(
+          defaultWorkspace
+        )
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Ungültiger Standard-Standort.",
+          });
+      }
+
+      const allowedWorkspaces =
+        req.body
+          ?.allowedWorkspaces ===
+        undefined
+          ? stringArray(
+              current
+                .allowed_workspaces
+            )
+          : stringArray(
+              req.body
+                .allowedWorkspaces
+            ).map(
+              (value) =>
+                value.toUpperCase()
+            );
+
+      if (
+        allowedWorkspaces.some(
+          (workspace) =>
+            !validWorkspaces.has(
+              workspace
+            )
+        )
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Ungültiger Standort in allowedWorkspaces.",
+          });
+      }
+
+      if (
+        !allowedWorkspaces.includes(
+          defaultWorkspace
+        )
+      ) {
+        allowedWorkspaces.push(
+          defaultWorkspace
+        );
+      }
+
+      const permissions =
+        req.body?.permissions ===
+        undefined
+          ? stringArray(
+              current.permissions
+            )
+          : stringArray(
+              req.body.permissions
+            );
+
+      const deniedPermissions =
+        req.body
+          ?.deniedPermissions ===
+        undefined
+          ? stringArray(
+              current
+                .denied_permissions
+            )
+          : stringArray(
+              req.body
+                .deniedPermissions
+            );
+
+      const active =
+        req.body?.active ===
+        undefined
+          ? Boolean(
+              current.active
+            )
+          : Boolean(
+              req.body.active
+            );
+
+      /*
+       * Safety:
+       * Admin cannot disable their own
+       * currently authenticated account.
+       */
+      if (
+        targetId === actor.id &&
+        !active
+      ) {
+        return res
+          .status(409)
+          .json({
+            ok: false,
+            error:
+              "Du kannst dein eigenes Admin-Konto nicht deaktivieren.",
+          });
+      }
+
+      if (
+        targetId === actor.id &&
+        role !== "ADMIN"
+      ) {
+        return res
+          .status(409)
+          .json({
+            ok: false,
+            error:
+              "Du kannst dir selbst nicht die Admin-Rolle entziehen.",
+          });
+      }
+
+      const displayName =
+        req.body?.displayName ===
+        undefined
+          ? String(
+              current.display_name
+            )
+          : String(
+              req.body.displayName
+            ).trim();
+
+      if (!displayName) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Anzeigename darf nicht leer sein.",
+          });
+      }
+
+      const profileNote =
+        req.body?.profileNote ===
+        undefined
+          ? current.profile_note
+          : (
+              String(
+                req.body.profileNote ||
+                ""
+              ).trim() ||
+              null
+            );
+
+      const result =
+        await db.query(
+          `
+            UPDATE staff_users
+            SET
+              display_name = $2,
+              role = $3,
+              job_key = $4,
+              default_workspace = $5,
+              allowed_workspaces =
+                $6::jsonb,
+              permissions =
+                $7::jsonb,
+              denied_permissions =
+                $8::jsonb,
+              active = $9,
+              profile_note = $10,
+
+              approved_at =
+                CASE
+                  WHEN approved_at
+                    IS NULL
+                    THEN NOW()
+                  ELSE approved_at
+                END,
+
+              approved_by =
+                CASE
+                  WHEN approved_by
+                    IS NULL
+                    THEN $11
+                  ELSE approved_by
+                END,
+
+              token_version =
+                token_version + 1,
+
+              updated_at = NOW()
+
+            WHERE id = $1
+
+            RETURNING
+              id,
+              username,
+              display_name,
+              role,
+              job_key,
+              default_workspace,
+              allowed_workspaces,
+              permissions,
+              denied_permissions,
+              profile_note,
+              avatar_url,
+              active,
+              approved_at,
+              approved_by
+          `,
+          [
+            targetId,
+            displayName,
+            role,
+            jobKey,
+            defaultWorkspace,
+
+            JSON.stringify(
+              allowedWorkspaces
+            ),
+
+            JSON.stringify(
+              permissions
+            ),
+
+            JSON.stringify(
+              deniedPermissions
+            ),
+
+            active,
+            profileNote,
+            actor.id,
+          ]
+        );
+
+      await db.query(
+        `
+          INSERT INTO staff_activity (
+            staff_user_id,
+            action,
+            entity_type,
+            entity_id
+          )
+          VALUES (
+            $1,
+            'STAFF_ACCESS_UPDATED',
+            'STAFF_USER',
+            $2
+          )
+        `,
+        [
+          actor.id,
+          targetId,
+        ]
+      );
+
+      return res.json({
+        ok: true,
+        user:
+          publicUser(
+            result.rows[0]
           ),
-      },
-    });
+      });
+
+    } catch (error) {
+
+      console.error(
+        "STAFF ADMIN UPDATE ERROR",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            "Mitarbeiter konnte nicht aktualisiert werden.",
+        });
+    }
   }
 );
 
@@ -1846,12 +2609,18 @@ router.post(
         .json({
           ok: false,
           error:
-            "Abmeldung konnte nicht durchgefÃƒÂ¼hrt werden.",
+            "Abmeldung konnte nicht durchgefÃƒÆ’Ã‚Â¼hrt werden.",
         });
     }
   }
 );
 
 export default router;
+
+
+
+
+
+
 
 
