@@ -1016,8 +1016,92 @@ router.get(
         throw error;
       }
 
+      /*
+       * Shopify liefert Produkt-Metadaten.
+       * PostgreSQL liefert den Packzustand.
+       *
+       * Beide werden ueber die Shopify Line Item ID verbunden.
+       */
+      const enrichedPackItems =
+        packItems.map((packItem: any) => {
+          const shopifyLineItem =
+            lineItems.find((lineItem: any) =>
+              String(lineItem?.id || "") ===
+              String(
+                packItem?.shopify_line_item_id || ""
+              )
+            ) ?? null;
+
+          const variantImageUrl =
+            shopifyLineItem?.variant?.image?.url ??
+            null;
+
+          const productImageUrl =
+            shopifyLineItem?.variant?.product
+              ?.featuredImage?.url ??
+            null;
+
+          const imageUrl =
+            variantImageUrl ||
+            productImageUrl ||
+            null;
+
+          return {
+            ...packItem,
+
+            image_url:
+              imageUrl,
+
+            imageUrl:
+              imageUrl,
+
+            variant_image_url:
+              variantImageUrl,
+
+            product_image_url:
+              productImageUrl,
+
+            variant_id:
+              shopifyLineItem?.variant?.id ??
+              null,
+
+            product_id:
+              shopifyLineItem?.variant?.product?.id ??
+              null,
+
+            sku:
+              shopifyLineItem?.sku ??
+              packItem?.sku ??
+              null,
+
+            variant_title:
+              shopifyLineItem?.variant?.title ??
+              packItem?.variant_title ??
+              null,
+
+            product_title:
+              shopifyLineItem?.variant?.product?.title ??
+              packItem?.title ??
+              null,
+          };
+        });
+
+      console.log(
+        "[ORDER DETAIL] PRODUCT IMAGES",
+        enrichedPackItems.map((item: any) => ({
+          id:
+            item.shopify_line_item_id,
+
+          title:
+            item.title,
+
+          image:
+            item.image_url,
+        }))
+      );
+
       const packProgress =
-        packItems.reduce(
+        enrichedPackItems.reduce(
           (
             progress,
             item
@@ -1059,7 +1143,7 @@ router.get(
           lineItems,
 
           pack_items:
-            packItems,
+            enrichedPackItems,
 
           pack_progress: {
             packed:
