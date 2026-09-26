@@ -513,7 +513,7 @@ router.post(
               $3,
               $4,
               $5,
-              $6::TEXT[],
+              $6::JSONB,
               TRUE
             )
             RETURNING *
@@ -2616,6 +2616,7 @@ router.post(
 );
 
 export default router;
+
 
 
 
