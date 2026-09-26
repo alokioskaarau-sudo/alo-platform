@@ -110,283 +110,324 @@ router.get(
       const staffUser =
         getStaffUser(res);
 
+      /*
+       * ========================================================
+       * SHOPIFY = SOURCE OF TRUTH FUER DIE OPERATIVE ORDER QUEUE
+       * ========================================================
+       *
+       * Die Staff-App darf NICHT aus historischen Dashboard-
+       * Eintraegen aufgebaut werden.
+       *
+       * Shopify liefert die aktuellen Orders.
+       * Dashboard + Workflow reichern diese nur an.
+       */
+      const latestShopifyOrders =
+        await getLatestShopifyOrders(50);
+
+      const shopifyOrderIds =
+        latestShopifyOrders
+          .map((order: any) =>
+            String(order?.id || "").trim()
+          )
+          .filter(Boolean);
+
       const [
+        workflows,
         dashboardOrders,
-        latestShopifyOrders,
       ] = await Promise.all([
-        getOrderDashboard(500),
-        getLatestShopifyOrders(50),
-      ]);
-
-      const dashboardOrderIds =
-        dashboardOrders.map(
-          (order) =>
-            String(order.shopify_order_id)
-        );
-
-      const latestShopifyOrderIds =
-        latestShopifyOrders.map(
-          (order: any) =>
-            String(order.id)
-        );
-
-      const orderIds = [
-        ...new Set([
-          ...dashboardOrderIds,
-          ...latestShopifyOrderIds,
-        ]),
-      ];
-
-      const workflows =
-        await getOrderFulfillmentWorkflows(
-          orderIds
-        );
-
-      const dashboardIdSet =
-        new Set(
-          dashboardOrderIds
-        );
-
-      const missingDashboardIds =
-        orderIds.filter(
-          (orderId) =>
-            !dashboardIdSet.has(orderId)
-        );
-
-      const dashboardShopifyOrders =
-        await getShopifyOrdersByIds(
-          dashboardOrderIds
-        );
-
-      const shopifyOrders = [
-        ...dashboardShopifyOrders,
-        ...latestShopifyOrders.filter(
-          (order: any) =>
-            missingDashboardIds.includes(
-              String(order.id)
-            )
+        getOrderFulfillmentWorkflows(
+          shopifyOrderIds
         ),
-      ];
+        getOrderDashboard(500),
+      ]);
 
       const workflowByOrderId =
         new Map(
           workflows.map((workflow) => [
-            workflow.shopify_order_id,
+            String(
+              workflow.shopify_order_id
+            ),
             workflow,
-          ])
-        );
-
-      const shopifyByOrderId =
-        new Map(
-          shopifyOrders.map((order) => [
-            String(order.id),
-            order,
           ])
         );
 
       const dashboardByOrderId =
         new Map(
           dashboardOrders.map((order) => [
-            String(order.shopify_order_id),
+            String(
+              order.shopify_order_id
+            ),
             order,
           ])
         );
 
-      const listOrders =
-        orderIds.map((orderId) => {
-          const dashboard =
-            dashboardByOrderId.get(
-              orderId
-            );
+      const orders =
+        latestShopifyOrders.map(
+          (shopify: any) => {
+            const orderId =
+              String(shopify.id);
 
-          if (dashboard) {
-            return dashboard;
+            const dashboard =
+              dashboardByOrderId.get(
+                orderId
+              ) ?? null;
+
+            const workflow =
+              workflowByOrderId.get(
+                orderId
+              ) ?? null;
+
+            const fulfillmentStatus =
+              String(
+                shopify
+                  ?.displayFulfillmentStatus ??
+                  ""
+              ).toUpperCase();
+
+            const financialStatus =
+              String(
+                shopify
+                  ?.displayFinancialStatus ??
+                  ""
+              ).toUpperCase();
+
+            const cancelled =
+              Boolean(
+                shopify?.cancelledAt
+              );
+
+            const operationalStatus =
+              getOperationalOrderStatus(
+                shopify,
+                workflow,
+                dashboard
+                  ?.dashboard_status ??
+                  null
+              );
+
+            const shopifyName =
+              String(
+                shopify?.name ?? ""
+              ).trim();
+
+            /*
+             * Wichtig:
+             * Die App erwartet u.a. name und order_number.
+             * Niemals die Shopify GID als sichtbare
+             * Bestellnummer verwenden, wenn Shopify.name
+             * vorhanden ist.
+             */
+            return {
+              ...(dashboard ?? {}),
+
+              shopify_order_id:
+                orderId,
+
+              shopify_order_name:
+                shopifyName || null,
+
+              name:
+                shopifyName || null,
+
+              order_number:
+                shopifyName || null,
+
+              order_created_at:
+                shopify?.createdAt
+                  ? new Date(
+                      shopify.createdAt
+                    )
+                  : dashboard
+                      ?.order_created_at ??
+                    null,
+
+              latest_created_at:
+                shopify?.createdAt
+                  ? new Date(
+                      shopify.createdAt
+                    )
+                  : dashboard
+                      ?.latest_created_at ??
+                    null,
+
+              dashboard_status:
+                dashboard
+                  ?.dashboard_status ??
+                "CURRENT",
+
+              is_archived:
+                dashboard
+                  ?.is_archived ??
+                false,
+
+              is_test:
+                dashboard
+                  ?.is_test ??
+                false,
+
+              archived_at:
+                dashboard
+                  ?.archived_at ??
+                null,
+
+              fulfillment_workflow:
+                workflow,
+
+              /*
+               * Alias fuer bestehende App-Versionen.
+               */
+              workflow,
+
+              operational_status:
+                operationalStatus,
+
+              financial_status:
+                financialStatus,
+
+              fulfillment_status:
+                fulfillmentStatus,
+
+              shopify_status: {
+                financial_status:
+                  financialStatus,
+
+                fulfillment_status:
+                  fulfillmentStatus,
+
+                cancelled,
+
+                cancelled_at:
+                  shopify?.cancelledAt ??
+                  null,
+
+                closed_at:
+                  shopify?.closedAt ??
+                  null,
+
+                exists: true,
+              },
+            };
+          }
+        );
+
+      /*
+       * Nur operative Bestellungen an die Staff-App.
+       *
+       * COMPLETED / CANCELLED / ARCHIVED gehoeren nicht
+       * in die aktuelle Packqueue.
+       */
+      const activeOrders =
+        orders.filter((order: any) => {
+          const status =
+            String(
+              order.operational_status ||
+                ""
+            ).toUpperCase();
+
+          const dashboardStatus =
+            String(
+              order.dashboard_status ||
+                ""
+            ).toUpperCase();
+
+          if (
+            status === "COMPLETED" ||
+            status === "CANCELLED"
+          ) {
+            return false;
           }
 
-          const shopify =
-            shopifyByOrderId.get(
-              orderId
-            );
+          if (
+            dashboardStatus ===
+            "ARCHIVED"
+          ) {
+            return false;
+          }
 
-          return {
-            shopify_order_id:
-              orderId,
-            shopify_order_name:
-              shopify?.name ?? null,
-            order_created_at:
-              shopify?.createdAt
-                ? new Date(
-                    shopify.createdAt
-                  )
-                : null,
-            latest_created_at:
-              shopify?.createdAt
-                ? new Date(
-                    shopify.createdAt
-                  )
-                : null,
-            label_id: null,
-            label_mode: null,
-            service: null,
-            weight_grams: null,
-            tracking_number: null,
-            swisspost_ident_code: null,
-            shipment_status: null,
-            label_status: null,
-            label_print_status: null,
-            label_print_count: null,
-            label_error_message: null,
-            packing_slip_id: null,
-            packing_slip_status: null,
-            packing_slip_print_status: null,
-            packing_slip_print_count: null,
-            packing_slip_error_message: null,
-            invoice_id: null,
-            invoice_number: null,
-            currency: null,
-            total_amount: null,
-            invoice_status: null,
-            invoice_print_status: null,
-            invoice_print_count: null,
-            invoice_error_message: null,
-            is_archived: false,
-            is_test: false,
-            archived_at: null,
-            dashboard_status:
-              "CURRENT" as const,
-          };
+          return true;
         });
 
-      const orders =
-        listOrders.map((order) => {
-          const shopify =
-            shopifyByOrderId.get(
-              order.shopify_order_id
-            ) ?? null;
+      /*
+       * Neueste zuerst.
+       */
+      activeOrders.sort(
+        (a: any, b: any) => {
+          const aTime =
+            new Date(
+              a.order_created_at ||
+                a.latest_created_at ||
+                0
+            ).getTime();
 
-          const workflow =
-            workflowByOrderId.get(
-              order.shopify_order_id
-            ) ?? null;
+          const bTime =
+            new Date(
+              b.order_created_at ||
+                b.latest_created_at ||
+                0
+            ).getTime();
 
-          const fulfillmentStatus =
-            String(
-              shopify?.displayFulfillmentStatus ??
-                ""
-            ).toUpperCase();
-
-          const financialStatus =
-            String(
-              shopify?.displayFinancialStatus ??
-                ""
-            ).toUpperCase();
-
-          const cancelled =
-            Boolean(
-              shopify?.cancelledAt
-            );
-
-          const operationalStatus =
-            getOperationalOrderStatus(
-              shopify,
-              workflow,
-              order.dashboard_status
-            );
-
-          return {
-            ...order,
-
-            fulfillment_workflow:
-              workflow,
-
-            operational_status:
-              operationalStatus,
-
-            shopify_status: shopify
-              ? {
-                  financial_status:
-                    financialStatus,
-
-                  fulfillment_status:
-                    fulfillmentStatus,
-
-                  cancelled,
-
-                  cancelled_at:
-                    shopify.cancelledAt,
-
-                  closed_at:
-                    shopify.closedAt,
-
-                  exists: true,
-                }
-              : {
-                  financial_status: null,
-
-                  fulfillment_status: null,
-
-                  cancelled: false,
-
-                  cancelled_at: null,
-
-                  closed_at: null,
-
-                  exists: false,
-                },
-          };
-        });
+          return bTime - aTime;
+        }
+      );
 
       const stats = {
         total:
-          orders.length,
+          activeOrders.length,
 
         current:
-          orders.filter(
-            (order) =>
-              order.operational_status !==
-                "COMPLETED" &&
-              order.operational_status !==
-                "CANCELLED" &&
-              order.dashboard_status !==
-                "ARCHIVED"
-          ).length,
+          activeOrders.length,
 
         completed:
-          orders.filter(
-            (order) =>
-              order.operational_status ===
-              "COMPLETED"
-          ).length,
+          0,
 
         error:
-          orders.filter(
-            (order) =>
-              order.dashboard_status ===
+          activeOrders.filter(
+            (order: any) =>
+              String(
+                order.dashboard_status ||
+                  ""
+              ).toUpperCase() ===
               "ERROR"
           ).length,
 
         archived:
-          orders.filter(
-            (order) =>
-              order.dashboard_status ===
-              "ARCHIVED"
-          ).length,
+          0,
       };
 
-      res.json({
+      console.log(
+        "[STAFF ORDERS] ACTIVE SHOPIFY QUEUE",
+        activeOrders.map(
+          (order: any) => ({
+            id:
+              order.shopify_order_id,
+            name:
+              order.name,
+            status:
+              order.operational_status,
+            fulfillment:
+              order.fulfillment_status,
+          })
+        )
+      );
+
+      return res.json({
         ok: true,
 
         staff: {
           id:
             staffUser.id,
+
           displayName:
             staffUser.displayName,
+
           role:
             staffUser.role,
         },
 
         stats,
-        orders,
+
+        orders:
+          activeOrders,
       });
     } catch (error) {
       console.error(
@@ -394,7 +435,7 @@ router.get(
         error
       );
 
-      res.status(500).json({
+      return res.status(500).json({
         ok: false,
         error:
           "Bestellungen konnten nicht geladen werden.",
@@ -402,7 +443,6 @@ router.get(
     }
   }
 );
-
 
 /*
  * Bestellung zum Packen Ã¼bernehmen.
@@ -1932,4 +1972,5 @@ router.post(
 );
 
 export default router;
+
 
