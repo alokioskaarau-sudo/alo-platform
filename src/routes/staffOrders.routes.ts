@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { PDFDocument } from "pdf-lib";
 import { db } from "../database/db.js";
 import {
@@ -95,7 +95,7 @@ function getOperationalOrderStatus(
 
 
 /*
- * ALO STAFF – BESTELLMANAGER
+ * ALO STAFF â€“ BESTELLMANAGER
  *
  * Eigene Staff-API.
  * Verwendet dieselben Bestelldaten wie die bestehende
@@ -405,16 +405,16 @@ router.get(
 
 
 /*
- * Bestellung zum Packen übernehmen.
+ * Bestellung zum Packen Ã¼bernehmen.
  *
  * Die Staff-ID kommt ausschliesslich aus dem
  * authentifizierten Bearer-Token.
  */
 
 /*
- * ALO STAFF – BESTELLDETAIL
+ * ALO STAFF â€“ BESTELLDETAIL
  *
- * Führt Shopify-Bestelldaten, technische Dokumentdaten
+ * FÃ¼hrt Shopify-Bestelldaten, technische Dokumentdaten
  * der Bestellzentrale und den operativen Packworkflow
  * in einer Antwort zusammen.
  *
@@ -422,7 +422,7 @@ router.get(
  * - kein Label
  * - kein Fulfillment
  * - kein Druckjob
- * - keine Statusänderung
+ * - keine StatusÃ¤nderung
  */
 
 // ==========================================================
@@ -846,15 +846,79 @@ router.get(
         });
       }
 
-      const [
-        shopifyOrder,
-        dashboardOrders,
-        workflow,
-      ] = await Promise.all([
-        getShopifyOrderById(orderId),
-        getOrderDashboard(500),
-        getOrderFulfillmentWorkflow(orderId),
-      ]);
+      let shopifyOrder;
+      let dashboardOrders;
+      let workflow;
+
+      try {
+        console.log(
+          "[ORDER DETAIL] SHOPIFY START",
+          orderId
+        );
+
+        shopifyOrder =
+          await getShopifyOrderById(
+            orderId
+          );
+
+        console.log(
+          "[ORDER DETAIL] SHOPIFY OK",
+          orderId
+        );
+      } catch (error) {
+        console.error(
+          "[ORDER DETAIL] SHOPIFY FAILED",
+          orderId,
+          error
+        );
+        throw error;
+      }
+
+      try {
+        console.log(
+          "[ORDER DETAIL] DASHBOARD START",
+          orderId
+        );
+
+        dashboardOrders =
+          await getOrderDashboard(500);
+
+        console.log(
+          "[ORDER DETAIL] DASHBOARD OK",
+          orderId
+        );
+      } catch (error) {
+        console.error(
+          "[ORDER DETAIL] DASHBOARD FAILED",
+          orderId,
+          error
+        );
+        throw error;
+      }
+
+      try {
+        console.log(
+          "[ORDER DETAIL] WORKFLOW START",
+          orderId
+        );
+
+        workflow =
+          await getOrderFulfillmentWorkflow(
+            orderId
+          );
+
+        console.log(
+          "[ORDER DETAIL] WORKFLOW OK",
+          orderId
+        );
+      } catch (error) {
+        console.error(
+          "[ORDER DETAIL] WORKFLOW FAILED",
+          orderId,
+          error
+        );
+        throw error;
+      }
 
       if (!shopifyOrder) {
         return res.status(404).json({
@@ -881,11 +945,36 @@ router.get(
           (edge: any) => edge.node
         );
 
-      const packItems =
-        await syncOrderPackItems(
+      let packItems;
+
+      try {
+        console.log(
+          "[ORDER DETAIL] PACK SYNC START",
           normalizedOrderId,
-          lineItems
+          "items:",
+          lineItems.length
         );
+
+        packItems =
+          await syncOrderPackItems(
+            normalizedOrderId,
+            lineItems
+          );
+
+        console.log(
+          "[ORDER DETAIL] PACK SYNC OK",
+          normalizedOrderId,
+          "items:",
+          packItems.length
+        );
+      } catch (error) {
+        console.error(
+          "[ORDER DETAIL] PACK SYNC FAILED",
+          normalizedOrderId,
+          error
+        );
+        throw error;
+      }
 
       const packProgress =
         packItems.reduce(
@@ -1010,7 +1099,7 @@ router.post(
       return res.status(500).json({
         ok: false,
         error:
-          "Bestellung konnte nicht übernommen werden.",
+          "Bestellung konnte nicht Ã¼bernommen werden.",
       });
     }
   }
@@ -1018,7 +1107,7 @@ router.post(
 
 
 /*
- * Eigene Übernahme wieder freigeben.
+ * Eigene Ãœbernahme wieder freigeben.
  *
  * releaseOrderClaim() erlaubt das nur dem
  * Mitarbeiter, der die Bestellung besitzt.
@@ -1075,7 +1164,7 @@ router.post(
 
 
 /*
- * Operativen Packstatus ändern.
+ * Operativen Packstatus Ã¤ndern.
  *
  * Dieser Status ist bewusst getrennt vom
  * dashboard_status der Bestellzentrale.
@@ -1085,7 +1174,7 @@ router.post(
  * Einzelne Packposition atomar +1 / -1.
  *
  * Nur der Mitarbeiter, der die Bestellung
- * übernommen hat, darf Packmengen verändern.
+ * Ã¼bernommen hat, darf Packmengen verÃ¤ndern.
  */
 router.post(
   "/:orderId/items/:lineItemId/adjust",
@@ -1190,7 +1279,7 @@ router.post(
       return res.status(500).json({
         ok: false,
         error:
-          "Packmenge konnte nicht geändert werden.",
+          "Packmenge konnte nicht geÃ¤ndert werden.",
       });
     }
   }
@@ -1214,11 +1303,11 @@ router.patch(
         });
       }
 
-      // NEW -> PACKING wird ausschließlich durch
-      // POST /:orderId/claim ausgelöst.
+      // NEW -> PACKING wird ausschlieÃŸlich durch
+      // POST /:orderId/claim ausgelÃ¶st.
       //
       // Die Status-API darf nur die nachfolgenden
-      // operativen Schritte auslösen.
+      // operativen Schritte auslÃ¶sen.
       const allowedStatuses:
         OrderPackStatus[] = [
           "PACKED",
@@ -1467,7 +1556,7 @@ router.patch(
       //
       // Retry:
       // Ist die Order bereits READY_TO_SHIP, wird die
-      // Transition nicht erneut ausgeführt. Stattdessen wird
+      // Transition nicht erneut ausgefÃ¼hrt. Stattdessen wird
       // direkt der idempotente Shopify-Fulfillment-Schritt
       // erneut versucht.
       // ------------------------------------------------------
@@ -1584,7 +1673,7 @@ router.patch(
         // ----------------------------------------------------
         // Shopify IMMER frisch lesen.
         //
-        // Wichtig für Retry-Fälle:
+        // Wichtig fÃ¼r Retry-FÃ¤lle:
         // Falls Shopify bereits fulfilled wurde, aber unser
         // lokales COMPLETED danach fehlgeschlagen ist, darf
         // kein zweites Fulfillment erstellt werden.
@@ -1636,8 +1725,8 @@ router.patch(
 
           // --------------------------------------------------
           // Niemals aufgrund des Helper-Returns alleine lokal
-          // abschließen. Shopify erneut laden und den echten
-          // finalen Order-Status prüfen.
+          // abschlieÃŸen. Shopify erneut laden und den echten
+          // finalen Order-Status prÃ¼fen.
           // --------------------------------------------------
 
           shopifyOrder =
@@ -1748,7 +1837,7 @@ router.patch(
       return res.status(500).json({
         ok: false,
         error:
-          "Bestellstatus konnte nicht geändert werden.",
+          "Bestellstatus konnte nicht geÃ¤ndert werden.",
       });
     }
   }
@@ -1843,3 +1932,4 @@ router.post(
 );
 
 export default router;
+
