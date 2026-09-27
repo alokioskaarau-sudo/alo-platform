@@ -524,7 +524,7 @@ router.post(
             credentialHash,
             role,
             defaultWorkspace,
-            allowedWorkspaces,
+            JSON.stringify(allowedWorkspaces),
           ]
         );
 
@@ -2616,6 +2616,7 @@ router.post(
 );
 
 export default router;
+
 
 
 
