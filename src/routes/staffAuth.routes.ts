@@ -1018,7 +1018,6 @@ router.post(
 
 router.get(
   "/users",
-  requireStaffAuth,
   async (_req, res) => {
     try {
       const result =
@@ -2616,6 +2615,7 @@ router.post(
 );
 
 export default router;
+
 
 
 
