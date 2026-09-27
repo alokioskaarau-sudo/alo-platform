@@ -74,6 +74,7 @@ import staffNotesRouter from "./routes/staffNotes.routes.js";
 import staffAuthRouter from "./routes/staffAuth.routes.js";
 import staffOrdersRouter from "./routes/staffOrders.routes.js";
 import staffPushRouter from "./routes/staffPush.routes.js";
+import staffCollaborationRouter from "./routes/staffCollaboration.routes.js";
 
 import aloNowRouter from "./routes/aloNow.routes.js";
 
@@ -145,6 +146,7 @@ app.use("/api/staff-notes", staffNotesRouter);
 app.use("/api/staff-auth", staffAuthRouter);
 app.use("/api/staff-orders", staffOrdersRouter);
 app.use("/api/staff-push", staffPushRouter);
+app.use("/api/staff-collaboration", staffCollaborationRouter);
 
 
 // ============================================================
@@ -1386,3 +1388,4 @@ console.log(
 // ============================================================
 
 void startServer();
+

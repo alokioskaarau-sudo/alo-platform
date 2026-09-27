@@ -1869,6 +1869,460 @@ router.post(
   }
 );
 
+
+/* =========================================================
+   BIOMETRIC DEVICE REGISTRATION
+
+   Requires an existing authenticated staff session.
+
+   The biometric check itself stays on the device.
+   Server stores only a hash of a random device secret.
+========================================================= */
+
+router.post(
+  "/biometric/register",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const actor =
+        getStaffUser(res);
+
+      if (!actor?.id) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Keine gÃ¼ltige Mitarbeiter-Session.",
+          });
+      }
+
+      const deviceId =
+        cleanText(
+          req.body?.deviceId
+        );
+
+      const deviceName =
+        cleanText(
+          req.body?.deviceName
+        );
+
+      const devicePlatform =
+        cleanText(
+          req.body?.devicePlatform
+        );
+
+      if (!deviceId) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "GerÃ¤te-ID fehlt.",
+          });
+      }
+
+      const deviceSecret =
+        randomBytes(32)
+          .toString("base64url");
+
+      const secretHash =
+        await hashCredential(
+          deviceSecret
+        );
+
+      await db.query(
+        `
+          INSERT INTO
+            staff_biometric_devices (
+              staff_user_id,
+              device_id,
+              device_name,
+              device_platform,
+              secret_hash,
+              active,
+              revoked_at,
+              updated_at
+            )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            TRUE,
+            NULL,
+            NOW()
+          )
+          ON CONFLICT (
+            staff_user_id,
+            device_id
+          )
+          DO UPDATE SET
+            device_name =
+              EXCLUDED.device_name,
+            device_platform =
+              EXCLUDED.device_platform,
+            secret_hash =
+              EXCLUDED.secret_hash,
+            active =
+              TRUE,
+            revoked_at =
+              NULL,
+            updated_at =
+              NOW()
+        `,
+        [
+          actor.id,
+          deviceId,
+          deviceName || null,
+          devicePlatform || null,
+          secretHash,
+        ]
+      );
+
+      await db.query(
+        `
+          INSERT INTO staff_activity (
+            staff_user_id,
+            action,
+            entity_type,
+            entity_id,
+            metadata
+          )
+          VALUES (
+            $1,
+            'BIOMETRIC_REGISTER',
+            'BIOMETRIC_DEVICE',
+            NULL,
+            $2::jsonb
+          )
+        `,
+        [
+          actor.id,
+          JSON.stringify({
+            deviceId,
+            deviceName:
+              deviceName || null,
+            devicePlatform:
+              devicePlatform || null,
+          }),
+        ]
+      );
+
+      return res.json({
+        ok: true,
+        deviceId,
+        deviceSecret,
+      });
+    } catch (error) {
+      console.error(
+        "BIOMETRIC REGISTER ERROR",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            "Biometrie konnte nicht eingerichtet werden.",
+        });
+    }
+  }
+);
+
+
+/* =========================================================
+   BIOMETRIC LOGIN
+
+   Device must first unlock its locally stored secret using
+   Face ID / Touch ID / fingerprint.
+
+   Server validates the device secret and then creates the
+   same normal staff session used by PIN login.
+========================================================= */
+
+router.post(
+  "/biometric/login",
+  async (req, res) => {
+    try {
+      const username =
+        cleanText(
+          req.body?.username
+        ).toLowerCase();
+
+      const deviceId =
+        cleanText(
+          req.body?.deviceId
+        );
+
+      const deviceSecret =
+        cleanText(
+          req.body?.deviceSecret
+        );
+
+      const deviceName =
+        cleanText(
+          req.body?.deviceName
+        );
+
+      const devicePlatform =
+        cleanText(
+          req.body?.devicePlatform
+        );
+
+      if (
+        !username ||
+        !deviceId ||
+        !deviceSecret
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Biometrische Anmeldedaten fehlen.",
+          });
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              u.id,
+              u.username,
+              u.display_name,
+              u.role,
+              u.default_workspace,
+              u.allowed_workspaces,
+              u.active,
+
+              b.id AS biometric_device_id,
+              b.secret_hash
+
+            FROM staff_users u
+
+            INNER JOIN
+              staff_biometric_devices b
+              ON
+                b.staff_user_id =
+                  u.id
+
+            WHERE
+              LOWER(u.username) =
+                $1
+              AND
+              b.device_id =
+                $2
+              AND
+              b.active =
+                TRUE
+              AND
+              b.revoked_at
+                IS NULL
+
+            LIMIT 1
+          `,
+          [
+            username,
+            deviceId,
+          ]
+        );
+
+      if (
+        result.rows.length === 0
+      ) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Biometrische Anmeldung nicht verfÃ¼gbar.",
+          });
+      }
+
+      const user =
+        result.rows[0];
+
+      if (!user.active) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Mitarbeiterkonto ist deaktiviert.",
+          });
+      }
+
+      const valid =
+        await verifyCredential(
+          deviceSecret,
+          user.secret_hash
+        );
+
+      if (!valid) {
+        return res
+          .status(401)
+          .json({
+            ok: false,
+            error:
+              "Biometrische Anmeldung fehlgeschlagen.",
+          });
+      }
+
+      const token =
+        randomBytes(32)
+          .toString("base64url");
+
+      const tokenHash =
+        hashToken(token);
+
+      const expiresAt =
+        new Date(
+          Date.now() +
+            SESSION_DAYS *
+              24 *
+              60 *
+              60 *
+              1000
+        );
+
+      const client =
+        await db.connect();
+
+      try {
+        await client.query(
+          "BEGIN"
+        );
+
+        await client.query(
+          `
+            INSERT INTO staff_sessions (
+              staff_user_id,
+              token_hash,
+              device_name,
+              device_platform,
+              expires_at
+            )
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              $5
+            )
+          `,
+          [
+            user.id,
+            tokenHash,
+            deviceName || null,
+            devicePlatform || null,
+            expiresAt,
+          ]
+        );
+
+        await client.query(
+          `
+            UPDATE
+              staff_biometric_devices
+            SET
+              last_used_at =
+                NOW(),
+              updated_at =
+                NOW()
+            WHERE id =
+              $1
+          `,
+          [
+            user.biometric_device_id,
+          ]
+        );
+
+        await client.query(
+          `
+            UPDATE staff_users
+            SET
+              last_login_at =
+                NOW(),
+              updated_at =
+                NOW()
+            WHERE id =
+              $1
+          `,
+          [
+            user.id,
+          ]
+        );
+
+        await client.query(
+          `
+            INSERT INTO staff_activity (
+              staff_user_id,
+              action,
+              entity_type,
+              entity_id,
+              metadata
+            )
+            VALUES (
+              $1,
+              'BIOMETRIC_LOGIN',
+              'STAFF_SESSION',
+              NULL,
+              $2::jsonb
+            )
+          `,
+          [
+            user.id,
+            JSON.stringify({
+              deviceId,
+              deviceName:
+                deviceName || null,
+              devicePlatform:
+                devicePlatform || null,
+            }),
+          ]
+        );
+
+        await client.query(
+          "COMMIT"
+        );
+      } catch (error) {
+        await client.query(
+          "ROLLBACK"
+        );
+
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      return res.json({
+        ok: true,
+        token,
+        expiresAt:
+          expiresAt.toISOString(),
+        user:
+          publicUser(user),
+      });
+    } catch (error) {
+      console.error(
+        "BIOMETRIC LOGIN ERROR",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          ok: false,
+          error:
+            "Biometrische Anmeldung konnte nicht durchgefÃ¼hrt werden.",
+        });
+    }
+  }
+);
+
+
 /* =========================================================
    CURRENT USER
 ========================================================= */
@@ -2615,6 +3069,7 @@ router.post(
 );
 
 export default router;
+
 
 
 

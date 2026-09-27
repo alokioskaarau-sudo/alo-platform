@@ -1,4 +1,4 @@
-import { db } from "./db.js";
+﻿import { db } from "./db.js";
 
 export async function initializeDatabase() {
   // ==========================================================
@@ -33,7 +33,7 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
-  // MIGRATIONS FÜR BEREITS EXISTIERENDE DATENBANK
+  // MIGRATIONS FÃœR BEREITS EXISTIERENDE DATENBANK
   // ==========================================================
 
   await db.query(`
@@ -338,7 +338,7 @@ export async function initializeDatabase() {
   `);
 
   // ==========================================================
-  // MIGRATION FÜR BESTEHENDE PRINT JOBS
+  // MIGRATION FÃœR BESTEHENDE PRINT JOBS
   // ==========================================================
 
   await db.query(`
@@ -641,7 +641,7 @@ export async function initializeDatabase() {
   //
   // Dashboard-Metadaten werden bewusst getrennt von
   // Rechnungen, Lieferscheinen und Versandlabels gespeichert.
-  // Dadurch bleiben ausgestellte Dokumente unverändert.
+  // Dadurch bleiben ausgestellte Dokumente unverÃ¤ndert.
   // ==========================================================
 
   await db.query(`
@@ -674,7 +674,7 @@ export async function initializeDatabase() {
   // ORDER PACK ITEMS
   //
   // Persistenter Packfortschritt pro Shopify Line Item.
-  // Die Shopify Line-Item-ID ist die technische Identität.
+  // Die Shopify Line-Item-ID ist die technische IdentitÃ¤t.
   // ==========================================================
 
   await db.query(`
@@ -1355,6 +1355,52 @@ export async function initializeDatabase() {
   `);
 
   await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_biometric_devices (
+      id BIGSERIAL PRIMARY KEY,
+
+      staff_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+
+      device_id TEXT NOT NULL,
+      device_name TEXT,
+      device_platform TEXT,
+
+      secret_hash TEXT NOT NULL,
+
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      last_used_at TIMESTAMPTZ,
+      revoked_at TIMESTAMPTZ,
+
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+      UNIQUE (
+        staff_user_id,
+        device_id
+      )
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_biometric_devices_user_idx
+    ON staff_biometric_devices (
+      staff_user_id,
+      active
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_biometric_devices_lookup_idx
+    ON staff_biometric_devices (
+      device_id,
+      active
+    );
+  `);
+
+  await db.query(`
     CREATE INDEX IF NOT EXISTS
       staff_sessions_user_idx
     ON staff_sessions (
@@ -1681,7 +1727,302 @@ export async function initializeDatabase() {
   // FERTIG
   // ==========================================================
 
-  console.log(
+  
+  // ==========================================================
+  // ALO_STAFF_V2_ACCESS_MIGRATION
+  // Profile / Jobs / Permission Overrides
+  // ==========================================================
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS job_key TEXT
+      NOT NULL DEFAULT 'sales'
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS permissions JSONB
+      NOT NULL DEFAULT '[]'::jsonb
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS denied_permissions JSONB
+      NOT NULL DEFAULT '[]'::jsonb
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS profile_note TEXT
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS avatar_url TEXT
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS approved_by BIGINT
+  `);
+
+
+  // Existing legacy accounts -> sensible operational jobs
+
+  await db.query(`
+    UPDATE staff_users
+    SET job_key =
+      CASE
+        WHEN role = 'ADMIN'
+          THEN 'admin'
+
+        WHEN role = 'MANAGER'
+          THEN 'management'
+
+        WHEN role = 'PRAKTIKANT'
+          THEN 'sales'
+
+        WHEN job_key IS NULL
+          OR BTRIM(job_key) = ''
+          THEN 'sales'
+
+        ELSE job_key
+      END
+  `);
+
+
+  // FK for approving admin.
+  // Added separately so repeated startup remains safe.
+
+  await db.query(`
+    DO $$
+    BEGIN
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname =
+          'staff_users_approved_by_fkey'
+      ) THEN
+
+        ALTER TABLE staff_users
+          ADD CONSTRAINT
+            staff_users_approved_by_fkey
+          FOREIGN KEY (approved_by)
+          REFERENCES staff_users(id)
+          ON DELETE SET NULL;
+
+      END IF;
+
+    END
+    $$
+  `);
+
+
+  // Operational job validation
+
+  await db.query(`
+    DO $$
+    BEGIN
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname =
+          'staff_users_job_key_check'
+      ) THEN
+
+        ALTER TABLE staff_users
+          ADD CONSTRAINT
+            staff_users_job_key_check
+
+          CHECK (
+            job_key IN (
+              'admin',
+              'management',
+              'store_manager',
+              'sales',
+              'warehouse',
+              'online_shop',
+              'packing',
+              'live_team',
+              'driver'
+            )
+          );
+
+      END IF;
+
+    END
+    $$
+  `);
+
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_users_job_key_idx
+    ON staff_users (job_key)
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_users_default_workspace_idx
+    ON staff_users (default_workspace)
+  `);
+console.log(
     "PostgreSQL: Shipping + Print Queue + Printers + Webhooks bereit."
   );
+  // ==========================================================
+  // ALO STAFF - COLLABORATION V2
+  // ==========================================================
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_chat_channels (
+      id BIGSERIAL PRIMARY KEY,
+      channel_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      channel_type TEXT NOT NULL
+        CHECK (
+          channel_type IN (
+            'GLOBAL',
+            'WORKSPACE',
+            'DRIVERS',
+            'DIRECT'
+          )
+        ),
+      workspace TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_chat_members (
+      channel_id BIGINT NOT NULL
+        REFERENCES staff_chat_channels(id)
+        ON DELETE CASCADE,
+      staff_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (
+        channel_id,
+        staff_user_id
+      )
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_chat_messages (
+      id BIGSERIAL PRIMARY KEY,
+      channel_id BIGINT NOT NULL
+        REFERENCES staff_chat_channels(id)
+        ON DELETE CASCADE,
+      sender_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deleted_at TIMESTAMPTZ
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_chat_messages_channel_idx
+    ON staff_chat_messages (
+      channel_id,
+      created_at DESC
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_tasks (
+      id BIGSERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      created_by_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      assigned_to_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL,
+      workspace TEXT,
+      priority TEXT NOT NULL DEFAULT 'NORMAL'
+        CHECK (
+          priority IN (
+            'LOW',
+            'NORMAL',
+            'HIGH',
+            'URGENT'
+          )
+        ),
+      status TEXT NOT NULL DEFAULT 'OPEN'
+        CHECK (
+          status IN (
+            'OPEN',
+            'IN_PROGRESS',
+            'DONE'
+          )
+        ),
+      due_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_tasks_assignee_idx
+    ON staff_tasks (
+      assigned_to_user_id,
+      status,
+      due_at
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_calendar_events (
+      id BIGSERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT,
+      created_by_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      workspace TEXT,
+      event_type TEXT NOT NULL DEFAULT 'GENERAL',
+      starts_at TIMESTAMPTZ NOT NULL,
+      ends_at TIMESTAMPTZ NOT NULL,
+      cancelled_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (ends_at >= starts_at)
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_calendar_events_time_idx
+    ON staff_calendar_events (
+      starts_at,
+      ends_at
+    );
+  `);
+
 }
+
+
+/*
+ALO STAFF COLLABORATION V2
+Run by initDatabase().
+*/
+
+

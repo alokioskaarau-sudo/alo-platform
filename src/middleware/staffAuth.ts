@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   NextFunction,
   Request,
   Response,
@@ -12,25 +12,70 @@ import {
   db,
 } from "../database/db.js";
 
+
 export type StaffRole =
   | "ADMIN"
   | "MANAGER"
   | "STAFF"
   | "PRAKTIKANT";
 
+
 export type StaffWorkspace =
   | "AARAU"
   | "OLTEN"
   | "ONLINE";
 
+
+export type StaffJob =
+  | "admin"
+  | "management"
+  | "store_manager"
+  | "sales"
+  | "warehouse"
+  | "online_shop"
+  | "packing"
+  | "live_team"
+  | "driver";
+
+
 export type AuthenticatedStaffUser = {
   id: string;
   username: string;
   displayName: string;
+
   role: StaffRole;
+  jobKey: StaffJob;
+
   defaultWorkspace: StaffWorkspace;
   allowedWorkspaces: StaffWorkspace[];
+
+  permissions: string[];
+  deniedPermissions: string[];
+
+  profileNote: string | null;
+  avatarUrl: string | null;
+
+  active: boolean;
+
+  approvedAt: string | null;
+  approvedBy: string | null;
 };
+
+
+function stringArray(
+  value: unknown
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) =>
+      String(item).trim()
+    )
+    .filter(Boolean);
+}
+
 
 function hashToken(
   token: string
@@ -39,6 +84,7 @@ function hashToken(
     .update(token)
     .digest("hex");
 }
+
 
 function bearerToken(
   req: Request
@@ -59,6 +105,7 @@ function bearerToken(
     .slice(7)
     .trim();
 }
+
 
 export async function requireStaffAuth(
   req: Request,
@@ -87,19 +134,38 @@ export async function requireStaffAuth(
           SELECT
             s.id AS session_id,
             s.staff_user_id,
+
             u.username,
             u.display_name,
             u.role,
+
+            u.job_key,
+
             u.default_workspace,
-            u.allowed_workspaces
+            u.allowed_workspaces,
+
+            u.permissions,
+            u.denied_permissions,
+
+            u.profile_note,
+            u.avatar_url,
+
+            u.active,
+
+            u.approved_at,
+            u.approved_by
+
           FROM staff_sessions s
+
           INNER JOIN staff_users u
             ON u.id = s.staff_user_id
+
           WHERE
             s.token_hash = $1
             AND s.revoked_at IS NULL
             AND s.expires_at > NOW()
             AND u.active = TRUE
+
           LIMIT 1
         `,
         [tokenHash]
@@ -112,7 +178,8 @@ export async function requireStaffAuth(
         .status(401)
         .json({
           ok: false,
-          error: "Session ungültig oder abgelaufen.",
+          error:
+            "Session ungültig oder abgelaufen.",
         });
     }
 
@@ -120,27 +187,77 @@ export async function requireStaffAuth(
       result.rows[0];
 
     const allowedWorkspaces =
-      Array.isArray(
+      stringArray(
         row.allowed_workspaces
-      )
-        ? row.allowed_workspaces
-        : [];
+      ) as StaffWorkspace[];
 
     const staffUser:
       AuthenticatedStaffUser = {
-        id: String(
-          row.staff_user_id
-        ),
+
+        id:
+          String(
+            row.staff_user_id
+          ),
+
         username:
           String(row.username),
+
         displayName:
           String(row.display_name),
+
         role:
           row.role as StaffRole,
+
+        jobKey:
+          String(
+            row.job_key || "sales"
+          ) as StaffJob,
+
         defaultWorkspace:
           row.default_workspace as StaffWorkspace,
-        allowedWorkspaces:
-          allowedWorkspaces as StaffWorkspace[],
+
+        allowedWorkspaces,
+
+        permissions:
+          stringArray(
+            row.permissions
+          ),
+
+        deniedPermissions:
+          stringArray(
+            row.denied_permissions
+          ),
+
+        profileNote:
+          row.profile_note == null
+            ? null
+            : String(
+                row.profile_note
+              ),
+
+        avatarUrl:
+          row.avatar_url == null
+            ? null
+            : String(
+                row.avatar_url
+              ),
+
+        active:
+          Boolean(row.active),
+
+        approvedAt:
+          row.approved_at == null
+            ? null
+            : String(
+                row.approved_at
+              ),
+
+        approvedBy:
+          row.approved_by == null
+            ? null
+            : String(
+                row.approved_by
+              ),
       };
 
     res.locals.staffUser =
@@ -159,7 +276,9 @@ export async function requireStaffAuth(
     );
 
     return next();
+
   } catch (error) {
+
     console.error(
       "STAFF AUTH ERROR",
       error
@@ -175,6 +294,7 @@ export async function requireStaffAuth(
   }
 }
 
+
 export function getStaffUser(
   res: Response
 ): AuthenticatedStaffUser {
@@ -182,3 +302,4 @@ export function getStaffUser(
     .staffUser as
     AuthenticatedStaffUser;
 }
+
