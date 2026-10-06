@@ -1591,6 +1591,12 @@ export async function initializeDatabase() {
       product_name TEXT,
       flavor TEXT,
       unit_size TEXT,
+      net_weight TEXT,
+      manufacturer TEXT,
+      traces JSONB NOT NULL DEFAULT '[]'::jsonb,
+      serving_size TEXT,
+      serving_recommendation TEXT,
+      caffeine TEXT,
       category TEXT,
       subcategory TEXT,
       country TEXT,
@@ -1661,6 +1667,16 @@ export async function initializeDatabase() {
       END IF;
     END
     $$;
+  `);
+
+  await db.query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS net_weight TEXT,
+      ADD COLUMN IF NOT EXISTS manufacturer TEXT,
+      ADD COLUMN IF NOT EXISTS traces JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS serving_size TEXT,
+      ADD COLUMN IF NOT EXISTS serving_recommendation TEXT,
+      ADD COLUMN IF NOT EXISTS caffeine TEXT
   `);
 
   await db.query(`

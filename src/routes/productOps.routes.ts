@@ -405,8 +405,33 @@ function toApiProduct(
     id: String(row.id),
     barcode: row.barcode,
     title: row.title,
-    productData:
-      row.product_data ?? {},
+    productData: {
+      ...(row.product_data ?? {}),
+      netWeight:
+        row.net_weight ??
+        row.product_data?.netWeight ??
+        null,
+      manufacturer:
+        row.manufacturer ??
+        row.product_data?.manufacturer ??
+        null,
+      traces:
+        row.traces ??
+        row.product_data?.traces ??
+        [],
+      servingSize:
+        row.serving_size ??
+        row.product_data?.servingSize ??
+        null,
+      servingRecommendation:
+        row.serving_recommendation ??
+        row.product_data?.servingRecommendation ??
+        null,
+      caffeine:
+        row.caffeine ??
+        row.product_data?.caffeine ??
+        null,
+    },
     sourceType:
       row.source_type ?? null,
     reviewStatus:
@@ -1134,6 +1159,12 @@ router.put(
               barcode,
               title,
               product_data,
+              net_weight,
+              manufacturer,
+              traces,
+              serving_size,
+              serving_recommendation,
+              caffeine,
               age_requirement,
               age_requirement_reviewed_at,
               source_type,
@@ -1368,20 +1399,26 @@ router.put(
               barcode = $2,
               title = $3,
               product_data = $4::jsonb,
+              net_weight = $5,
+              manufacturer = $6,
+              traces = $7::jsonb,
+              serving_size = $8,
+              serving_recommendation = $9,
+              caffeine = $10,
               age_requirement =
                 CASE
-                  WHEN $6::boolean
-                    THEN $7::text
+                  WHEN $12::boolean
+                    THEN $13::text
                   ELSE age_requirement
                 END,
               age_requirement_reviewed_at =
                 CASE
-                  WHEN $6::boolean
+                  WHEN $12::boolean
                     THEN NOW()
                   ELSE age_requirement_reviewed_at
                 END,
               review_status = 'REVIEWED',
-              reviewed_by = $5,
+              reviewed_by = $11,
               reviewed_at = NOW(),
               updated_at = NOW()
             WHERE id = $1
@@ -1390,6 +1427,12 @@ router.put(
               barcode,
               title,
               product_data,
+              net_weight,
+              manufacturer,
+              traces,
+              serving_size,
+              serving_recommendation,
+              caffeine,
               age_requirement,
               age_requirement_reviewed_at,
               source_type,
@@ -1405,6 +1448,16 @@ router.put(
             safeBarcode,
             title || existing.title,
             JSON.stringify(mergedData),
+            mergedData.netWeight ?? null,
+            mergedData.manufacturer ?? null,
+            JSON.stringify(
+              Array.isArray(mergedData.traces)
+                ? mergedData.traces
+                : []
+            ),
+            mergedData.servingSize ?? null,
+            mergedData.servingRecommendation ?? null,
+            mergedData.caffeine ?? null,
             reviewedBy,
             ageRequirementReviewed,
             ageRequirementReviewed
@@ -3673,6 +3726,169 @@ router.post(
           error instanceof Error
             ? error.message
             : "Shopify-Katalog konnte nicht importiert werden.",
+      });
+    }
+  }
+);
+
+/*
+ * ALO PRODUCT MASTER · SHOPIFY REFRESH
+ *
+ * Aktualisiert ein bereits mit Shopify verknüpftes Product-Master-
+ * Produkt aus der bestehenden zentralen Shopify-Import-Pipeline.
+ *
+ * Keine zweite Mapping-Logik:
+ * importShopifyProductToProductMaster bleibt die einzige Wahrheit
+ * für Shopify -> ALO CORE.
+ */
+router.post(
+  "/api/product-master/:id/refresh-from-shopify",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(req.params.id || "").trim();
+
+      if (!productId) {
+        res.status(400).json({
+          ok: false,
+          error: "Product-Master-ID fehlt.",
+        });
+        return;
+      }
+
+      const existingResult =
+        await db.query(
+          `
+            SELECT
+              id,
+              shopify_product_id
+            FROM products
+            WHERE id = $1
+              AND archived_at IS NULL
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const existing =
+        existingResult.rows[0];
+
+      if (!existing) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      const shopifyProductId =
+        String(
+          existing.shopify_product_id ?? ""
+        ).trim();
+
+      if (!shopifyProductId) {
+        res.status(409).json({
+          ok: false,
+          code: "PRODUCT_NOT_LINKED_TO_SHOPIFY",
+          error:
+            "Dieses Produkt ist noch nicht mit Shopify verknüpft.",
+        });
+        return;
+      }
+
+      const refresh =
+        await importShopifyProductToProductMaster(
+          shopifyProductId
+        );
+
+      /*
+       * Danach IMMER frisch aus ALO CORE lesen.
+       * Dadurch bekommt die Staff-App dasselbe API-Format wie
+       * beim normalen Product-Master-GET.
+       */
+      const refreshedResult =
+        await db.query(
+          `
+            SELECT
+              id,
+              barcode,
+              title,
+              product_data,
+              net_weight,
+              manufacturer,
+              traces,
+              serving_size,
+              serving_recommendation,
+              caffeine,
+              source_type,
+              review_status,
+              age_requirement,
+              age_requirement_reviewed_at,
+              shopify_status,
+              shopify_product_id,
+              shopify_variant_id,
+              shopify_inventory_item_id,
+              updated_at
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const row =
+        refreshedResult.rows[0];
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error:
+            "Produkt konnte nach Shopify-Synchronisierung nicht geladen werden.",
+        });
+        return;
+      }
+
+      const [
+        stock,
+        signals,
+      ] = await Promise.all([
+        getProductStock(productId),
+        getProductSignals(productId),
+      ]);
+
+      res.json({
+        ok: true,
+        refreshed: true,
+        source: "SHOPIFY",
+        importResult: {
+          imported:
+            refresh.imported ?? false,
+          alreadyLinked:
+            refresh.alreadyLinked ?? false,
+          refreshed:
+            refresh.refreshed ?? true,
+        },
+        product:
+          toApiProduct(
+            row,
+            stock,
+            signals
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "Product Shopify refresh error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Shopify-Daten konnten nicht aktualisiert werden.",
       });
     }
   }

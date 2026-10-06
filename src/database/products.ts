@@ -14,6 +14,12 @@ export type ProductMasterInput = {
   productName?: string | null;
   flavor?: string | null;
   unitSize?: string | null;
+  netWeight?: string | null;
+  manufacturer?: string | null;
+  traces?: string[];
+  servingSize?: string | null;
+  servingRecommendation?: string | null;
+  caffeine?: string | null;
   category?: string | null;
   subcategory?: string | null;
   country?: string | null;
@@ -49,6 +55,12 @@ export type ProductMasterRecord = {
   product_name: string | null;
   flavor: string | null;
   unit_size: string | null;
+  net_weight: string | null;
+  manufacturer: string | null;
+  traces: string[];
+  serving_size: string | null;
+  serving_recommendation: string | null;
+  caffeine: string | null;
   category: string | null;
   subcategory: string | null;
   country: string | null;
@@ -213,6 +225,12 @@ export async function saveProduct(
             product_name,
             flavor,
             unit_size,
+            net_weight,
+            manufacturer,
+            traces,
+            serving_size,
+            serving_recommendation,
+            caffeine,
             category,
             subcategory,
             country,
@@ -243,11 +261,11 @@ export async function saveProduct(
           VALUES (
             $1,$2,COALESCE($3::text, 'NONE'),
             CASE WHEN $4::boolean THEN NOW() ELSE NULL END,
-            $5,$6,$7,$8,$9,$10,$11,
-            $12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,
-            $19::jsonb,$20::jsonb,$21,$22,$23,$24,
-            $25,$26::jsonb,$27::jsonb,
-            'REVIEWED',$28,NOW(),$29,$30::jsonb,$31::jsonb,NOW()
+            $5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,
+            $15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23::jsonb,
+            $24::jsonb,$25::jsonb,$26,$27,$28,$29,
+            $30,$31::jsonb,$32::jsonb,
+            'REVIEWED',$33,NOW(),$34,$35::jsonb,$36::jsonb,NOW()
           )
 
           ON CONFLICT (barcode)
@@ -269,6 +287,12 @@ export async function saveProduct(
             product_name = EXCLUDED.product_name,
             flavor = EXCLUDED.flavor,
             unit_size = EXCLUDED.unit_size,
+            net_weight = EXCLUDED.net_weight,
+            manufacturer = EXCLUDED.manufacturer,
+            traces = EXCLUDED.traces,
+            serving_size = EXCLUDED.serving_size,
+            serving_recommendation = EXCLUDED.serving_recommendation,
+            caffeine = EXCLUDED.caffeine,
             category = EXCLUDED.category,
             subcategory = EXCLUDED.subcategory,
             country = EXCLUDED.country,
@@ -309,6 +333,12 @@ export async function saveProduct(
           cleanText(input.productName),
           cleanText(input.flavor),
           cleanText(input.unitSize),
+          cleanText(input.netWeight),
+          cleanText(input.manufacturer),
+          JSON.stringify(cleanArray(input.traces)),
+          cleanText(input.servingSize),
+          cleanText(input.servingRecommendation),
+          cleanText(input.caffeine),
           cleanText(input.category),
           cleanText(input.subcategory),
           cleanText(input.country),

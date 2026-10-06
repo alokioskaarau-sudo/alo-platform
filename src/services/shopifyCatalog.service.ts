@@ -1818,6 +1818,24 @@ export async function importShopifyProductToProductMaster(
         );
       }
 
+      /*
+       * ALO SHOPIFY BARCODE FULL SYNC
+       *
+       * Beim ersten sicheren EAN-Match wird nicht nur die
+       * Shopify-Verknüpfung gespeichert. Wir übernehmen sofort
+       * denselben vollständigen Shopify-Datensatz wie beim
+       * Refresh eines bereits verknüpften Produkts.
+       *
+       * mergeShopifyProductData() überschreibt bestehende gute
+       * Werte nur dann, wenn Shopify einen nicht-leeren Wert hat.
+       */
+      const shopifyData =
+        mergeShopifyProductData(
+          existing.product_data,
+          shopifyProduct,
+          variant
+        );
+
       const result = await db.query(
         `
           UPDATE products
@@ -1826,45 +1844,126 @@ export async function importShopifyProductToProductMaster(
             shopify_product_id = $3,
             shopify_variant_id = $4,
             shopify_inventory_item_id = $5,
-            product_data =
-              COALESCE(product_data, '{}'::jsonb)
-              || jsonb_build_object(
-                'shopify',
-                jsonb_build_object(
-                  'productId', $3::text,
-                  'variantId', $4::text,
-                  'inventoryItemId', $5::text,
-                  'handle', $6::text,
-                  'status', $2::text,
-                  'imageUrl', $7::text,
-                  'originalTitle', $8::text
-                )
+
+            title =
+              COALESCE(
+                NULLIF($6::text, ''),
+                title
               ),
+
+            flavor =
+              COALESCE(
+                NULLIF($7::text, ''),
+                flavor
+              ),
+
+            unit_size =
+              COALESCE(
+                NULLIF($8::text, ''),
+                unit_size
+              ),
+
+            country =
+              COALESCE(
+                NULLIF($9::text, ''),
+                country
+              ),
+
+            ingredients =
+              COALESCE(
+                NULLIF($10::text, ''),
+                ingredients
+              ),
+
+            traces =
+              CASE
+                WHEN jsonb_array_length($11::jsonb) > 0
+                  THEN $11::jsonb
+                ELSE traces
+              END,
+
+            nutrition_per_100 =
+              CASE
+                WHEN $12::jsonb <> '{}'::jsonb
+                  THEN $12::jsonb
+                ELSE nutrition_per_100
+              END,
+
+            serving_recommendation =
+              COALESCE(
+                NULLIF($13::text, ''),
+                serving_recommendation
+              ),
+
+            seo_title =
+              COALESCE(
+                NULLIF($14::text, ''),
+                seo_title
+              ),
+
+            seo_description =
+              COALESCE(
+                NULLIF($15::text, ''),
+                seo_description
+              ),
+
+            vendor =
+              COALESCE(
+                NULLIF($16::text, ''),
+                vendor
+              ),
+
+            product_type =
+              COALESCE(
+                NULLIF($17::text, ''),
+                product_type
+              ),
+
+            product_data = $18::jsonb,
+
             updated_at = NOW()
+
           WHERE id = $1
-          RETURNING
-            id,
-            barcode,
-            title,
-            product_data,
-            source_type,
-            review_status,
-            shopify_status,
-            shopify_product_id,
-            shopify_variant_id,
-            shopify_inventory_item_id,
-            updated_at
+
+          RETURNING *
         `,
         [
           existing.id,
           shopifyProduct.status ??
+            existing.shopify_status ??
             "LINKED",
           shopifyProduct.id,
           variant.id,
           variant.inventoryItemId,
-          shopifyProduct.handle,
-          shopifyProduct.imageUrl,
-          shopifyProduct.title,
+
+          shopifyData.title ?? null,
+          shopifyData.flavor ?? null,
+          shopifyData.unitSize ?? null,
+          shopifyData.country ?? null,
+          shopifyData.ingredients ?? null,
+
+          JSON.stringify(
+            Array.isArray(shopifyData.traces)
+              ? shopifyData.traces
+              : []
+          ),
+
+          JSON.stringify(
+            shopifyData.nutritionPer100 &&
+            typeof shopifyData.nutritionPer100 === "object"
+              ? shopifyData.nutritionPer100
+              : {}
+          ),
+
+          shopifyData.servingRecommendation ??
+            null,
+
+          shopifyData.seoTitle ?? null,
+          shopifyData.seoDescription ?? null,
+          shopifyData.vendor ?? null,
+          shopifyData.productType ?? null,
+
+          JSON.stringify(shopifyData),
         ]
       );
 
@@ -1873,6 +1972,7 @@ export async function importShopifyProductToProductMaster(
         alreadyLinked: false,
         linkedExisting: true,
         matchedBy: "BARCODE",
+        refreshed: true,
         productMaster: result.rows[0],
         shopifyProduct,
       };
