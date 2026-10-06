@@ -16,27 +16,97 @@ const upload = multer({
     fileSize: 12 * 1024 * 1024,
     files: 3,
   },
-  fileFilter: (_req, file, cb) => {
-    const allowed = new Set([
-      'image/jpeg',
-      'image/png',
-      'image/webp',
-      'image/heic',
-      'image/heif',
-    ]);
-
-    if (!allowed.has(file.mimetype)) {
-      cb(
-        new Error(
-          `Nicht unterstütztes Bildformat: ${file.mimetype}`
-        )
-      );
-      return;
-    }
-
+  fileFilter: (_req, _file, cb) => {
+    // Do not trust the multipart transport MIME.
+    // React Native / Expo can report local image parts as text/plain.
+    // The actual file signature is validated after Multer has read the buffer.
     cb(null, true);
   },
 });
+
+function detectImageMime(
+  buffer: Buffer
+): string | null {
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) {
+    return 'image/jpeg';
+  }
+
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(4, 8).toString('ascii') === 'ftyp'
+  ) {
+    const brand =
+      buffer.subarray(8, 12).toString('ascii').toLowerCase();
+
+    if (
+      brand === 'heic' ||
+      brand === 'heix' ||
+      brand === 'hevc' ||
+      brand === 'hevx'
+    ) {
+      return 'image/heic';
+    }
+
+    if (
+      brand === 'heif' ||
+      brand === 'mif1' ||
+      brand === 'msf1'
+    ) {
+      return 'image/heif';
+    }
+  }
+
+  return null;
+}
+
+function normalizeUploadedImage(
+  file: Express.Multer.File | undefined,
+  label: string
+): Express.Multer.File | undefined {
+  if (!file) {
+    return undefined;
+  }
+
+  const detectedMime =
+    detectImageMime(file.buffer);
+
+  if (!detectedMime) {
+    throw new Error(
+      `${label}: Datei ist kein unterstütztes Bild.`
+    );
+  }
+
+  file.mimetype = detectedMime;
+
+  return file;
+}
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -508,13 +578,22 @@ router.post(
           | undefined;
 
       const front =
-        files?.front?.[0];
+        normalizeUploadedImage(
+          files?.front?.[0],
+          'Vorderseite'
+        );
 
       const ingredients =
-        files?.ingredients?.[0];
+        normalizeUploadedImage(
+          files?.ingredients?.[0],
+          'Zutaten'
+        );
 
       const nutrition =
-        files?.nutrition?.[0];
+        normalizeUploadedImage(
+          files?.nutrition?.[0],
+          'Nährwerte'
+        );
 
       if (!front) {
         res.status(400).json({
