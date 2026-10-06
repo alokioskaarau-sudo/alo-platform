@@ -371,7 +371,133 @@ async function getProductStock(
     [productId]
   );
 
-  return result.rows;
+  const stock = [...result.rows];
+
+  /*
+   * ONLINE ist an Shopify gekoppelt.
+   *
+   * Beim Laden eines Produkts lesen wir deshalb den aktuellen
+   * verfügbaren Bestand direkt von der ALO Online-Shop Location.
+   *
+   * Aarau und Olten bleiben reine ALO-Bestände.
+   */
+  try {
+    const productResult = await db.query(
+      `
+        SELECT
+          shopify_inventory_item_id
+        FROM products
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [productId]
+    );
+
+    const inventoryItemId =
+      productResult.rows[0]
+        ?.shopify_inventory_item_id
+        ? String(
+            productResult.rows[0]
+              .shopify_inventory_item_id
+          )
+        : null;
+
+    if (inventoryItemId) {
+      const shopify =
+        await getShopifyOnlineInventory({
+          inventoryItemId,
+        });
+
+      if (
+        shopify.active &&
+        typeof shopify.quantity === "number"
+      ) {
+        const quantity =
+          shopify.quantity;
+
+        const stockLevel =
+          quantity === 0
+            ? "empty"
+            : quantity <= 2
+              ? "almost_empty"
+              : quantity <= 5
+                ? "low"
+                : quantity <= 10
+                  ? "medium"
+                  : "full";
+
+        const existingIndex =
+          stock.findIndex(
+            (row: any) =>
+              String(
+                row?.store_id ?? ""
+              ).toLowerCase() === "online"
+          );
+
+        const onlineRow = {
+          store_id: "online",
+          exact_quantity: quantity,
+          stock_level: stockLevel,
+          note: "Shopify Online-Shop",
+          updated_by: "SHOPIFY",
+          updated_at:
+            new Date().toISOString(),
+        };
+
+        if (existingIndex >= 0) {
+          stock[existingIndex] = {
+            ...stock[existingIndex],
+            ...onlineRow,
+          };
+        } else {
+          stock.push(onlineRow);
+        }
+
+        console.log(
+          "[ALO INVENTORY] Shopify Online geladen",
+          {
+            productId,
+            inventoryItemId,
+            quantity,
+            locationId:
+              shopify.locationId,
+            locationName:
+              shopify.locationName,
+          }
+        );
+      }
+    } else {
+      console.warn(
+        "[ALO INVENTORY] Kein Shopify Inventory Item",
+        {
+          productId,
+        }
+      );
+    }
+  } catch (error) {
+    /*
+     * Shopify darf das Öffnen des Produkts nicht blockieren.
+     * Bei einem externen Fehler liefern wir den letzten lokalen
+     * Snapshot zurück.
+     */
+    console.error(
+      "[ALO INVENTORY] Shopify Online konnte nicht geladen werden",
+      {
+        productId,
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      }
+    );
+  }
+
+  return stock.sort(
+    (a: any, b: any) =>
+      String(a?.store_id ?? "").localeCompare(
+        String(b?.store_id ?? "")
+      )
+  );
 }
 
 async function getProductSignals(
