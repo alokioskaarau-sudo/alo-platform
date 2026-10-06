@@ -1,6 +1,7 @@
 import {
   getShopifyOnlineInventory,
   setShopifyOnlineInventory,
+  setShopifyOnlineInventorySafe,
 } from "../services/shopifyInventory.service.js";
 import {
   normalizeAloSeoDescription,
@@ -3180,7 +3181,8 @@ router.put(
           SELECT
             id,
             barcode,
-            title
+            title,
+            shopify_inventory_item_id
           FROM products
           WHERE id = $1
           LIMIT 1
@@ -3209,10 +3211,116 @@ router.put(
                 ? "medium"
                 : "full";
 
-      await db.query("BEGIN");
+      const client = await db.connect();
 
       try {
-        await db.query(
+        await client.query("BEGIN");
+
+        /*
+         * ALO INVENTORY CORE
+         *
+         * Snapshot = aktueller Bestand.
+         * stock_movements = unveränderbarer Audit-Trail.
+         *
+         * Snapshot zuerst sicherstellen und anschließend sperren,
+         * damit zwei gleichzeitige Zählungen nicht gegeneinander
+         * arbeiten.
+         */
+        await client.query(
+          `
+            INSERT INTO product_stock_snapshots (
+              product_id,
+              store_id,
+              exact_quantity,
+              stock_level,
+              note,
+              updated_by,
+              updated_at
+            )
+            VALUES (
+              $1,
+              $2,
+              0,
+              'empty',
+              NULL,
+              $3,
+              NOW()
+            )
+            ON CONFLICT (
+              product_id,
+              store_id
+            )
+            DO NOTHING
+          `,
+          [
+            productId,
+            storeId,
+            staffUser.displayName ??
+              String(staffUser.id),
+          ]
+        );
+
+        const currentStockResult =
+          await client.query(
+            `
+              SELECT
+                exact_quantity
+              FROM product_stock_snapshots
+              WHERE
+                product_id = $1
+                AND store_id = $2
+              FOR UPDATE
+            `,
+            [
+              productId,
+              storeId,
+            ]
+          );
+
+        const previousQuantity =
+          Number(
+            currentStockResult.rows[0]
+              ?.exact_quantity ?? 0
+          );
+
+        const quantityDelta =
+          quantity - previousQuantity;
+
+        await client.query(
+          `
+            INSERT INTO stock_movements (
+              product_id,
+              store_id,
+              movement_type,
+              quantity_delta,
+              reference_type,
+              reference_id,
+              note,
+              created_by
+            )
+            VALUES (
+              $1,
+              $2,
+              'INVENTORY_CORRECTION',
+              $3,
+              'STAFF_INVENTORY_COUNT',
+              $4,
+              $5,
+              $6
+            )
+          `,
+          [
+            productId,
+            storeId,
+            quantityDelta,
+            `count-${productId}-${storeId}-${Date.now()}`,
+            `Inventur: ${previousQuantity} → ${quantity}`,
+            staffUser.displayName ??
+              String(staffUser.id),
+          ]
+        );
+
+        await client.query(
           `
             INSERT INTO product_stock_snapshots (
               product_id,
@@ -3255,7 +3363,7 @@ router.put(
           ]
         );
 
-        await db.query(
+        await client.query(
           `
             INSERT INTO staff_activity (
               staff_user_id,
@@ -3289,10 +3397,89 @@ router.put(
           ]
         );
 
-        await db.query("COMMIT");
+        await client.query("COMMIT");
       } catch (error) {
-        await db.query("ROLLBACK");
+        try {
+          await client.query("ROLLBACK");
+        } catch {}
+
         throw error;
+      } finally {
+        client.release();
+      }
+
+      let shopifyInventorySync:
+        | {
+            status: "SYNCED";
+            quantity: number;
+          }
+        | {
+            status: "SKIPPED";
+            reason: string;
+          }
+        | {
+            status: "FAILED";
+            error: string;
+          }
+        | null = null;
+
+      /*
+       * ALO CORE ist bereits committed.
+       *
+       * Nur der separate ONLINE-Pool wird downstream
+       * zu Shopify synchronisiert.
+       *
+       * Aarau und Olten bleiben vollständig intern.
+       */
+      if (workspaceRaw === "ONLINE") {
+        const shopifyInventoryItemId =
+          product.shopify_inventory_item_id
+            ? String(
+                product.shopify_inventory_item_id
+              )
+            : null;
+
+        if (!shopifyInventoryItemId) {
+          shopifyInventorySync = {
+            status: "SKIPPED",
+            reason:
+              "NO_SHOPIFY_INVENTORY_ITEM",
+          };
+        } else {
+          try {
+            await setShopifyOnlineInventorySafe({
+              inventoryItemId:
+                shopifyInventoryItemId,
+              quantity,
+              reference:
+                `staff-count-${productId}-${Date.now()}`,
+            });
+
+            shopifyInventorySync = {
+              status: "SYNCED",
+              quantity,
+            };
+          } catch (shopifyError) {
+            const message =
+              shopifyError instanceof Error
+                ? shopifyError.message
+                : "Unbekannter Shopify Inventory Fehler";
+
+            console.error(
+              "[ALO INVENTORY] Shopify Online Sync fehlgeschlagen",
+              {
+                productId,
+                quantity,
+                error: message,
+              }
+            );
+
+            shopifyInventorySync = {
+              status: "FAILED",
+              error: message,
+            };
+          }
+        }
       }
 
       res.json({
@@ -3311,6 +3498,7 @@ router.put(
             role: staffUser.role,
           },
         },
+        shopifyInventorySync,
         stock: await getProductStock(
           productId
         ),
@@ -3331,6 +3519,153 @@ router.put(
     }
   }
 );
+
+
+/*
+ * ============================================================
+ * ALO INVENTORY CORE - MULTI LOCATION STOCK
+ * ============================================================
+ *
+ * ALO CORE ist die Quelle der Wahrheit.
+ * Diese Route liest ausschließlich den internen Bestand.
+ *
+ * Shopify-Online-Inventar wird hier bewusst NICHT addiert,
+ * damit keine Bestände doppelt gezählt werden.
+ */
+router.get(
+  "/api/product-master/:id/inventory",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(req.params.id ?? "").trim();
+
+      if (!productId) {
+        res.status(400).json({
+          ok: false,
+          error: "Produkt-ID fehlt.",
+        });
+        return;
+      }
+
+      const productResult = await db.query(
+        `
+          SELECT
+            id,
+            barcode,
+            title
+          FROM products
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [productId]
+      );
+
+      if (productResult.rows.length === 0) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      const product = productResult.rows[0];
+
+      const stock =
+        await getProductStock(productId);
+
+      const byStore = new Map(
+        stock.map((row: any) => [
+          String(row.store_id).toLowerCase(),
+          row,
+        ])
+      );
+
+      const locations = [
+        {
+          workspace: "AARAU",
+          storeId: "aarau",
+          label: "Aarau",
+        },
+        {
+          workspace: "OLTEN",
+          storeId: "olten",
+          label: "Olten",
+        },
+        {
+          workspace: "ONLINE",
+          storeId: "online",
+          label: "Online Shop",
+        },
+      ].map((location) => {
+        const row =
+          byStore.get(location.storeId);
+
+        return {
+          ...location,
+
+          quantity:
+            row?.exact_quantity == null
+              ? 0
+              : Number(row.exact_quantity),
+
+          stockLevel:
+            row?.stock_level ??
+            "empty",
+
+          note:
+            row?.note ??
+            null,
+
+          updatedBy:
+            row?.updated_by ??
+            null,
+
+          updatedAt:
+            row?.updated_at ??
+            null,
+        };
+      });
+
+      res.json({
+        ok: true,
+
+        product: {
+          id: String(product.id),
+          barcode:
+            product.barcode ?? null,
+          title:
+            product.title ?? null,
+        },
+
+        locations,
+
+        totalQuantity:
+          locations.reduce(
+            (sum, location) =>
+              sum + location.quantity,
+            0
+          ),
+      });
+    } catch (error) {
+      console.error(
+        "ALO INVENTORY READ ERROR",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Bestand konnte nicht geladen werden.",
+      });
+    }
+  }
+);
+
 
 router.post(
   "/api/product-master/:id/signals",
@@ -5126,6 +5461,214 @@ async function syncAloCanonicalCollections(
 
   return result;
 }
+
+
+// ============================================================
+// PRODUCT MASTER - FAST SALE ACTION
+// ALO CORE remains source of truth.
+// Shopify synchronization is triggered by Staff afterwards.
+// ============================================================
+
+router.post(
+  "/api/product-master/:id/sale-action",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(req.params.id ?? "").trim();
+
+      const action =
+        String(req.body?.action ?? "")
+          .trim()
+          .toUpperCase();
+
+      if (
+        action !== "DISCOUNT_25" &&
+        action !== "DISCOUNT_50" &&
+        action !== "NORMAL"
+      ) {
+        res.status(400).json({
+          ok: false,
+          error:
+            "Ungültige Aktion. Erlaubt: DISCOUNT_25, DISCOUNT_50, NORMAL.",
+        });
+        return;
+      }
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              id,
+              title,
+              product_data,
+              archived_at
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const row = result.rows[0];
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      if (row.archived_at) {
+        res.status(409).json({
+          ok: false,
+          code: "PRODUCT_ARCHIVED",
+          error:
+            "Dieses Produkt wurde bereits archiviert.",
+        });
+        return;
+      }
+
+      const productData =
+        row.product_data &&
+        typeof row.product_data === "object"
+          ? row.product_data
+          : {};
+
+      const commerce =
+        productData.commerce &&
+        typeof productData.commerce === "object"
+          ? productData.commerce
+          : {};
+
+      const currentSellingPrice =
+        Number(
+          commerce.sellingPrice ??
+          productData.sellingPrice ??
+          NaN
+        );
+
+      const storedRegularPrice =
+        Number(
+          commerce.regularPrice ??
+          NaN
+        );
+
+      const currentDiscount =
+        Number(
+          commerce.discountPercent ??
+          0
+        );
+
+      /*
+       * regularPrice darf niemals aus einem bereits
+       * rabattierten Preis neu berechnet werden.
+       *
+       * Falls bereits ein valider regularPrice existiert,
+       * bleibt er deshalb immer die Basis.
+       *
+       * Nur bei einem bisher nicht rabattierten Produkt
+       * darf sellingPrice initial als regularPrice dienen.
+       */
+      let regularPrice =
+        Number.isFinite(storedRegularPrice) &&
+        storedRegularPrice > 0
+          ? storedRegularPrice
+          : (
+              currentDiscount === 0 &&
+              Number.isFinite(currentSellingPrice) &&
+              currentSellingPrice > 0
+                ? currentSellingPrice
+                : NaN
+            );
+
+      if (
+        !Number.isFinite(regularPrice) ||
+        regularPrice <= 0
+      ) {
+        res.status(409).json({
+          ok: false,
+          code: "REGULAR_PRICE_MISSING",
+          error:
+            "Für dieses Produkt ist kein gültiger Ausgangspreis vorhanden.",
+        });
+        return;
+      }
+
+      regularPrice =
+        Math.round(regularPrice * 100) / 100;
+
+      const discountPercent =
+        action === "DISCOUNT_25"
+          ? 25
+          : action === "DISCOUNT_50"
+            ? 50
+            : 0;
+
+      const sellingPrice =
+        discountPercent === 0
+          ? regularPrice
+          : Math.round(
+              regularPrice *
+              (1 - discountPercent / 100) *
+              100
+            ) / 100;
+
+      const nextCommerce = {
+        ...commerce,
+        regularPrice,
+        sellingPrice,
+        discountPercent,
+      };
+
+      const nextProductData = {
+        ...productData,
+        commerce: nextCommerce,
+      };
+
+      await db.query(
+        `
+          UPDATE products
+          SET
+            product_data = $2::jsonb,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          productId,
+          JSON.stringify(nextProductData),
+        ]
+      );
+
+      res.json({
+        ok: true,
+        productId,
+        action,
+        commerce: {
+          regularPrice,
+          sellingPrice,
+          discountPercent,
+        },
+        coreSaved: true,
+      });
+    } catch (error) {
+      console.error(
+        "Product Master sale action error:",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Produktaktion konnte nicht gespeichert werden.",
+      });
+    }
+  }
+);
 
 router.post(
   "/api/product-master/:id/sync-to-shopify",

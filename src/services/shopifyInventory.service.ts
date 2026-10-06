@@ -576,6 +576,142 @@ export async function getShopifyOnlineInventory(
   };
 }
 
+
+/**
+ * Setzt ausschließlich den Bestand der ALO Online-Shop Location.
+ *
+ * WICHTIG:
+ * - deaktiviert KEINE anderen Shopify Locations
+ * - ALO CORE bleibt Source of Truth
+ * - gedacht für direkte Staff-Inventur / Bestandskorrekturen
+ */
+export async function setShopifyOnlineInventorySafe(
+  input: {
+    inventoryItemId: string;
+    quantity: number;
+    reference: string;
+  }
+) {
+  const inventoryItemId =
+    normalizeInventoryItemId(
+      input.inventoryItemId
+    );
+
+  const quantity =
+    Number(input.quantity);
+
+  if (
+    !Number.isInteger(quantity) ||
+    quantity < 0
+  ) {
+    throw new Error(
+      "Ungültiger Shopify-Bestand."
+    );
+  }
+
+  const tracking =
+    await ensureInventoryTracked(
+      inventoryItemId
+    );
+
+  const activation =
+    await ensureOnlineInventoryActivated(
+      inventoryItemId,
+      input.reference
+    );
+
+  const idempotencyKey =
+    buildIdempotencyKey(
+      inventoryItemId,
+      quantity,
+      `staff-inventory-${input.reference}`
+    );
+
+  const data =
+    await shopifyGraphql(
+      `
+        mutation AloSafeSetOnlineInventory(
+          $input: InventorySetQuantitiesInput!,
+          $idempotencyKey: String!
+        ) {
+          inventorySetQuantities(
+            input: $input
+          )
+          @idempotent(
+            key: $idempotencyKey
+          ) {
+            inventoryAdjustmentGroup {
+              createdAt
+              reason
+              referenceDocumentUri
+              changes {
+                name
+                delta
+                quantityAfterChange
+              }
+            }
+            userErrors {
+              code
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        idempotencyKey,
+        input: {
+          name: "available",
+          reason: "correction",
+          referenceDocumentUri:
+            `alo://staff-inventory/${input.reference}`,
+          quantities: [
+            {
+              inventoryItemId,
+              locationId:
+                ALO_ONLINE_SHOP_LOCATION_ID,
+              quantity,
+              changeFromQuantity: null,
+            },
+          ],
+        },
+      }
+    );
+
+  const payload =
+    data?.inventorySetQuantities;
+
+  const userErrors =
+    payload?.userErrors ?? [];
+
+  if (userErrors.length) {
+    throw new Error(
+      userErrors
+        .map(
+          (error: any) =>
+            error.message
+        )
+        .join(" · ")
+    );
+  }
+
+  return {
+    ok: true as const,
+    locationId:
+      ALO_ONLINE_SHOP_LOCATION_ID,
+    inventoryItemId,
+    quantity,
+    trackingChanged:
+      tracking.changed,
+    activated:
+      activation.activated,
+    adjustment:
+      payload?.inventoryAdjustmentGroup ??
+      null,
+  };
+}
+
+
 export async function setShopifyOnlineInventory(
   input: {
     inventoryItemId: string;
