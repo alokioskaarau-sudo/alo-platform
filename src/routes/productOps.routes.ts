@@ -2236,8 +2236,203 @@ router.get(
           [req.params.id]
         );
 
-      const image =
+      let image =
         result.rows[0];
+
+      /*
+       * ALO PRODUCT IMAGE FALLBACK
+       *
+       * CORE bleibt die primäre Bildquelle.
+       *
+       * Falls ein älteres, bereits mit Shopify verbundenes
+       * Produkt noch kein Bild in product_images besitzt:
+       *
+       * 1. Shopify-Hauptbild lesen
+       * 2. Bild herunterladen
+       * 3. dauerhaft in ALO CORE speichern
+       * 4. danach wie jedes andere CORE-Bild ausliefern
+       *
+       * Dadurch ist Shopify nur die Recovery-Quelle.
+       * Nach dem ersten erfolgreichen Abruf besitzt ALO das
+       * Bild selbst und weitere Staff-Aufrufe brauchen
+       * Shopify dafür nicht mehr.
+       */
+      if (!image) {
+        const product =
+          await getProduct(
+            String(req.params.id)
+          );
+
+        const rawShopifyProductId =
+          String(
+            product?.shopify_product_id ??
+              ""
+          ).trim();
+
+        if (rawShopifyProductId) {
+          try {
+            const shopifyProductId =
+              rawShopifyProductId.startsWith(
+                "gid://shopify/Product/"
+              )
+                ? rawShopifyProductId
+                : `gid://shopify/Product/${rawShopifyProductId}`;
+
+            const shopifyData =
+              await shopifyGraphql(
+                `
+                  query AloRecoverProductImage(
+                    $id: ID!
+                  ) {
+                    product(id: $id) {
+                      id
+
+                      media(
+                        first: 20
+                      ) {
+                        nodes {
+                          ... on MediaImage {
+                            id
+
+                            image {
+                              url
+                              altText
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `,
+                {
+                  id: shopifyProductId,
+                }
+              );
+
+            const mediaNodes =
+              Array.isArray(
+                shopifyData?.product
+                  ?.media?.nodes
+              )
+                ? shopifyData.product.media.nodes
+                : [];
+
+            const shopifyImage =
+              mediaNodes.find(
+                (media: any) =>
+                  typeof media?.image?.url ===
+                    "string" &&
+                  media.image.url.trim()
+              )?.image ?? null;
+
+            const imageUrl =
+              typeof shopifyImage?.url ===
+              "string"
+                ? shopifyImage.url.trim()
+                : "";
+
+            if (imageUrl) {
+              const imageResponse =
+                await axios.get(
+                  imageUrl,
+                  {
+                    responseType:
+                      "arraybuffer",
+                    timeout: 30000,
+                  }
+                );
+
+              const imageBuffer =
+                Buffer.from(
+                  imageResponse.data
+                );
+
+              if (imageBuffer.length > 0) {
+                const contentTypeHeader =
+                  imageResponse.headers?.[
+                    "content-type"
+                  ];
+
+                const mimeType =
+                  typeof contentTypeHeader ===
+                    "string" &&
+                  contentTypeHeader
+                    .toLowerCase()
+                    .startsWith("image/")
+                    ? contentTypeHeader
+                        .split(";")[0]
+                        .trim()
+                    : "image/jpeg";
+
+                const originalName =
+                  `shopify-recovered-${req.params.id}`;
+
+                await db.query(
+                  `
+                    INSERT INTO
+                      product_images (
+                        product_id,
+                        image_data,
+                        mime_type,
+                        original_name,
+                        is_primary
+                      )
+                    VALUES (
+                      $1,
+                      $2,
+                      $3,
+                      $4,
+                      TRUE
+                    )
+                  `,
+                  [
+                    req.params.id,
+                    imageBuffer,
+                    mimeType,
+                    originalName,
+                  ]
+                );
+
+                image = {
+                  image_data:
+                    imageBuffer,
+                  mime_type:
+                    mimeType,
+                };
+
+                console.log(
+                  "[ALO PRODUCT IMAGE RECOVERED]",
+                  {
+                    productId:
+                      req.params.id,
+                    shopifyProductId,
+                    bytes:
+                      imageBuffer.length,
+                  }
+                );
+              }
+            }
+          } catch (error) {
+            /*
+             * Shopify darf den normalen CORE-Endpunkt
+             * niemals kaputtmachen.
+             */
+            console.error(
+              "[ALO PRODUCT IMAGE RECOVERY FAILED]",
+              {
+                productId:
+                  req.params.id,
+                shopifyProductId:
+                  rawShopifyProductId,
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : String(error),
+              }
+            );
+          }
+        }
+      }
 
       if (!image) {
         res.status(404).end();
