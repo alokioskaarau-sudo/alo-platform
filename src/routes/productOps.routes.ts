@@ -5464,6 +5464,167 @@ async function syncAloCanonicalCollections(
 
 
 // ============================================================
+// PRODUCT MASTER - STANDARD PRICE
+// Speichert den kanonischen Basispreis in ALO CORE.
+// Ein aktiver 25/50%-Rabatt bleibt erhalten und wird
+// automatisch vom neuen Standardpreis neu berechnet.
+// Shopify synchronization is triggered by Staff afterwards.
+// ============================================================
+
+router.put(
+  "/api/product-master/:id/regular-price",
+  async (req, res) => {
+    try {
+      await ensureSchema();
+
+      const productId =
+        String(req.params.id ?? "").trim();
+
+      const rawRegularPrice =
+        String(req.body?.regularPrice ?? "")
+          .trim()
+          .replace(",", ".");
+
+      const requestedRegularPrice =
+        Number(rawRegularPrice);
+
+      if (
+        !Number.isFinite(requestedRegularPrice) ||
+        requestedRegularPrice <= 0
+      ) {
+        res.status(400).json({
+          ok: false,
+          code: "INVALID_REGULAR_PRICE",
+          error:
+            "Der Standardpreis muss grösser als CHF 0.00 sein.",
+        });
+        return;
+      }
+
+      const regularPrice =
+        Math.round(requestedRegularPrice * 100) / 100;
+
+      const result =
+        await db.query(
+          `
+            SELECT
+              id,
+              title,
+              product_data,
+              archived_at
+            FROM products
+            WHERE id = $1
+            LIMIT 1
+          `,
+          [productId]
+        );
+
+      const row = result.rows[0];
+
+      if (!row) {
+        res.status(404).json({
+          ok: false,
+          error: "Produkt nicht gefunden.",
+        });
+        return;
+      }
+
+      if (row.archived_at) {
+        res.status(409).json({
+          ok: false,
+          code: "PRODUCT_ARCHIVED",
+          error:
+            "Dieses Produkt wurde bereits archiviert.",
+        });
+        return;
+      }
+
+      const productData =
+        row.product_data &&
+        typeof row.product_data === "object"
+          ? row.product_data
+          : {};
+
+      const commerce =
+        productData.commerce &&
+        typeof productData.commerce === "object"
+          ? productData.commerce
+          : {};
+
+      const storedDiscount =
+        Number(commerce.discountPercent ?? 0);
+
+      const discountPercent: 0 | 25 | 50 =
+        storedDiscount === 25
+          ? 25
+          : storedDiscount === 50
+            ? 50
+            : 0;
+
+      const sellingPrice =
+        discountPercent === 0
+          ? regularPrice
+          : Math.round(
+              regularPrice *
+                (1 - discountPercent / 100) *
+                100
+            ) / 100;
+
+      const nextCommerce = {
+        ...commerce,
+        regularPrice,
+        sellingPrice,
+        discountPercent,
+      };
+
+      const nextProductData = {
+        ...productData,
+        commerce: nextCommerce,
+      };
+
+      await db.query(
+        `
+          UPDATE products
+          SET
+            product_data = $2::jsonb,
+            updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          productId,
+          JSON.stringify(nextProductData),
+        ]
+      );
+
+      res.json({
+        ok: true,
+        productId,
+        coreSaved: true,
+        commerce: {
+          regularPrice,
+          sellingPrice,
+          discountPercent,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "[ALO PRODUCT MASTER] Standardpreis konnte nicht gespeichert werden",
+        error
+      );
+
+      res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Standardpreis konnte nicht gespeichert werden.",
+      });
+    }
+  }
+);
+
+
+// ============================================================
 // PRODUCT MASTER - FAST SALE ACTION
 // ALO CORE remains source of truth.
 // Shopify synchronization is triggered by Staff afterwards.
