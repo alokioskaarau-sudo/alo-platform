@@ -412,18 +412,113 @@ productsRouter.get(
       const values: any[] = [];
       const where: string[] = [];
 
-      if (q) {
-        values.push(`%${q}%`);
-        const i = values.length;
+      /*
+       * ALO SMART PRODUCT SEARCH
+       *
+       * Normalisiert sowohl Suchanfrage als auch Produktdaten.
+       *
+       * Beispiele:
+       *   red bull winter
+       *   winter red bull
+       *   redbull winter
+       *   red-bull winter
+       *
+       * werden unabhängig von Leerzeichen / Bindestrichen gefunden.
+       */
+      const normalizeSearchText = (value: string) =>
+        value
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim()
+          .replace(/\s+/g, " ");
+
+      const normalizedQuery = normalizeSearchText(q);
+
+      const searchTerms = normalizedQuery
+        ? normalizedQuery
+            .split(" ")
+            .filter(Boolean)
+            .slice(0, 8)
+        : [];
+
+      /*
+       * SQL-Suchtext mit Leerzeichen:
+       * "Red Bull Winter Edition 250ml ..."
+       */
+      const searchableProductSql = `
+        LOWER(
+          CONCAT_WS(
+            ' ',
+            COALESCE(p.title, ''),
+            COALESCE(p.barcode, ''),
+            COALESCE(p.brand, ''),
+            COALESCE(p.product_name, ''),
+            COALESCE(p.category, ''),
+            COALESCE(p.subcategory, ''),
+            COALESCE(p.unit_size, ''),
+            COALESCE(p.country, '')
+          )
+        )
+      `;
+
+      /*
+       * Kompakte Variante:
+       *
+       * "Red Bull Winter Edition"
+       * ->
+       * "redbullwinteredition"
+       *
+       * Dadurch findet "redbull" auch "Red Bull".
+       */
+      const compactProductSql = `
+        REGEXP_REPLACE(
+          ${searchableProductSql},
+          '[^a-z0-9]+',
+          '',
+          'g'
+        )
+      `;
+
+      const compactQuery =
+        normalizedQuery.replace(/[^a-z0-9]+/g, "");
+
+      if (normalizedQuery) {
+        /*
+         * Variante A:
+         * Alle einzelnen Wörter müssen irgendwo im Produkt vorkommen.
+         *
+         * Reihenfolge ist dabei egal.
+         */
+        const tokenConditions: string[] = [];
+
+        for (const term of searchTerms) {
+          values.push(`%${term}%`);
+          const i = values.length;
+
+          tokenConditions.push(
+            `${searchableProductSql} LIKE $${i}`
+          );
+        }
+
+        /*
+         * Variante B:
+         * Kompakter Suchtext.
+         *
+         * redbullwinter findet dadurch
+         * "Red Bull Winter".
+         */
+        values.push(`%${compactQuery}%`);
+        const compactIndex = values.length;
 
         where.push(`
           (
-            p.title ILIKE $${i}
-            OR p.barcode ILIKE $${i}
-            OR COALESCE(p.brand, '') ILIKE $${i}
-            OR COALESCE(p.product_name, '') ILIKE $${i}
-            OR COALESCE(p.category, '') ILIKE $${i}
-            OR COALESCE(p.subcategory, '') ILIKE $${i}
+            (
+              ${tokenConditions.join(" AND ")}
+            )
+            OR
+            ${compactProductSql} LIKE $${compactIndex}
           )
         `);
       }
@@ -461,6 +556,26 @@ productsRouter.get(
         Number(countResult.rows[0]?.total ?? 0);
 
       const queryValues = [...values];
+
+      let rankExactIndex: number | null = null;
+      let rankPrefixIndex: number | null = null;
+      let rankContainsIndex: number | null = null;
+      let rankCompactIndex: number | null = null;
+
+      if (normalizedQuery) {
+        queryValues.push(normalizedQuery);
+        rankExactIndex = queryValues.length;
+
+        queryValues.push(`${normalizedQuery}%`);
+        rankPrefixIndex = queryValues.length;
+
+        queryValues.push(`%${normalizedQuery}%`);
+        rankContainsIndex = queryValues.length;
+
+        queryValues.push(compactQuery);
+        rankCompactIndex = queryValues.length;
+      }
+
       queryValues.push(limit);
       const limitIndex = queryValues.length;
 
@@ -532,6 +647,94 @@ productsRouter.get(
           GROUP BY p.id
 
           ORDER BY
+            ${
+              normalizedQuery &&
+              rankExactIndex !== null &&
+              rankPrefixIndex !== null &&
+              rankContainsIndex !== null &&
+              rankCompactIndex !== null
+                ? `
+            CASE
+              /*
+               * 1. Exakte EAN
+               */
+              WHEN LOWER(COALESCE(p.barcode, '')) =
+                   $${rankExactIndex}
+                THEN 10000
+
+              /*
+               * 2. Exakter Titel
+               */
+              WHEN LOWER(COALESCE(p.title, '')) =
+                   $${rankExactIndex}
+                THEN 9000
+
+              /*
+               * 3. Exakter Produktname
+               */
+              WHEN LOWER(COALESCE(p.product_name, '')) =
+                   $${rankExactIndex}
+                THEN 8500
+
+              /*
+               * 4. Kompakter Titel entspricht Query.
+               *    redbull == "Red Bull"
+               */
+              WHEN REGEXP_REPLACE(
+                     LOWER(COALESCE(p.title, '')),
+                     '[^a-z0-9]+',
+                     '',
+                     'g'
+                   ) = $${rankCompactIndex}
+                THEN 8200
+
+              /*
+               * 5. Titel beginnt mit Suchtext
+               */
+              WHEN LOWER(COALESCE(p.title, ''))
+                   LIKE $${rankPrefixIndex}
+                THEN 7500
+
+              /*
+               * 6. Produktname beginnt damit
+               */
+              WHEN LOWER(COALESCE(p.product_name, ''))
+                   LIKE $${rankPrefixIndex}
+                THEN 7000
+
+              /*
+               * 7. Marke exakt
+               */
+              WHEN LOWER(COALESCE(p.brand, '')) =
+                   $${rankExactIndex}
+                THEN 6500
+
+              /*
+               * 8. Vollständiger Suchtext im Titel
+               */
+              WHEN LOWER(COALESCE(p.title, ''))
+                   LIKE $${rankContainsIndex}
+                THEN 6000
+
+              /*
+               * 9. Kompakter Titel enthält Query
+               */
+              WHEN REGEXP_REPLACE(
+                     LOWER(COALESCE(p.title, '')),
+                     '[^a-z0-9]+',
+                     '',
+                     'g'
+                   ) LIKE '%' || $${rankCompactIndex} || '%'
+                THEN 5500
+
+              /*
+               * 10. Sonstiger gültiger Token-Treffer
+               */
+              ELSE 1000
+            END DESC,
+                `
+                : ""
+            }
             p.updated_at DESC NULLS LAST,
             p.id DESC
 
