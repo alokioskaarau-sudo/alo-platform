@@ -2497,6 +2497,89 @@ router.patch(
  * - profile metadata
  */
 
+
+/*
+ * Admin staff management list.
+ *
+ * Der bestehende GET /users Endpoint bleibt bewusst klein,
+ * weil er auch für den Login/Profile-Picker verwendet wird.
+ *
+ * Diese Route liefert dagegen die vollständigen,
+ * administrierbaren Mitarbeiterprofile und ist nur für
+ * angemeldete Administratoren zugänglich.
+ */
+router.get(
+  "/manage/users",
+  requireStaffAuth,
+  async (_req, res) => {
+    const actor = getStaffUser(res);
+
+    if (actor.role !== "ADMIN") {
+      return res.status(403).json({
+        ok: false,
+        error:
+          "Nur Administratoren dürfen Mitarbeiter verwalten.",
+      });
+    }
+
+    try {
+      const result = await db.query(`
+        SELECT
+          id,
+          username,
+          display_name,
+          role,
+          job_key,
+          default_workspace,
+          allowed_workspaces,
+          permissions,
+          denied_permissions,
+          active,
+          profile_note,
+          avatar_url,
+          approved_at,
+          approved_by,
+          pin_hash,
+          password_hash
+        FROM staff_users
+        ORDER BY
+          active DESC,
+          CASE role
+            WHEN 'ADMIN' THEN 1
+            WHEN 'MANAGER' THEN 2
+            WHEN 'STAFF' THEN 3
+            WHEN 'PRAKTIKANT' THEN 4
+            ELSE 5
+          END,
+          display_name ASC,
+          username ASC
+      `);
+
+      return res.json({
+        ok: true,
+        users: result.rows.map((row) => ({
+          ...publicUser(row),
+          needsPinSetup:
+            !row.pin_hash &&
+            !row.password_hash,
+        })),
+      });
+    } catch (error) {
+      console.error(
+        "GET /staff-auth/manage/users failed:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Mitarbeiter konnten nicht geladen werden.",
+      });
+    }
+  }
+);
+
+
 router.patch(
   "/users/:id",
   requireStaffAuth,
