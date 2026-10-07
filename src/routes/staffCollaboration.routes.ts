@@ -22,6 +22,7 @@ import {
   ensureDefaultChannels,
   listChatChannels,
   getDriverChatPresence,
+  updateStaffChatPresence,
   getChatUnreadCounts,
   markChatChannelRead,
   listChannelMessages,
@@ -382,6 +383,69 @@ router.get(
         res,
         error,
         "Collaboration konnte nicht geladen werden."
+      );
+    }
+  }
+);
+
+
+/*
+ * ============================================================
+ * STAFF PRESENCE
+ * ============================================================
+ */
+
+router.post(
+  "/presence",
+  async (req, res) => {
+    try {
+      const user =
+        getStaffUser(res);
+
+      const rawMode =
+        String(
+          req.body?.mode || "ONLINE"
+        )
+          .trim()
+          .toUpperCase();
+
+      const allowed =
+        new Set([
+          "ONLINE",
+          "DRIVER_MODE",
+          "RADIO",
+          "IN_CALL",
+        ]);
+
+      if (!allowed.has(rawMode)) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Ungültiger Presence-Modus.",
+          });
+      }
+
+      const presence =
+        await updateStaffChatPresence(
+          user.id,
+          rawMode as
+            | "ONLINE"
+            | "DRIVER_MODE"
+            | "RADIO"
+            | "IN_CALL"
+        );
+
+      return res.json({
+        ok: true,
+        presence,
+      });
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Presence konnte nicht aktualisiert werden."
       );
     }
   }

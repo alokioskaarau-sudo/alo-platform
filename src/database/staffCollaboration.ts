@@ -89,6 +89,68 @@ export async function ensureDefaultChannels() {
 }
 
 
+export type StaffChatPresenceMode =
+  | "ONLINE"
+  | "DRIVER_MODE"
+  | "RADIO"
+  | "IN_CALL";
+
+
+export async function updateStaffChatPresence(
+  staffUserId: string,
+  mode: StaffChatPresenceMode
+) {
+  const allowed =
+    new Set<StaffChatPresenceMode>([
+      "ONLINE",
+      "DRIVER_MODE",
+      "RADIO",
+      "IN_CALL",
+    ]);
+
+  if (!allowed.has(mode)) {
+    throw new Error(
+      "Ungültiger Presence-Modus."
+    );
+  }
+
+  const result =
+    await db.query(
+      `
+        INSERT INTO staff_chat_presence (
+          staff_user_id,
+          mode,
+          last_seen_at,
+          updated_at
+        )
+        VALUES (
+          $1,
+          $2,
+          NOW(),
+          NOW()
+        )
+
+        ON CONFLICT (staff_user_id)
+        DO UPDATE SET
+          mode = EXCLUDED.mode,
+          last_seen_at = NOW(),
+          updated_at = NOW()
+
+        RETURNING
+          staff_user_id,
+          mode,
+          last_seen_at
+      `,
+      [
+        staffUserId,
+        mode,
+      ]
+    );
+
+  return result.rows[0] || null;
+}
+
+
 export type DriverChatPresence = {
   total_drivers: number;
   online_drivers: number;
@@ -266,17 +328,26 @@ export async function markChatChannelRead(
 
         DO UPDATE SET
           last_read_message_id =
-            GREATEST(
-              COALESCE(
+            CASE
+              WHEN EXCLUDED.last_read_message_id
+                IS NULL
+              THEN
                 staff_chat_channel_reads
-                  .last_read_message_id,
-                0
-              ),
-              COALESCE(
-                EXCLUDED.last_read_message_id,
-                0
-              )
-            ),
+                  .last_read_message_id
+
+              WHEN staff_chat_channel_reads
+                .last_read_message_id
+                IS NULL
+              THEN
+                EXCLUDED.last_read_message_id
+
+              ELSE
+                GREATEST(
+                  staff_chat_channel_reads
+                    .last_read_message_id,
+                  EXCLUDED.last_read_message_id
+                )
+            END,
 
           last_read_at = NOW()
 

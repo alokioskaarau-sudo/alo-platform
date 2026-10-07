@@ -1982,6 +1982,42 @@ console.log(
   `);
 
   /*
+   * ALO Messenger V6 — STAFF PRESENCE
+   *
+   * Separate Kommunikations-Presence.
+   * Sie verändert NICHT den Liefer-/Fahrerstatus.
+   */
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_chat_presence (
+      staff_user_id BIGINT PRIMARY KEY
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+
+      mode TEXT NOT NULL DEFAULT 'ONLINE'
+        CHECK (
+          mode IN (
+            'ONLINE',
+            'DRIVER_MODE',
+            'RADIO',
+            'IN_CALL'
+          )
+        ),
+
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_chat_presence_last_seen_idx
+    ON staff_chat_presence (
+      last_seen_at DESC
+    );
+  `);
+
+
+  /*
    * ALO Messenger V5 — READ STATE
    *
    * Persistenter Lesestand pro Mitarbeiter und Channel.
