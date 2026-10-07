@@ -408,6 +408,7 @@ export function effectiveStaffCapabilities(
     AuthenticatedStaffUser,
     | "role"
     | "jobKey"
+    | "jobKeys"
     | "permissions"
     | "deniedPermissions"
   >
@@ -417,8 +418,7 @@ export function effectiveStaffCapabilities(
    * ADMIN bleibt uneingeschränkt.
    */
   if (
-    user.role === "ADMIN" ||
-    user.jobKey === "admin"
+    user.role === "ADMIN"
   ) {
     return new Set([
       ...STAFF_CAPABILITIES,
@@ -426,20 +426,65 @@ export function effectiveStaffCapabilities(
     ]);
   }
 
-  const base =
-    JOB_CAPABILITIES[
-      user.jobKey
-    ] ??
-    ROLE_CAPABILITIES[
-      user.role
-    ] ??
-    new Set<string>();
+  const jobs =
+    Array.from(
+      new Set(
+        (
+          user.jobKeys?.length
+            ? user.jobKeys
+            : [user.jobKey]
+        ).filter(
+          (job) =>
+            job !== "admin"
+        )
+      )
+    );
 
   const effective =
-    new Set<string>([
-      ...base,
-      ...(user.permissions ?? []),
-    ]);
+    new Set<string>();
+
+  for (const job of jobs) {
+    const jobCapabilities =
+      JOB_CAPABILITIES[job];
+
+    if (!jobCapabilities) {
+      continue;
+    }
+
+    for (
+      const capability of
+      jobCapabilities
+    ) {
+      effective.add(capability);
+    }
+  }
+
+  /*
+   * Legacy/fallback safety:
+   * Falls kein gültiger Job vorhanden ist,
+   * verwenden wir weiterhin die Rollen-Baseline.
+   */
+  if (effective.size === 0) {
+    const roleCapabilities =
+      ROLE_CAPABILITIES[
+        user.role
+      ] ??
+      new Set<string>();
+
+    for (
+      const capability of
+      roleCapabilities
+    ) {
+      effective.add(capability);
+    }
+  }
+
+  for (
+    const permission of
+    user.permissions ?? []
+  ) {
+    effective.add(permission);
+  }
 
   /*
    * Deny gewinnt immer.
@@ -466,6 +511,7 @@ export function hasStaffCapability(
     AuthenticatedStaffUser,
     | "role"
     | "jobKey"
+    | "jobKeys"
     | "permissions"
     | "deniedPermissions"
   >,
@@ -473,8 +519,7 @@ export function hasStaffCapability(
 ): boolean {
 
   if (
-    user.role === "ADMIN" ||
-    user.jobKey === "admin"
+    user.role === "ADMIN"
   ) {
     return true;
   }
@@ -498,6 +543,7 @@ export function hasEveryStaffCapability(
     AuthenticatedStaffUser,
     | "role"
     | "jobKey"
+    | "jobKeys"
     | "permissions"
     | "deniedPermissions"
   >,
@@ -519,6 +565,7 @@ export function hasAnyStaffCapability(
     AuthenticatedStaffUser,
     | "role"
     | "jobKey"
+    | "jobKeys"
     | "permissions"
     | "deniedPermissions"
   >,

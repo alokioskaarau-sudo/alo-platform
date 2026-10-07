@@ -161,6 +161,25 @@ function publicUser(
       )
     );
 
+  const jobKeys =
+    Array.from(
+      new Set(
+        (
+          stringArray(
+            row.job_keys
+          ).length > 0
+            ? stringArray(
+                row.job_keys
+              )
+            : [jobKey]
+        ).filter(
+          (value) =>
+            value !== "admin" ||
+            role === "ADMIN"
+        )
+      )
+    );
+
   const permissions =
     stringArray(
       row.permissions
@@ -184,6 +203,7 @@ function publicUser(
     role,
 
     jobKey,
+    jobKeys,
 
     defaultWorkspace:
       String(
@@ -240,6 +260,8 @@ function publicUser(
             jobKey as import(
               "../middleware/staffAuth.js"
             ).StaffJob,
+          jobKeys:
+            jobKeys as import("../middleware/staffAuth.js").StaffJob[],
           permissions,
           deniedPermissions,
         })
@@ -2422,6 +2444,7 @@ router.patch(
               display_name,
               role,
               job_key,
+              job_keys,
               default_workspace,
               allowed_workspaces,
               permissions,
@@ -2530,6 +2553,7 @@ router.get(
           display_name,
           role,
           job_key,
+          job_keys,
           default_workspace,
           allowed_workspaces,
           permissions,
@@ -2719,6 +2743,90 @@ router.patch(
           });
       }
 
+      let jobKeys =
+        req.body?.jobKeys ===
+        undefined
+          ? stringArray(
+              current.job_keys
+            )
+          : stringArray(
+              req.body.jobKeys
+            );
+
+      if (jobKeys.length === 0) {
+        jobKeys = [jobKey];
+      }
+
+      jobKeys =
+        Array.from(
+          new Set(jobKeys)
+        );
+
+      if (
+        jobKeys.some(
+          (job) =>
+            !validJobs.has(job)
+        )
+      ) {
+        return res
+          .status(422)
+          .json({
+            ok: false,
+            error:
+              "Ungültige Funktion in jobKeys.",
+          });
+      }
+
+      /*
+       * Security invariant:
+       * Nur die organisatorische Rolle ADMIN
+       * darf die Admin-Funktion besitzen.
+       */
+      if (role === "ADMIN") {
+        jobKeys =
+          Array.from(
+            new Set([
+              "admin",
+              ...jobKeys,
+            ])
+          );
+      } else {
+        jobKeys =
+          jobKeys.filter(
+            (job) =>
+              job !== "admin"
+          );
+
+        if (jobKeys.length === 0) {
+          jobKeys = [
+            jobKey === "admin"
+              ? "sales"
+              : jobKey,
+          ];
+        }
+      }
+
+      /*
+       * job_key bleibt die Hauptfunktion.
+       * Sie muss immer Teil von job_keys sein.
+       */
+      let normalizedJobKey =
+        role === "ADMIN"
+          ? "admin"
+          : jobKey === "admin"
+          ? jobKeys[0]
+          : jobKey;
+
+      if (
+        !jobKeys.includes(
+          normalizedJobKey
+        )
+      ) {
+        jobKeys.unshift(
+          normalizedJobKey
+        );
+      }
+
       const defaultWorkspace =
         req.body
           ?.defaultWorkspace ===
@@ -2893,15 +3001,16 @@ router.patch(
               display_name = $2,
               role = $3,
               job_key = $4,
-              default_workspace = $5,
+              job_keys = $5::jsonb,
+              default_workspace = $6,
               allowed_workspaces =
-                $6::jsonb,
-              permissions =
                 $7::jsonb,
-              denied_permissions =
+              permissions =
                 $8::jsonb,
-              active = $9,
-              profile_note = $10,
+              denied_permissions =
+                $9::jsonb,
+              active = $10,
+              profile_note = $11,
 
               approved_at =
                 CASE
@@ -2915,7 +3024,7 @@ router.patch(
                 CASE
                   WHEN approved_by
                     IS NULL
-                    THEN $11
+                    THEN $12
                   ELSE approved_by
                 END,
 
@@ -2946,7 +3055,12 @@ router.patch(
             targetId,
             displayName,
             role,
-            jobKey,
+            normalizedJobKey,
+
+            JSON.stringify(
+              jobKeys
+            ),
+
             defaultWorkspace,
 
             JSON.stringify(

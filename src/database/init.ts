@@ -1761,6 +1761,17 @@ export async function initializeDatabase() {
       NOT NULL DEFAULT '[]'::jsonb
   `);
 
+  // Multiple operational functions per employee.
+  //
+  // job_key remains the primary/default function for backwards
+  // compatibility. job_keys contains every operational function the
+  // employee may perform (for example sales + online_shop + driver).
+  await db.query(`
+    ALTER TABLE staff_users
+      ADD COLUMN IF NOT EXISTS job_keys JSONB
+      NOT NULL DEFAULT '[]'::jsonb
+  `);
+
   await db.query(`
     ALTER TABLE staff_users
       ADD COLUMN IF NOT EXISTS denied_permissions JSONB
@@ -1809,6 +1820,18 @@ export async function initializeDatabase() {
 
         ELSE job_key
       END
+  `);
+
+  // Backfill the new multi-function model without changing existing
+  // behaviour. Every existing primary job becomes the first function.
+  await db.query(`
+    UPDATE staff_users
+    SET job_keys =
+      jsonb_build_array(job_key)
+    WHERE
+      job_keys IS NULL
+      OR jsonb_typeof(job_keys) <> 'array'
+      OR jsonb_array_length(job_keys) = 0
   `);
 
 

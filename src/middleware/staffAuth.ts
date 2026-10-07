@@ -45,6 +45,7 @@ export type AuthenticatedStaffUser = {
 
   role: StaffRole;
   jobKey: StaffJob;
+  jobKeys: StaffJob[];
 
   defaultWorkspace: StaffWorkspace;
   allowedWorkspaces: StaffWorkspace[];
@@ -140,6 +141,7 @@ export async function requireStaffAuth(
             u.role,
 
             u.job_key,
+            u.job_keys,
 
             u.default_workspace,
             u.allowed_workspaces,
@@ -212,6 +214,31 @@ export async function requireStaffAuth(
           String(
             row.job_key || "sales"
           ) as StaffJob,
+
+        jobKeys:
+          Array.from(
+            new Set(
+              (
+                stringArray(
+                  row.job_keys
+                ).length > 0
+                  ? stringArray(
+                      row.job_keys
+                    )
+                  : [
+                      String(
+                        row.job_key ||
+                        "sales"
+                      ),
+                    ]
+              )
+                .filter(
+                  (value) =>
+                    value !== "admin" ||
+                    row.role === "ADMIN"
+                )
+            )
+          ) as StaffJob[],
 
         defaultWorkspace:
           row.default_workspace as StaffWorkspace,
