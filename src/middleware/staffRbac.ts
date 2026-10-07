@@ -165,30 +165,344 @@ export function capabilitiesForRole(
   ];
 }
 
+const JOB_CAPABILITIES:
+  Partial<
+    Record<
+      AuthenticatedStaffUser["jobKey"],
+      ReadonlySet<string>
+    >
+  > = {
+    admin:
+      new Set(STAFF_CAPABILITIES),
+
+    management:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "orders.manage",
+        "orders.reprint",
+        "products.view",
+        "products.create",
+        "products.edit",
+        "inventory.view",
+        "inventory.adjust",
+        "inventory.receive",
+        "live.view",
+        "live.use",
+        "tasks.view",
+        "tasks.manage",
+        "delivery.view",
+        "delivery.use",
+        "delivery.manage",
+        "analytics.view",
+        "staff.view",
+        "staff.manage",
+        "settings.view",
+      ]),
+
+    store_manager:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "orders.manage",
+        "orders.reprint",
+        "products.view",
+        "products.edit",
+        "inventory.view",
+        "inventory.adjust",
+        "inventory.receive",
+        "live.view",
+        "live.use",
+        "tasks.view",
+        "tasks.manage",
+        "delivery.view",
+        "analytics.view",
+        "staff.view",
+      ]),
+
+    sales:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "products.view",
+        "inventory.view",
+        "inventory.adjust",
+        "inventory.receive",
+        "live.view",
+        "tasks.view",
+        "delivery.view",
+      ]),
+
+    warehouse:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "orders.manage",
+        "orders.reprint",
+        "products.view",
+        "products.edit",
+        "inventory.view",
+        "inventory.adjust",
+        "inventory.receive",
+        "tasks.view",
+      ]),
+
+    online_shop:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "orders.manage",
+        "orders.reprint",
+        "products.view",
+        "products.create",
+        "products.edit",
+        "inventory.view",
+        "inventory.adjust",
+        "inventory.receive",
+        "live.view",
+        "tasks.view",
+        "analytics.view",
+        "delivery.view",
+      ]),
+
+    packing:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "orders.reprint",
+        "products.view",
+        "inventory.view",
+        "tasks.view",
+      ]),
+
+    live_team:
+      new Set([
+        "dashboard.view",
+        "orders.view",
+        "orders.pack",
+        "products.view",
+        "inventory.view",
+        "live.view",
+        "live.use",
+        "tasks.view",
+      ]),
+
+    driver:
+      new Set([
+        "dashboard.view",
+        "tasks.view",
+        "delivery.view",
+        "delivery.use",
+      ]),
+  };
+
+
+/*
+ * Compatibility aliases.
+ *
+ * Die App verwendet bereits die neue ALO-OS-Namenswelt,
+ * ältere Backend-Routen teilweise noch die bisherigen Namen.
+ * Beide müssen während der Migration dieselbe Berechtigung meinen.
+ */
+const CAPABILITY_ALIASES:
+  Record<string, string[]> = {
+    "stock.view": [
+      "inventory.view",
+    ],
+    "stock.adjust": [
+      "inventory.adjust",
+    ],
+    "stock.receive": [
+      "inventory.receive",
+      "receiving.use",
+    ],
+
+    "inventory.view": [
+      "stock.view",
+    ],
+    "inventory.adjust": [
+      "stock.adjust",
+    ],
+    "inventory.receive": [
+      "stock.receive",
+      "receiving.use",
+    ],
+    "receiving.use": [
+      "inventory.receive",
+      "stock.receive",
+    ],
+
+    "alo_now.view": [
+      "delivery.view",
+    ],
+    "alo_now.drive": [
+      "delivery.use",
+    ],
+    "alo_now.manage": [
+      "delivery.manage",
+    ],
+
+    "delivery.view": [
+      "alo_now.view",
+    ],
+    "delivery.use": [
+      "alo_now.drive",
+    ],
+    "delivery.manage": [
+      "alo_now.manage",
+    ],
+
+    "orders.status": [
+      "orders.manage",
+    ],
+    "orders.manage": [
+      "orders.status",
+    ],
+
+    "live.manage": [
+      "live.use",
+    ],
+    "live.use": [
+      "live.manage",
+    ],
+
+    "admin.staff": [
+      "staff.manage",
+    ],
+    "staff.manage": [
+      "admin.staff",
+    ],
+
+    "admin.settings": [
+      "settings.manage",
+    ],
+    "settings.manage": [
+      "admin.settings",
+    ],
+  };
+
+function capabilityNames(
+  capability: string
+): string[] {
+  return Array.from(
+    new Set([
+      capability,
+      ...(
+        CAPABILITY_ALIASES[
+          capability
+        ] ?? []
+      ),
+    ])
+  );
+}
+
+
+export function effectiveStaffCapabilities(
+  user: Pick<
+    AuthenticatedStaffUser,
+    | "role"
+    | "jobKey"
+    | "permissions"
+    | "deniedPermissions"
+  >
+): Set<string> {
+
+  /*
+   * ADMIN bleibt uneingeschränkt.
+   */
+  if (
+    user.role === "ADMIN" ||
+    user.jobKey === "admin"
+  ) {
+    return new Set([
+      ...STAFF_CAPABILITIES,
+      ...(user.permissions ?? []),
+    ]);
+  }
+
+  const base =
+    JOB_CAPABILITIES[
+      user.jobKey
+    ] ??
+    ROLE_CAPABILITIES[
+      user.role
+    ] ??
+    new Set<string>();
+
+  const effective =
+    new Set<string>([
+      ...base,
+      ...(user.permissions ?? []),
+    ]);
+
+  /*
+   * Deny gewinnt immer.
+   * Auch Alias-Namen werden entfernt.
+   */
+  for (
+    const denied of
+      user.deniedPermissions ?? []
+  ) {
+    for (
+      const name of
+        capabilityNames(denied)
+    ) {
+      effective.delete(name);
+    }
+  }
+
+  return effective;
+}
+
+
 export function hasStaffCapability(
   user: Pick<
     AuthenticatedStaffUser,
-    "role"
+    | "role"
+    | "jobKey"
+    | "permissions"
+    | "deniedPermissions"
   >,
-  capability: StaffCapability
+  capability: StaffCapability | string
 ): boolean {
-  if (user.role === "ADMIN") {
+
+  if (
+    user.role === "ADMIN" ||
+    user.jobKey === "admin"
+  ) {
     return true;
   }
 
-  return (
-    ROLE_CAPABILITIES[user.role]
-      ?.has(capability) ??
-    false
+  const effective =
+    effectiveStaffCapabilities(
+      user
+    );
+
+  return capabilityNames(
+    capability
+  ).some(
+    (name) =>
+      effective.has(name)
   );
 }
+
 
 export function hasEveryStaffCapability(
   user: Pick<
     AuthenticatedStaffUser,
-    "role"
+    | "role"
+    | "jobKey"
+    | "permissions"
+    | "deniedPermissions"
   >,
-  capabilities: StaffCapability[]
+  capabilities:
+    Array<StaffCapability | string>
 ): boolean {
   return capabilities.every(
     (capability) =>
@@ -199,12 +513,17 @@ export function hasEveryStaffCapability(
   );
 }
 
+
 export function hasAnyStaffCapability(
   user: Pick<
     AuthenticatedStaffUser,
-    "role"
+    | "role"
+    | "jobKey"
+    | "permissions"
+    | "deniedPermissions"
   >,
-  capabilities: StaffCapability[]
+  capabilities:
+    Array<StaffCapability | string>
 ): boolean {
   return capabilities.some(
     (capability) =>
@@ -214,6 +533,7 @@ export function hasAnyStaffCapability(
       )
   );
 }
+
 
 export function requireStaffCapability(
   capability: StaffCapability

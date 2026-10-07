@@ -23,7 +23,7 @@ import {
 } from "../middleware/staffAuth.js";
 
 import {
-  capabilitiesForRole,
+  effectiveStaffCapabilities,
 } from "../middleware/staffRbac.js";
 
 const router =
@@ -142,62 +142,6 @@ function stringArray(
 }
 
 
-function capabilitiesForStaff(
-  input: {
-    role: string;
-    jobKey?: string | null;
-    permissions?: unknown;
-    deniedPermissions?: unknown;
-  }
-): string[] {
-
-  /*
-   * ADMIN bleibt uneingeschränkt.
-   * Damit kann Maxim als Admin weiterhin alles.
-   */
-  if (input.role === "ADMIN") {
-    return Array.from(
-      new Set(
-        capabilitiesForRole(
-          "ADMIN"
-        )
-      )
-    );
-  }
-
-  /*
-   * Bestehendes Rollenmodell bleibt Baseline.
-   * Job-Rechte werden später feiner erweitert.
-   */
-  const base =
-    capabilitiesForRole(
-      input.role as any
-    );
-
-  const allow =
-    stringArray(
-      input.permissions
-    );
-
-  const deny =
-    new Set(
-      stringArray(
-        input.deniedPermissions
-      )
-    );
-
-  return Array.from(
-    new Set([
-      ...base,
-      ...allow,
-    ])
-  ).filter(
-    (capability) =>
-      !deny.has(capability)
-  );
-}
-
-
 function publicUser(
   row: any
 ) {
@@ -289,12 +233,17 @@ function publicUser(
           ),
 
     capabilities:
-      capabilitiesForStaff({
-        role,
-        jobKey,
-        permissions,
-        deniedPermissions,
-      }),
+      Array.from(
+        effectiveStaffCapabilities({
+          role,
+          jobKey:
+            jobKey as import(
+              "../middleware/staffAuth.js"
+            ).StaffJob,
+          permissions,
+          deniedPermissions,
+        })
+      ),
   };
 }
 
