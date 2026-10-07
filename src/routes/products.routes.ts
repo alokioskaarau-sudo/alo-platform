@@ -1,5 +1,10 @@
 import { Router } from "express";
 import { db } from "../database/db.js";
+import { getShopifyOnlineInventory } from "../services/shopifyInventory.service.js";
+import {
+  getShopifyMainProductImage,
+  downloadShopifyProductImage,
+} from "../services/shopifyProductImage.service.js";
 
 import {
   requireStaffAuth,
@@ -57,6 +62,309 @@ productsRouter.get(
  * The list deliberately reads the Online snapshot in bulk. The single
  * product workspace remains responsible for live Shopify verification.
  */
+
+/**
+ * SHOPIFY -> ALO CORE
+ * Synchronisiert den aktuellen Online-Bestand eines begrenzten
+ * Product-Master-Batches über die exakte Shopify Inventory Item ID.
+ */
+productsRouter.post(
+  "/api/products/sync-shopify-online",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const rawLimit = Number(req.body?.limit ?? 40);
+
+      const limit =
+        Number.isSafeInteger(rawLimit) && rawLimit > 0
+          ? Math.min(rawLimit, 100)
+          : 40;
+
+      const productIds = Array.isArray(req.body?.productIds)
+        ? Array.from(
+            new Set(
+              req.body.productIds
+                .map((value: unknown) => Number(value))
+                .filter(
+                  (value: number) =>
+                    Number.isSafeInteger(value) &&
+                    value > 0
+                )
+            )
+          ).slice(0, limit)
+        : [];
+
+      const values: unknown[] = [];
+
+      let where = `
+        (
+          (
+            p.shopify_inventory_item_id IS NOT NULL
+            AND BTRIM(p.shopify_inventory_item_id) <> ''
+          )
+          OR
+          (
+            p.shopify_product_id IS NOT NULL
+            AND BTRIM(p.shopify_product_id) <> ''
+          )
+        )
+      `;
+
+      if (productIds.length > 0) {
+        values.push(productIds);
+
+        where += `
+          AND p.id = ANY($1::bigint[])
+        `;
+      }
+
+      values.push(limit);
+      const limitIndex = values.length;
+
+      const result = await db.query(
+        `
+          SELECT
+            p.id,
+            p.shopify_product_id,
+            p.shopify_inventory_item_id
+          FROM products p
+          WHERE ${where}
+          ORDER BY
+            p.updated_at DESC NULLS LAST,
+            p.id DESC
+          LIMIT $${limitIndex}
+        `,
+        values
+      );
+
+      const rows = result.rows;
+
+      const synced: Array<{
+        productId: number;
+        quantity: number | null;
+        tracked: boolean;
+        active: boolean;
+      }> = [];
+
+      const errors: Array<{
+        productId: number;
+        error: string;
+      }> = [];
+
+      /*
+       * Begrenzte Parallelität:
+       * schnell genug für eine Inventory-Seite,
+       * ohne Shopify mit Requests zu fluten.
+       */
+      let cursor = 0;
+      const concurrency = Math.min(4, rows.length);
+
+      const worker = async () => {
+        while (cursor < rows.length) {
+          const index = cursor++;
+          const row = rows[index];
+
+          const productId = Number(row.id);
+
+          try {
+            let quantity: number | null = null;
+            let tracked = false;
+            let active = false;
+
+            const inventoryItemId = String(
+              row.shopify_inventory_item_id ?? ""
+            ).trim();
+
+            if (inventoryItemId) {
+              const shopify =
+                await getShopifyOnlineInventory({
+                  inventoryItemId,
+                });
+
+              quantity = shopify.quantity;
+              tracked = shopify.tracked;
+              active = shopify.active;
+
+              /*
+               * Shopify quantity=null darf niemals als 0
+               * interpretiert werden.
+               */
+              if (typeof quantity === "number") {
+                await db.query(
+                  `
+                    INSERT INTO product_stock_snapshots (
+                      product_id,
+                      store_id,
+                      exact_quantity,
+                      updated_at
+                    )
+                    VALUES (
+                      $1,
+                      'online',
+                      $2,
+                      NOW()
+                    )
+                    ON CONFLICT (
+                      product_id,
+                      store_id
+                    )
+                    DO UPDATE SET
+                      exact_quantity =
+                        EXCLUDED.exact_quantity,
+                      updated_at = NOW()
+                  `,
+                  [
+                    productId,
+                    quantity,
+                  ]
+                );
+              }
+            }
+
+            const rawShopifyProductId = String(
+              row.shopify_product_id ?? ""
+            ).trim();
+
+            if (rawShopifyProductId) {
+              const shopifyImage =
+                await getShopifyMainProductImage({
+                  shopifyProductId: rawShopifyProductId,
+                });
+
+              if (shopifyImage?.imageUrl) {
+                const imageFingerprint =
+                  shopifyImage.mediaId
+                    ? `shopify-media:${shopifyImage.mediaId}`
+                    : `shopify-url:${shopifyImage.imageUrl}`;
+
+                const existingImage =
+                  await db.query(
+                    `
+                      SELECT id
+                      FROM product_images
+                      WHERE product_id = $1
+                        AND is_primary = TRUE
+                        AND original_name = $2
+                      LIMIT 1
+                    `,
+                    [
+                      productId,
+                      imageFingerprint,
+                    ]
+                  );
+
+                if (existingImage.rows.length === 0) {
+                  const downloaded =
+                    await downloadShopifyProductImage(
+                      shopifyImage.imageUrl
+                    );
+
+                  if (downloaded.buffer.length > 0) {
+                    const insertedImage =
+                      await db.query(
+                        `
+                          INSERT INTO product_images (
+                            product_id,
+                            image_data,
+                            mime_type,
+                            original_name,
+                            is_primary
+                          )
+                          VALUES (
+                            $1,
+                            $2,
+                            $3,
+                            $4,
+                            TRUE
+                          )
+                          RETURNING id
+                        `,
+                        [
+                          productId,
+                          downloaded.buffer,
+                          downloaded.mimeType,
+                          imageFingerprint,
+                        ]
+                      );
+
+                    const insertedImageId =
+                      insertedImage.rows[0]?.id;
+
+                    if (!insertedImageId) {
+                      throw new Error(
+                        "Shopify Produktbild konnte nicht gespeichert werden."
+                      );
+                    }
+
+                    await db.query(
+                      `
+                        UPDATE product_images
+                        SET is_primary = FALSE
+                        WHERE product_id = $1
+                          AND id <> $2
+                          AND is_primary = TRUE
+                      `,
+                      [
+                        productId,
+                        insertedImageId,
+                      ]
+                    );
+                  }
+                }
+              }
+            }
+
+            synced.push({
+              productId,
+              quantity,
+              tracked,
+              active,
+            });
+          } catch (error: any) {
+            errors.push({
+              productId,
+              error:
+                error?.message ??
+                "Shopify Inventory-Sync fehlgeschlagen.",
+            });
+          }
+        }
+      };
+
+      if (concurrency > 0) {
+        await Promise.all(
+          Array.from(
+            { length: concurrency },
+            () => worker()
+          )
+        );
+      }
+
+      return res.json({
+        ok: errors.length === 0,
+        found: rows.length,
+        synced: synced.length,
+        failed: errors.length,
+        products: synced,
+        errors,
+      });
+    } catch (error: any) {
+      console.error(
+        "Inventory Shopify online sync error:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error?.message ??
+          "Shopify Online-Bestand konnte nicht synchronisiert werden.",
+      });
+    }
+  }
+);
+
+
 productsRouter.get(
   "/api/products",
   requireStaffAuth,
@@ -173,6 +481,9 @@ productsRouter.get(
             p.country,
             p.shopify_status,
             p.review_status,
+            p.shopify_product_id,
+            p.shopify_variant_id,
+            p.shopify_inventory_item_id,
             p.updated_at,
 
             EXISTS (
@@ -180,6 +491,18 @@ productsRouter.get(
               FROM product_images pi
               WHERE pi.product_id = p.id
             ) AS has_image,
+
+            (
+              SELECT
+                EXTRACT(EPOCH FROM pi.created_at)::bigint
+              FROM product_images pi
+              WHERE pi.product_id = p.id
+              ORDER BY
+                pi.is_primary DESC,
+                pi.created_at DESC,
+                pi.id DESC
+              LIMIT 1
+            ) AS image_version,
 
             COALESCE(
               MAX(ps.exact_quantity)
@@ -233,11 +556,22 @@ productsRouter.get(
         country: row.country ?? null,
         shopifyStatus: row.shopify_status ?? null,
         reviewStatus: row.review_status ?? null,
+        shopifyProductId: row.shopify_product_id ?? null,
+        shopifyVariantId: row.shopify_variant_id ?? null,
+        shopifyInventoryItemId:
+          row.shopify_inventory_item_id ?? null,
         updatedAt: row.updated_at ?? null,
 
         hasImage: Boolean(row.has_image),
+        imageVersion:
+          row.image_version !== null &&
+          row.image_version !== undefined
+            ? String(row.image_version)
+            : null,
         imageUrl: row.has_image
-          ? `/api/products/${row.id}/image`
+          ? `/api/products/${row.id}/image?v=${encodeURIComponent(
+              String(row.image_version ?? "0")
+            )}`
           : null,
 
         stock: {
