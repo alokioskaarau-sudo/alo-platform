@@ -1,3 +1,7 @@
+import {
+  AccessToken,
+} from "livekit-server-sdk";
+
 ﻿import {
   Router,
   type Response,
@@ -42,6 +46,128 @@ import {
 
 
 const router = Router();
+
+/*
+ * ALO COMMS V2
+ * Authenticated LiveKit room access.
+ */
+router.post(
+  "/live/token",
+  requireStaffAuth,
+  async (req, res) => {
+    try {
+      const user = getStaffUser(res);
+
+      if (!user || !user.active) {
+        return res.status(401).json({
+          ok: false,
+          error: "Nicht angemeldet.",
+        });
+      }
+
+      const requestedRoom =
+        String(req.body?.room || "")
+          .trim()
+          .toLowerCase();
+
+      const rooms = new Set([
+        "alo-crew",
+        "alo-drivers",
+      ]);
+
+      if (!rooms.has(requestedRoom)) {
+        return res.status(400).json({
+          ok: false,
+          error: "Ungültiger Funkkanal.",
+        });
+      }
+
+      const isDriver =
+        user.jobKey === "driver" ||
+        user.jobKeys.includes("driver");
+
+      const canDispatch =
+        user.role === "ADMIN" ||
+        user.role === "MANAGER";
+
+      if (
+        requestedRoom === "alo-drivers" &&
+        !isDriver &&
+        !canDispatch
+      ) {
+        return res.status(403).json({
+          ok: false,
+          error:
+            "Keine Berechtigung für Fahrerfunk.",
+        });
+      }
+
+      const apiKey =
+        process.env.LIVEKIT_API_KEY;
+
+      const apiSecret =
+        process.env.LIVEKIT_API_SECRET;
+
+      const serverUrl =
+        process.env.LIVEKIT_URL;
+
+      if (
+        !apiKey ||
+        !apiSecret ||
+        !serverUrl
+      ) {
+        return res.status(503).json({
+          ok: false,
+          error:
+            "ALO Live-Funk ist noch nicht konfiguriert.",
+        });
+      }
+
+      const token = new AccessToken(
+        apiKey,
+        apiSecret,
+        {
+          identity: `staff-${user.id}`,
+          name: user.displayName,
+          ttl: "15m",
+        }
+      );
+
+      token.addGrant({
+        roomJoin: true,
+        room: requestedRoom,
+        canPublish: true,
+        canSubscribe: true,
+        canPublishData: true,
+      });
+
+      const jwt = await token.toJwt();
+
+      return res.json({
+        ok: true,
+        data: {
+          token: jwt,
+          serverUrl,
+          room: requestedRoom,
+          identity: `staff-${user.id}`,
+        },
+      });
+    } catch (error) {
+      console.error(
+        "[alo-live-token]",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Live-Funk-Zugang konnte nicht erstellt werden.",
+      });
+    }
+  }
+);
+
+
 
 
 const chatAudioUpload = multer({
