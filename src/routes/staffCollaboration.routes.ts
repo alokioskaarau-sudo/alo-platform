@@ -2,6 +2,7 @@
   Router,
   type Response,
 } from "express";
+import multer from "multer";
 
 import {
   db,
@@ -20,8 +21,15 @@ import {
 import {
   ensureDefaultChannels,
   listChatChannels,
+  getDriverChatPresence,
+  getChatUnreadCounts,
+  markChatChannelRead,
   listChannelMessages,
   createChatMessage,
+  createChatImageMessage,
+  createChatAudioMessage,
+  getChatMessageAttachment,
+  setChatMessagePinned,
   getOrCreateDirectChannel,
   listDirectChannels,
   listTasks,
@@ -33,6 +41,83 @@ import {
 
 
 const router = Router();
+
+
+const chatAudioUpload = multer({
+  storage: multer.memoryStorage(),
+
+  limits: {
+    fileSize:
+      15 * 1024 * 1024,
+  },
+
+  fileFilter: (
+    _req,
+    file,
+    callback
+  ) => {
+    const mime =
+      String(
+        file.mimetype || ""
+      ).toLowerCase();
+
+    const allowed =
+      mime.startsWith("audio/") ||
+      mime ===
+        "application/octet-stream";
+
+    if (!allowed) {
+      callback(
+        new Error(
+          "Ungültiges Audioformat."
+        )
+      );
+      return;
+    }
+
+    callback(null, true);
+  },
+});
+
+
+const chatImageUpload = multer({
+  storage: multer.memoryStorage(),
+
+  limits: {
+    fileSize: 8 * 1024 * 1024,
+  },
+
+  fileFilter: (
+    _req,
+    file,
+    callback
+  ) => {
+    const allowed =
+      new Set([
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+      ]);
+
+    const mime =
+      String(file.mimetype || "")
+        .toLowerCase();
+
+    if (!allowed.has(mime)) {
+      callback(
+        new Error(
+          "Nur JPG, PNG, WEBP oder HEIC sind erlaubt."
+        )
+      );
+      return;
+    }
+
+    callback(null, true);
+  },
+});
+
 
 
 /*
@@ -321,7 +406,15 @@ router.get(
       const channels =
         await listChatChannels();
 
+      const unreadCounts =
+        await getChatUnreadCounts(
+          user.id
+        );
+
       const visible = [];
+
+      const driverPresence =
+        await getDriverChatPresence();
 
       for (
         const channel of channels
@@ -332,7 +425,46 @@ router.get(
             channel
           )
         ) {
-          visible.push(channel);
+          const channelType =
+            String(
+              (channel as any)
+                .channel_type || ""
+            ).toUpperCase();
+
+          if (
+            channelType === "DRIVERS"
+          ) {
+            visible.push({
+              ...channel,
+
+              online_count:
+                Number(
+                  driverPresence
+                    .online_drivers || 0
+                ),
+
+              total_driver_count:
+                Number(
+                  driverPresence
+                    .total_drivers || 0
+                ),
+
+              online_driver_user_ids:
+                driverPresence
+                  .active_driver_user_ids ||
+                [],
+            });
+
+            continue;
+          }
+
+          visible.push({
+            ...channel,
+            unread_count:
+              unreadCounts.get(
+                String(channel.id)
+              ) || 0,
+          });
         }
       }
 
@@ -425,6 +557,72 @@ router.get(
 
 
 router.post(
+  "/channels/:channelId/read",
+  async (req, res) => {
+    try {
+      const user =
+        getStaffUser(res);
+
+      const channelId =
+        String(
+          req.params.channelId || ""
+        ).trim();
+
+      const channel =
+        await getChannel(
+          channelId
+        );
+
+      if (!channel) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Chat wurde nicht gefunden.",
+          });
+      }
+
+      if (
+        !await canAccessChannel(
+          user,
+          channel
+        )
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Kein Zugriff auf diesen Chat.",
+            code:
+              "CHANNEL_ACCESS_DENIED",
+          });
+      }
+
+      const readState =
+        await markChatChannelRead(
+          channelId,
+          user.id
+        );
+
+      return res.json({
+        ok: true,
+        readState,
+      });
+
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Lesestatus konnte nicht gespeichert werden."
+      );
+    }
+  }
+);
+
+
+router.post(
   "/channels/:channelId/messages",
   async (req, res) => {
     try {
@@ -474,7 +672,10 @@ router.post(
           user.id,
           String(
             req.body?.body || ""
-          )
+          ),
+          req.body?.replyToMessageId ??
+            req.body?.reply_to_message_id ??
+            null
         );
 
       return res
@@ -496,10 +697,414 @@ router.post(
 
 
 /*
+ * Nachricht pinnen / entpinnen.
+ *
+ * Channel-Zugriff wird genauso geprüft wie beim
+ * Lesen und Senden von Nachrichten.
+ */
+router.patch(
+  "/channels/:channelId/messages/:messageId/pin",
+  async (req, res) => {
+    try {
+      const user =
+        getStaffUser(res);
+
+      const channelId =
+        String(
+          req.params.channelId || ""
+        ).trim();
+
+      const messageId =
+        String(
+          req.params.messageId || ""
+        ).trim();
+
+      const channel =
+        await getChannel(
+          channelId
+        );
+
+      if (!channel) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Chat wurde nicht gefunden.",
+          });
+      }
+
+      if (
+        !await canAccessChannel(
+          user,
+          channel
+        )
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Kein Zugriff auf diesen Chat.",
+            code:
+              "CHANNEL_ACCESS_DENIED",
+          });
+      }
+
+      const message =
+        await setChatMessagePinned(
+          channelId,
+          messageId,
+          user.id,
+          Boolean(
+            req.body?.pinned
+          )
+        );
+
+      if (!message) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Nachricht wurde nicht gefunden.",
+          });
+      }
+
+      return res.json({
+        ok: true,
+        message,
+      });
+
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Nachricht konnte nicht aktualisiert werden."
+      );
+    }
+  }
+);
+
+
+/*
  * ============================================================
  * DIRECT MESSAGES
  * ============================================================
  */
+
+
+/*
+ * ============================================================
+ * ALO MESSENGER V4 — IMAGE ATTACHMENTS
+ * ============================================================
+ */
+
+
+router.post(
+  "/channels/:channelId/messages/audio",
+  chatAudioUpload.single("audio"),
+  async (req, res) => {
+    try {
+      const user =
+        getStaffUser(res);
+
+      const channelId =
+        String(
+          req.params.channelId || ""
+        ).trim();
+
+      const channel =
+        await getChannel(
+          channelId
+        );
+
+      if (!channel) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Chat wurde nicht gefunden.",
+          });
+      }
+
+      if (
+        !await canAccessChannel(
+          user,
+          channel
+        )
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Kein Zugriff auf diesen Chat.",
+            code:
+              "CHANNEL_ACCESS_DENIED",
+          });
+      }
+
+      const file =
+        req.file;
+
+      if (!file) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Keine Sprachmemo empfangen.",
+          });
+      }
+
+      const message =
+        await createChatAudioMessage(
+          channelId,
+          user.id,
+          {
+            data:
+              file.buffer,
+
+            fileName:
+              file.originalname ||
+              `alo-voice-${Date.now()}.m4a`,
+
+            mimeType:
+              file.mimetype ||
+              "audio/mp4",
+
+            sizeBytes:
+              file.size,
+
+            caption:
+              req.body?.caption ??
+              null,
+
+            replyToMessageId:
+              req.body
+                ?.replyToMessageId ??
+              req.body
+                ?.reply_to_message_id ??
+              null,
+          }
+        );
+
+      return res
+        .status(201)
+        .json({
+          ok: true,
+          message,
+        });
+
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Sprachmemo konnte nicht gesendet werden."
+      );
+    }
+  }
+);
+
+
+router.post(
+  "/channels/:channelId/messages/image",
+  chatImageUpload.single("image"),
+  async (req, res) => {
+    try {
+      const user =
+        getStaffUser(res);
+
+      const channelId =
+        String(
+          req.params.channelId || ""
+        ).trim();
+
+      const channel =
+        await getChannel(channelId);
+
+      if (!channel) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Chat wurde nicht gefunden.",
+          });
+      }
+
+      if (
+        !await canAccessChannel(
+          user,
+          channel
+        )
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Kein Zugriff auf diesen Chat.",
+            code:
+              "CHANNEL_ACCESS_DENIED",
+          });
+      }
+
+      const file =
+        req.file;
+
+      if (!file) {
+        return res
+          .status(400)
+          .json({
+            ok: false,
+            error:
+              "Kein Bild ausgewählt.",
+          });
+      }
+
+      const message =
+        await createChatImageMessage(
+          channelId,
+          user.id,
+          {
+            data:
+              file.buffer,
+
+            fileName:
+              file.originalname ||
+              `alo-chat-${Date.now()}.jpg`,
+
+            mimeType:
+              file.mimetype ||
+              "image/jpeg",
+
+            sizeBytes:
+              file.size,
+
+            caption:
+              req.body?.caption ??
+              null,
+
+            replyToMessageId:
+              req.body?.replyToMessageId ??
+              req.body?.reply_to_message_id ??
+              null,
+          }
+        );
+
+      return res
+        .status(201)
+        .json({
+          ok: true,
+          message,
+        });
+
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Bild konnte nicht gesendet werden."
+      );
+    }
+  }
+);
+
+
+router.get(
+  "/channels/:channelId/messages/:messageId/attachment",
+  async (req, res) => {
+    try {
+      const user =
+        getStaffUser(res);
+
+      const channelId =
+        String(
+          req.params.channelId || ""
+        ).trim();
+
+      const messageId =
+        String(
+          req.params.messageId || ""
+        ).trim();
+
+      const channel =
+        await getChannel(channelId);
+
+      if (!channel) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Chat wurde nicht gefunden.",
+          });
+      }
+
+      if (
+        !await canAccessChannel(
+          user,
+          channel
+        )
+      ) {
+        return res
+          .status(403)
+          .json({
+            ok: false,
+            error:
+              "Kein Zugriff auf diesen Chat.",
+          });
+      }
+
+      const attachment =
+        await getChatMessageAttachment(
+          channelId,
+          messageId
+        );
+
+      if (!attachment) {
+        return res
+          .status(404)
+          .json({
+            ok: false,
+            error:
+              "Anhang wurde nicht gefunden.",
+          });
+      }
+
+      const data =
+        attachment.attachment_data;
+
+      res.setHeader(
+        "Content-Type",
+        attachment.attachment_mime_type ||
+          "image/jpeg"
+      );
+
+      res.setHeader(
+        "Content-Length",
+        String(data.length)
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "private, max-age=86400"
+      );
+
+      return res.send(data);
+
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Anhang konnte nicht geladen werden."
+      );
+    }
+  }
+);
+
 
 router.get(
   "/direct",

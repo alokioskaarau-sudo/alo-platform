@@ -88,6 +88,68 @@ export async function ensureDefaultChannels() {
   }
 }
 
+
+export type DriverChatPresence = {
+  total_drivers: number;
+  online_drivers: number;
+  active_driver_user_ids: string[];
+};
+
+export async function getDriverChatPresence():
+  Promise<DriverChatPresence> {
+  const result =
+    await db.query<DriverChatPresence>(
+      `
+        SELECT
+          COUNT(*)::INTEGER
+            AS total_drivers,
+
+          COUNT(*) FILTER (
+            WHERE
+              driver.approved = TRUE
+              AND driver.availability_status = 'ONLINE'
+              AND driver.last_seen_at IS NOT NULL
+              AND driver.last_seen_at >=
+                NOW() - INTERVAL '2 minutes'
+          )::INTEGER
+            AS online_drivers,
+
+          COALESCE(
+            ARRAY_AGG(
+              driver.staff_user_id::TEXT
+            ) FILTER (
+              WHERE
+                driver.approved = TRUE
+                AND driver.availability_status = 'ONLINE'
+                AND driver.last_seen_at IS NOT NULL
+                AND driver.last_seen_at >=
+                  NOW() - INTERVAL '2 minutes'
+            ),
+            ARRAY[]::TEXT[]
+          )
+            AS active_driver_user_ids
+
+        FROM alo_driver_profiles driver
+        JOIN staff_users staff
+          ON staff.id =
+            driver.staff_user_id
+
+        WHERE
+          driver.approved = TRUE
+          AND staff.active = TRUE
+      `
+    );
+
+  return (
+    result.rows[0] || {
+      total_drivers: 0,
+      online_drivers: 0,
+      active_driver_user_ids: [],
+    }
+  );
+}
+
+
 export async function listChatChannels() {
   const result =
     await db.query<AloChatChannel>(
@@ -118,6 +180,122 @@ export async function listChatChannels() {
   return result.rows;
 }
 
+export async function getChatUnreadCounts(
+  staffUserId: string
+) {
+  const result =
+    await db.query(
+      `
+        SELECT
+          channel.id AS channel_id,
+
+          COUNT(message.id)::INTEGER
+            AS unread_count
+
+        FROM staff_chat_channels channel
+
+        LEFT JOIN staff_chat_channel_reads read_state
+          ON read_state.channel_id =
+            channel.id
+          AND read_state.staff_user_id =
+            $1
+
+        LEFT JOIN staff_chat_messages message
+          ON message.channel_id =
+            channel.id
+          AND message.deleted_at IS NULL
+          AND message.sender_user_id <> $1
+          AND (
+            read_state.last_read_message_id
+              IS NULL
+            OR message.id >
+              read_state.last_read_message_id
+          )
+
+        WHERE channel.is_active = TRUE
+
+        GROUP BY channel.id
+      `,
+      [staffUserId]
+    );
+
+  return new Map<string, number>(
+    result.rows.map((row: any) => [
+      String(row.channel_id),
+
+      Math.max(
+        0,
+        Number(row.unread_count) || 0
+      ),
+    ])
+  );
+}
+
+
+export async function markChatChannelRead(
+  channelId: string,
+  staffUserId: string
+) {
+  const result =
+    await db.query(
+      `
+        INSERT INTO staff_chat_channel_reads (
+          channel_id,
+          staff_user_id,
+          last_read_message_id,
+          last_read_at
+        )
+
+        VALUES (
+          $1,
+          $2,
+          (
+            SELECT MAX(id)
+            FROM staff_chat_messages
+            WHERE
+              channel_id = $1
+              AND deleted_at IS NULL
+          ),
+          NOW()
+        )
+
+        ON CONFLICT (
+          channel_id,
+          staff_user_id
+        )
+
+        DO UPDATE SET
+          last_read_message_id =
+            GREATEST(
+              COALESCE(
+                staff_chat_channel_reads
+                  .last_read_message_id,
+                0
+              ),
+              COALESCE(
+                EXCLUDED.last_read_message_id,
+                0
+              )
+            ),
+
+          last_read_at = NOW()
+
+        RETURNING
+          channel_id,
+          staff_user_id,
+          last_read_message_id,
+          last_read_at
+      `,
+      [
+        channelId,
+        staffUserId,
+      ]
+    );
+
+  return result.rows[0] || null;
+}
+
+
 export async function listChannelMessages(
   channelId: string,
   limit = 100
@@ -136,16 +314,47 @@ export async function listChannelMessages(
           message.channel_id,
           message.sender_user_id,
           message.body,
+          message.attachment_type,
+          CASE
+            WHEN message.attachment_type IS NOT NULL
+            THEN
+              '/api/staff-collaboration/channels/' ||
+              message.channel_id ||
+              '/messages/' ||
+              message.id ||
+              '/attachment'
+            ELSE NULL
+          END AS attachment_url,
+          message.attachment_name,
+          message.attachment_mime_type,
+          message.attachment_size_bytes,
+          message.reply_to_message_id,
+          message.is_pinned,
+          message.pinned_at,
+          message.pinned_by_user_id,
           message.created_at,
           message.updated_at,
           staff.display_name
             AS sender_display_name,
           staff.username
-            AS sender_username
+            AS sender_username,
+          reply_message.body
+            AS reply_to_body,
+          reply_staff.display_name
+            AS reply_to_sender_display_name,
+          reply_staff.username
+            AS reply_to_sender_username
         FROM staff_chat_messages message
         JOIN staff_users staff
           ON staff.id =
             message.sender_user_id
+        LEFT JOIN staff_chat_messages reply_message
+          ON reply_message.id =
+            message.reply_to_message_id
+          AND reply_message.deleted_at IS NULL
+        LEFT JOIN staff_users reply_staff
+          ON reply_staff.id =
+            reply_message.sender_user_id
         WHERE
           message.channel_id = $1
           AND message.deleted_at IS NULL
@@ -162,10 +371,16 @@ export async function listChannelMessages(
 export async function createChatMessage(
   channelId: string,
   senderUserId: string,
-  body: string
+  body: string,
+  replyToMessageId?: string | null
 ) {
   const cleanBody =
     String(body || "").trim();
+
+  const cleanReplyId =
+    String(
+      replyToMessageId || ""
+    ).trim() || null;
 
   if (!cleanBody) {
     throw new Error(
@@ -179,26 +394,329 @@ export async function createChatMessage(
     );
   }
 
+  /*
+   * Eine Reply darf nur auf eine existierende,
+   * nicht gelöschte Nachricht aus DEMSELBEN
+   * Channel zeigen.
+   */
+  if (cleanReplyId) {
+    const replyCheck =
+      await db.query(
+        `
+          SELECT id
+          FROM staff_chat_messages
+          WHERE
+            id = $1
+            AND channel_id = $2
+            AND deleted_at IS NULL
+          LIMIT 1
+        `,
+        [
+          cleanReplyId,
+          channelId,
+        ]
+      );
+
+    if (!replyCheck.rows[0]) {
+      throw new Error(
+        "Antwort-Nachricht wurde nicht gefunden."
+      );
+    }
+  }
+
   const result =
     await db.query<AloChatMessage>(
       `
         INSERT INTO staff_chat_messages (
           channel_id,
           sender_user_id,
-          body
+          body,
+          reply_to_message_id
         )
-        VALUES ($1, $2, $3)
+        VALUES ($1, $2, $3, $4)
         RETURNING *
       `,
       [
         channelId,
         senderUserId,
         cleanBody,
+        cleanReplyId,
       ]
     );
 
   return result.rows[0];
 }
+
+
+export async function setChatMessagePinned(
+  channelId: string,
+  messageId: string,
+  userId: string,
+  pinned: boolean
+) {
+  const result =
+    await db.query<AloChatMessage>(
+      `
+        UPDATE staff_chat_messages
+        SET
+          is_pinned = $4,
+          pinned_at =
+            CASE
+              WHEN $4 = TRUE
+                THEN NOW()
+              ELSE NULL
+            END,
+          pinned_by_user_id =
+            CASE
+              WHEN $4 = TRUE
+                THEN $3
+              ELSE NULL
+            END,
+          updated_at = NOW()
+        WHERE
+          id = $1
+          AND channel_id = $2
+          AND deleted_at IS NULL
+        RETURNING *
+      `,
+      [
+        messageId,
+        channelId,
+        userId,
+        pinned,
+      ]
+    );
+
+  return result.rows[0] || null;
+}
+
+
+/*
+ * ============================================================
+ * ALO MESSENGER V4 — IMAGE ATTACHMENTS
+ * ============================================================
+ */
+
+export async function createChatImageMessage(
+  channelId: string,
+  senderUserId: string,
+  input: {
+    data: Buffer;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    caption?: string | null;
+    replyToMessageId?: string | null;
+  }
+) {
+  const caption =
+    String(input.caption || "").trim();
+
+  if (!input.data?.length) {
+    throw new Error(
+      "Bilddatei fehlt."
+    );
+  }
+
+  const result =
+    await db.query<any>(
+      `
+        INSERT INTO staff_chat_messages (
+          channel_id,
+          sender_user_id,
+          body,
+          attachment_type,
+          attachment_url,
+          attachment_name,
+          attachment_mime_type,
+          attachment_size_bytes,
+          attachment_data,
+          reply_to_message_id
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'IMAGE',
+          NULL,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8
+        )
+        RETURNING
+          id,
+          channel_id,
+          sender_user_id,
+          body,
+          attachment_type,
+          attachment_url,
+          attachment_name,
+          attachment_mime_type,
+          attachment_size_bytes,
+          reply_to_message_id,
+          is_pinned,
+          pinned_at,
+          pinned_by_user_id,
+          created_at,
+          updated_at
+      `,
+      [
+        channelId,
+        senderUserId,
+        caption,
+        input.fileName,
+        input.mimeType,
+        input.sizeBytes,
+        input.data,
+        input.replyToMessageId || null,
+      ]
+    );
+
+  const message =
+    result.rows[0];
+
+  if (message?.id) {
+    message.attachment_url =
+      `/api/staff-collaboration/channels/${encodeURIComponent(
+        channelId
+      )}/messages/${encodeURIComponent(
+        String(message.id)
+      )}/attachment`;
+  }
+
+  return message;
+}
+
+
+
+export async function createChatAudioMessage(
+  channelId: string,
+  senderUserId: string,
+  input: {
+    data: Buffer;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    caption?: string | null;
+    replyToMessageId?: string | null;
+  }
+) {
+  const caption =
+    String(input.caption || "").trim();
+
+  if (!input.data?.length) {
+    throw new Error(
+      "Sprachmemo fehlt."
+    );
+  }
+
+  const result =
+    await db.query<any>(
+      `
+        INSERT INTO staff_chat_messages (
+          channel_id,
+          sender_user_id,
+          body,
+          attachment_type,
+          attachment_url,
+          attachment_name,
+          attachment_mime_type,
+          attachment_size_bytes,
+          attachment_data,
+          reply_to_message_id
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          'AUDIO',
+          NULL,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8
+        )
+        RETURNING
+          id,
+          channel_id,
+          sender_user_id,
+          body,
+          attachment_type,
+          attachment_url,
+          attachment_name,
+          attachment_mime_type,
+          attachment_size_bytes,
+          reply_to_message_id,
+          is_pinned,
+          pinned_at,
+          pinned_by_user_id,
+          created_at,
+          updated_at
+      `,
+      [
+        channelId,
+        senderUserId,
+        caption,
+        input.fileName,
+        input.mimeType,
+        input.sizeBytes,
+        input.data,
+        input.replyToMessageId || null,
+      ]
+    );
+
+  const message =
+    result.rows[0];
+
+  if (message?.id) {
+    message.attachment_url =
+      `/api/staff-collaboration/channels/${encodeURIComponent(
+        channelId
+      )}/messages/${encodeURIComponent(
+        String(message.id)
+      )}/attachment`;
+  }
+
+  return message;
+}
+
+
+export async function getChatMessageAttachment(
+  channelId: string,
+  messageId: string
+) {
+  const result =
+    await db.query<any>(
+      `
+        SELECT
+          id,
+          channel_id,
+          attachment_type,
+          attachment_name,
+          attachment_mime_type,
+          attachment_size_bytes,
+          attachment_data
+        FROM staff_chat_messages
+        WHERE
+          id = $1
+          AND channel_id = $2
+          AND deleted_at IS NULL
+          AND attachment_type IN ('IMAGE', 'AUDIO')
+          AND attachment_data IS NOT NULL
+        LIMIT 1
+      `,
+      [
+        messageId,
+        channelId,
+      ]
+    );
+
+  return result.rows[0] || null;
+}
+
 
 export async function getOrCreateDirectChannel(
   firstUserId: string,
@@ -312,7 +830,34 @@ export async function listDirectChannels(
             AS latest_message,
 
           latest.created_at
-            AS latest_message_at
+            AS latest_message_at,
+
+          (
+            SELECT
+              COUNT(*)::INTEGER
+
+            FROM staff_chat_messages unread_message
+
+            LEFT JOIN staff_chat_channel_reads read_state
+              ON read_state.channel_id =
+                channel.id
+              AND read_state.staff_user_id =
+                $1
+
+            WHERE
+              unread_message.channel_id =
+                channel.id
+              AND unread_message.deleted_at
+                IS NULL
+              AND unread_message.sender_user_id
+                <> $1
+              AND (
+                read_state.last_read_message_id
+                  IS NULL
+                OR unread_message.id >
+                  read_state.last_read_message_id
+              )
+          ) AS unread_count
 
         FROM staff_chat_members mine
 

@@ -1981,6 +1981,132 @@ console.log(
     );
   `);
 
+  /*
+   * ALO Messenger V5 — READ STATE
+   *
+   * Persistenter Lesestand pro Mitarbeiter und Channel.
+   */
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_chat_channel_reads (
+      channel_id BIGINT NOT NULL
+        REFERENCES staff_chat_channels(id)
+        ON DELETE CASCADE,
+      staff_user_id BIGINT NOT NULL
+        REFERENCES staff_users(id)
+        ON DELETE CASCADE,
+      last_read_message_id BIGINT
+        REFERENCES staff_chat_messages(id)
+        ON DELETE SET NULL,
+      last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (
+        channel_id,
+        staff_user_id
+      )
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_chat_channel_reads_user_idx
+    ON staff_chat_channel_reads (
+      staff_user_id,
+      channel_id
+    );
+  `);
+
+
+  /*
+   * ALO Messenger V3
+   *
+   * additive Migration:
+   * - Replies referenzieren eine bestehende Nachricht
+   * - Pinning bleibt serverseitig persistent
+   *
+   * IF NOT EXISTS macht die Migration idempotent.
+   */
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        reply_to_message_id BIGINT
+        REFERENCES staff_chat_messages(id)
+        ON DELETE SET NULL;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        pinned_at TIMESTAMPTZ;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        pinned_by_user_id BIGINT
+        REFERENCES staff_users(id)
+        ON DELETE SET NULL;
+  `);
+
+
+  /*
+   * ALO Messenger V4
+   *
+   * Chat attachments:
+   * - IMAGE ist aktuell der erste produktive Attachment-Typ.
+   * - URL zeigt auf die serverseitig gespeicherte Datei.
+   * - Metadaten bleiben direkt an der Nachricht.
+   *
+   * Additiv + idempotent, damit bestehende Chats unverändert bleiben.
+   */
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        attachment_type TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        attachment_url TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        attachment_name TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        attachment_mime_type TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        attachment_size_bytes BIGINT;
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_chat_messages
+      ADD COLUMN IF NOT EXISTS
+        attachment_data BYTEA;
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS
+      staff_chat_messages_reply_idx
+    ON staff_chat_messages (
+      reply_to_message_id
+    );
+  `);
+
   await db.query(`
     CREATE TABLE IF NOT EXISTS staff_tasks (
       id BIGSERIAL PRIMARY KEY,
