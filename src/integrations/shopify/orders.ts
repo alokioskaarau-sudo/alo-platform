@@ -92,6 +92,9 @@ const ORDER_FIELDS = `
   }
 
   fulfillmentOrders(first: 20) {
+    pageInfo {
+      hasNextPage
+    }
     edges {
       node {
         id
