@@ -66,6 +66,8 @@ export async function isAloDriverAvailable(
           AND driver.approved = TRUE
           AND driver.availability_status =
             'ONLINE'
+          AND driver.last_seen_at >=
+            NOW() - INTERVAL '60 seconds'
           AND (
             SELECT COUNT(*)::INTEGER
             FROM alo_now_deliveries delivery
@@ -256,4 +258,25 @@ export async function setAloDriverAvailability(
   } finally {
     client.release();
   }
+}
+
+// ALO_NOW_DRIVER_HEARTBEAT_V1
+export async function heartbeatAloDriver(
+  staffUserId: string
+): Promise<boolean> {
+  const result = await db.query(
+    `
+      UPDATE alo_driver_profiles
+      SET
+        last_seen_at = NOW()
+      WHERE
+        staff_user_id = $1
+        AND approved = TRUE
+        AND availability_status = 'ONLINE'
+      RETURNING staff_user_id
+    `,
+    [staffUserId]
+  );
+
+  return Boolean(result.rows[0]);
 }

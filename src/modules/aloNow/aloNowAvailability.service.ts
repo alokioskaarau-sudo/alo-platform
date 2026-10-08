@@ -48,6 +48,8 @@ export async function getAloNowAvailability(
           driver.approved = TRUE
           AND driver.availability_status =
             'ONLINE'
+          AND driver.last_seen_at >=
+            NOW() - INTERVAL '60 seconds'
           AND (
             driver.home_workspace = 'ONLINE'
             OR driver.home_workspace = $1

@@ -11,6 +11,7 @@ import {
   getAloDriverProfile,
   setAloDriverAvailability,
 } from "../database/aloNowDrivers.js";
+import { heartbeatAloDriver } from "../database/aloNowDrivers.js";
 import {
   listActiveAloNowDeliveriesForDriver,
   listAvailableAloNowDeliveriesForDriver,
@@ -100,6 +101,33 @@ aloNowRouter.get(
       return res.status(500).json({
         ok: false,
         error: "ALO_NOW_AVAILABILITY_FAILED",
+      });
+    }
+  }
+);
+
+// ALO_NOW_DRIVER_HEARTBEAT_ROUTE_V1
+aloNowRouter.post(
+  "/driver/heartbeat",
+  requireStaffAuth,
+  async (_req, res) => {
+    try {
+      const staffUser = getStaffUser(res);
+      const accepted = await heartbeatAloDriver(staffUser.id);
+
+      if (!accepted) {
+        return res.status(409).json({
+          ok: false,
+          error: "DRIVER_NOT_ONLINE_OR_NOT_APPROVED",
+        });
+      }
+
+      return res.json({ ok: true });
+    } catch (error) {
+      console.error("ALO NOW DRIVER HEARTBEAT ERROR", error);
+      return res.status(500).json({
+        ok: false,
+        error: "ALO_DRIVER_HEARTBEAT_FAILED",
       });
     }
   }
