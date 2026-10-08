@@ -39,7 +39,7 @@ import {
   ensureAloNowDelivery,
 } from "../../database/aloNowDeliveries.js";
 import {
-  getOrderFulfillmentType,
+  getStaffOrderChannel,
 } from "../orders/orderFulfillmentType.js";
 
 import {
@@ -120,10 +120,17 @@ export async function processPaidShopifyOrder(
   // VERSANDART
   // ----------------------------------------------------------
 
-  const fulfillmentType =
-    getOrderFulfillmentType(
-      order
-    );
+  // ALO_PAID_ORDER_CHANNEL_GUARD_V1
+  const safeChannel = getStaffOrderChannel(order);
+  if (safeChannel === "UNKNOWN") {
+    console.error("ALO_ORDER_CHANNEL_REVIEW_REQUIRED", {
+      orderId: order.id,
+      orderName: order.name,
+    });
+    throw new Error("ALO_ORDER_CHANNEL_REVIEW_REQUIRED");
+  }
+
+  const fulfillmentType = safeChannel;
 
   const pickup =
     fulfillmentType === "PICKUP";
@@ -195,12 +202,6 @@ export async function processPaidShopifyOrder(
       );
     }
 
-    const invoicePrintJob =
-      await createInvoicePrintJob(
-        invoice.id,
-        "HP7C4D8F71B318(HP Color Laser MFP 178 179)"
-      );
-
     const workflow =
       await ensureOrderFulfillmentWorkflow(
         order.id
@@ -218,6 +219,7 @@ export async function processPaidShopifyOrder(
     try {
       const pushResult =
         await sendNewOrderStaffPush({
+          channel: "ALO_NOW", // ALO_PIPELINE_CHANNEL_PUSH_V1
           orderId: order.id,
           orderName: order.name,
           totalAmount:
@@ -315,14 +317,9 @@ export async function processPaidShopifyOrder(
             null,
         },
         invoice: {
-          created:
-            invoicePrintJob.created,
-          id:
-            invoicePrintJob.job?.id ??
-            null,
-          status:
-            invoicePrintJob.job?.status ??
-            null,
+          created: false,
+          id: null,
+          status: null,
         },
       },
     };
@@ -377,6 +374,27 @@ export async function processPaidShopifyOrder(
         storedLabel.id
       );
 
+
+    // ALO_PICKUP_PUSH_V1
+    try {
+      const pushResult = await sendNewOrderStaffPush({
+        channel: "PICKUP",
+        orderId: order.id,
+        orderName: order.name,
+        totalAmount:
+          order?.currentTotalPriceSet?.shopMoney?.amount ??
+          order?.totalPriceSet?.shopMoney?.amount ??
+          null,
+        currency:
+          order?.currentTotalPriceSet?.shopMoney?.currencyCode ??
+          order?.totalPriceSet?.shopMoney?.currencyCode ??
+          null,
+      });
+
+      console.log("PICKUP Staff Push:", pushResult);
+    } catch (error) {
+      console.error("PICKUP Staff Push fehlgeschlagen:", error);
+    }
 
     console.log(
       `Pickup Pipeline bereit: ${order.name}`,
@@ -596,6 +614,7 @@ export async function processPaidShopifyOrder(
   try {
     const pushResult =
       await sendNewOrderStaffPush({
+        channel: "SHIPPING",
         orderId: order.id,
         orderName: order.name,
         totalAmount:

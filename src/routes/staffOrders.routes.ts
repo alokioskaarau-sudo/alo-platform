@@ -1,3 +1,4 @@
+import { getStaffOrderChannel } from "../modules/orders/orderFulfillmentType.js";
 ﻿import { Router } from "express";
 import { PDFDocument } from "pdf-lib";
 import { db } from "../database/db.js";
@@ -219,6 +220,8 @@ router.get(
              */
             return {
               ...(dashboard ?? {}),
+
+              order_channel: getStaffOrderChannel(shopify),
 
               shopify_order_id:
                 orderId,
