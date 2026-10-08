@@ -2993,8 +2993,13 @@ router.patch(
               null
             );
 
+      // ALO_DRIVER_TX_V1
+      let updatedUser: any;
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
       const result =
-        await db.query(
+        await client.query(
           `
             UPDATE staff_users
             SET
@@ -3081,7 +3086,7 @@ router.patch(
           ]
         );
 
-      await db.query(
+      await client.query(
         `
           INSERT INTO staff_activity (
             staff_user_id,
@@ -3102,15 +3107,71 @@ router.patch(
         ]
       );
 
+
+      if (active && jobKeys.includes("driver")) {
+        await client.query(
+          `INSERT INTO alo_driver_profiles
+           (staff_user_id,approved,home_workspace)
+           VALUES ($1,TRUE,$2)
+           ON CONFLICT (staff_user_id)
+           DO UPDATE SET approved=TRUE,
+             home_workspace=EXCLUDED.home_workspace,
+             updated_at=NOW()`,
+          [targetId,defaultWorkspace]
+        );
+      } else {
+        const deliveries=await client.query(
+          `SELECT 1 FROM alo_now_deliveries
+           WHERE assigned_driver_user_id=$1
+           AND delivery_status IN
+           ('DRIVER_ASSIGNED','READY_FOR_PICKUP',
+            'PICKED_UP','ON_THE_WAY') LIMIT 1`,
+          [targetId]
+        );
+        if(deliveries.rowCount) {
+          const profile=await client.query(
+            `SELECT approved FROM alo_driver_profiles
+             WHERE staff_user_id=$1`,[targetId]
+          );
+          if(profile.rows[0]?.approved) {
+            throw new Error("DRIVER_HAS_ACTIVE_DELIVERY");
+          }
+        }
+        await client.query(
+          `UPDATE alo_driver_profiles SET approved=FALSE,
+           availability_status='OFFLINE',
+           online_since=NULL,updated_at=NOW()
+           WHERE staff_user_id=$1`,[targetId]
+        );
+      }
+      updatedUser = result.rows[0];
+      await client.query("COMMIT");
+      } catch(e) {
+        await client.query("ROLLBACK");
+        throw e;
+      } finally {
+        client.release();
+      }
+
       return res.json({
         ok: true,
         user:
           publicUser(
-            result.rows[0]
+            updatedUser
           ),
       });
 
     } catch (error) {
+
+      if (
+        error instanceof Error &&
+        error.message === "DRIVER_HAS_ACTIVE_DELIVERY"
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error: "Fahrer hat noch aktive Lieferungen.",
+        });
+      }
 
       console.error(
         "STAFF ADMIN UPDATE ERROR",
