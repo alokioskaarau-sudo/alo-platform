@@ -1,3 +1,4 @@
+import { db } from "../../database/db.js";
 import {
   getShopifyOrderById,
 } from "../../integrations/shopify/orders.js";
@@ -53,6 +54,19 @@ import {
 export async function processPaidShopifyOrder(
   orderId: string
 ) {
+  // ALO_ORDER_PIPELINE_LOCK_V1
+  // Exklusive Verarbeitung pro Shopify-Bestellung.
+  const lockClient = await db.connect();
+  let lockAcquired = false;
+  let discardConnection = false;
+
+  try {
+    await lockClient.query(
+      "SELECT pg_advisory_lock(hashtext($1::text), hashtext($2::text))",
+      ["alo-paid-order", String(orderId)]
+    );
+    lockAcquired = true;
+
 
   console.log(
     "Paid Order Pipeline gestartet:",
@@ -798,4 +812,23 @@ export async function processPaidShopifyOrder(
       },
     },
   };
+
+  } finally {
+    try {
+      if (lockAcquired) {
+        const unlockResult = await lockClient.query(
+          "SELECT pg_advisory_unlock(hashtext($1::text), hashtext($2::text)) AS unlocked",
+          ["alo-paid-order", String(orderId)]
+        );
+        if (unlockResult.rows[0]?.unlocked !== true) {
+          throw new Error("ALO_ORDER_PIPELINE_UNLOCK_FAILED");
+        }
+      }
+    } catch (unlockError) {
+      discardConnection = true;
+      throw unlockError;
+    } finally {
+      lockClient.release(discardConnection);
+    }
+  }
 }
