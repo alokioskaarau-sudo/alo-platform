@@ -61,11 +61,17 @@ export async function processPaidShopifyOrder(
   let discardConnection = false;
 
   try {
-    await lockClient.query(
-      "SELECT pg_advisory_lock(hashtext($1::text), hashtext($2::text))",
-      ["alo-paid-order", String(orderId)]
-    );
-    lockAcquired = true;
+    try {
+      await lockClient.query(
+        "SELECT pg_advisory_lock(hashtext($1::text), hashtext($2::text))",
+        ["alo-paid-order", String(orderId)]
+      );
+      lockAcquired = true;
+    } catch (lockError) {
+      // Unklarer Sperrstatus: Verbindung niemals wiederverwenden.
+      discardConnection = true;
+      throw lockError;
+    }
 
 
   console.log(

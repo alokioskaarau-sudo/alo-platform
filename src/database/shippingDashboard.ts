@@ -303,7 +303,8 @@ export async function createPrintJob(
           AND document_type = 'SHIPPING_LABEL'
           AND status IN (
             'PENDING',
-            'PRINTING'
+            'PRINTING',
+            'PRINTED'
           )
         LIMIT 1
       `,

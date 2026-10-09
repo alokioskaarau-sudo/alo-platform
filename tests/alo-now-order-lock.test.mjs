@@ -149,3 +149,70 @@ test("Unlock-Fehler verwirft Verbindung", async () => {
   await assert.rejects(h.run("100", async () => {}), /UNLOCK_CONNECTION_ERROR/);
   assert.ok(h.events.includes("release:true"));
 });
+
+
+// ALO_ORDER_LOCK_ACQUIRE_FAILURE_TEST_V1
+test("Fehler beim Sperrerwerb verwirft PostgreSQL-Verbindung", async () => {
+  const fs = await import("node:fs");
+  const source = fs.readFileSync(
+    "src/modules/shipping/paidOrderPipeline.service.ts",
+    "utf8"
+  );
+
+  const start = source.indexOf(
+    "    try {\n      await lockClient.query(\n"
+  );
+
+  const end = source.indexOf(
+    "\n\n  console.log(",
+    start
+  );
+
+  assert.ok(start >= 0, "Sperrerwerb nicht gefunden");
+  assert.ok(end > start, "Ende des Sperrerwerbs nicht gefunden");
+
+  const lockCode = source.slice(start, end);
+
+  assert.match(lockCode, /discardConnection = true/);
+  assert.match(lockCode, /throw lockError/);
+
+  let discarded = null;
+  let pipelineStarted = false;
+
+  const lockClient = {
+    async query() {
+      throw new Error("SIMULATED_PG_LOCK_FAILURE");
+    },
+    release(discard) {
+      discarded = discard;
+    }
+  };
+
+  const vm = await import("node:vm");
+
+  const script = new vm.Script(
+    "(async () => {\n" +
+    "const orderId = 'TEST-ORDER-42';\n" +
+    "let lockAcquired = false;\n" +
+    "let discardConnection = false;\n" +
+    "try {\n" +
+    lockCode + "\n" +
+    "pipelineStarted = true;\n" +
+    "} finally {\n" +
+    "lockClient.release(discardConnection);\n" +
+    "}\n" +
+    "})()"
+  );
+
+  await assert.rejects(
+    script.runInNewContext({
+      lockClient,
+      pipelineStarted,
+      String,
+      Error
+    }),
+    /SIMULATED_PG_LOCK_FAILURE/
+  );
+
+  assert.equal(discarded, true);
+});

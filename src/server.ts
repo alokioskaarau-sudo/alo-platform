@@ -1192,6 +1192,36 @@ app.post(
 //
 // ============================================================
 
+// ALO_WEBHOOK_RECOVERY_SCHEDULER_V1
+let webhookRecoveryRunning = false;
+
+async function runWebhookRecoverySafely(): Promise<void> {
+  if (webhookRecoveryRunning) {
+    console.log("Webhook Recovery: vorheriger Durchlauf läuft noch.");
+    return;
+  }
+
+  webhookRecoveryRunning = true;
+
+  try {
+    await runWebhookRecovery();
+  } catch (error) {
+    console.error("Webhook Recovery Scheduler fehlgeschlagen:", error);
+  } finally {
+    webhookRecoveryRunning = false;
+  }
+}
+
+function startWebhookRecoveryScheduler(): void {
+  const interval = setInterval(() => {
+    void runWebhookRecoverySafely();
+  }, 5 * 60 * 1000);
+
+  interval.unref();
+
+  console.log("Webhook Recovery Scheduler gestartet: alle 5 Minuten.");
+}
+
 async function runWebhookRecovery() {
   try {
     const recoveryModule =
@@ -1345,16 +1375,21 @@ console.log(
     // WEBHOOK RECOVERY
     // --------------------------------------------------------
 
-    await runWebhookRecovery();
+    // Der erste Recovery-Durchlauf startet nach HTTP-Listen.
 
 
     // --------------------------------------------------------
     // START EXPRESS
     // --------------------------------------------------------
 
+    startWebhookRecoveryScheduler();
+
     app.listen(
       env.port,
       () => {
+        // Recovery läuft unabhängig vom HTTP-Serverstart.
+        void runWebhookRecoverySafely();
+
         console.log(
           `ALO Platform läuft auf Port ${env.port}`
         );

@@ -37,6 +37,17 @@ function readProductAgeRequirement(
 export function getAloNowOrderAgeRequirement(
   order: any
 ): AloNowOrderAgeRequirementResult {
+  // ALO_NOW_AGE_PAGINATION_GUARD_V1
+  // Unvollstaendige Artikellisten niemals freigeben.
+  if (order?.lineItems?.pageInfo?.hasNextPage !== false) {
+    return {
+      ageRequirement: "NONE",
+      requiresAgeCheck: false,
+      classified: false,
+      unclassifiedLineItems: [],
+    };
+  }
+
   const lineItems =
     order
       ?.lineItems

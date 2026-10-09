@@ -116,6 +116,9 @@ const ORDER_FIELDS = `
   }
 
   lineItems(first: 50) {
+    pageInfo {
+      hasNextPage
+    }
     edges {
       node {
         id
