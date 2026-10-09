@@ -1,6 +1,7 @@
 import {
   claimStaffPushEvent,
   getActiveStaffPushTokens,
+  getEligibleAloNowPushTokens,
   markStaffPushEventFailed,
   markStaffPushEventSent,
 } from "../../database/staffPush.js";
@@ -57,8 +58,11 @@ export async function sendNewOrderStaffPush(
   }
 
   try {
+    // ALO_NOW_ELIGIBLE_PUSH_V1
     const tokens =
-      await getActiveStaffPushTokens();
+      input.channel === "ALO_NOW"
+        ? await getEligibleAloNowPushTokens(input.orderId)
+        : await getActiveStaffPushTokens();
 
     if (tokens.length === 0) {
       await markStaffPushEventFailed(
