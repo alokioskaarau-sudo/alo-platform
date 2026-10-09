@@ -86,6 +86,10 @@ export async function sendNewOrderStaffPush(
       tokens.map((token: any) => ({
         to: token.expo_push_token,
         sound: "default",
+        // ALO_NOW_PUSH_CATEGORY_V1
+        ...(channel === "ALO_NOW"
+          ? { categoryId: "ALO_NOW_DELIVERY" }
+          : {}),
         title,
         body:
           `${input.orderName}` +
