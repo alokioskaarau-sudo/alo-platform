@@ -235,7 +235,7 @@ export async function getEligibleAloNowPushTokens(
         AND driver.approved = TRUE
         AND driver.availability_status = 'ONLINE'
         AND driver.last_seen_at >=
-          NOW() - INTERVAL '60 seconds'
+          NOW() - INTERVAL '30 minutes'
         AND delivery.delivery_status =
           'WAITING_FOR_DRIVER'
         AND delivery.assigned_driver_user_id IS NULL
