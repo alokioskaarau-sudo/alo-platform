@@ -1,3 +1,4 @@
+import aloMhdRouter from "./aloMhd.routes.js";
 import {
   getShopifyOnlineInventory,
   setShopifyOnlineInventory,
@@ -3252,6 +3253,30 @@ router.put(
       await ensureSchema();
 
       const staffUser = getStaffUser(res);
+
+      // ALO_INVENTORY_PRIVILEGED_GUARD_V1
+      // Inventory counts at this endpoint immediately change live stock.
+      // Counting-only staff must use a separate submission/approval route.
+      const inventoryJobs = [
+        staffUser.jobKey,
+        ...(Array.isArray(staffUser.jobKeys) ? staffUser.jobKeys : []),
+      ];
+      const isInventoryManager =
+        staffUser.role === "ADMIN" ||
+        inventoryJobs.some((job) =>
+          job === "admin" ||
+          job === "management" ||
+          job === "store_manager"
+        );
+      if (!isInventoryManager) {
+        res.status(403).json({
+          ok: false,
+          code: "INVENTORY_APPROVAL_REQUIRED",
+          error: "Bestandskorrekturen benötigen eine Freigabe durch die Leitung.",
+        });
+        return;
+      }
+
 
       const productId = String(req.params.id);
 
@@ -7161,5 +7186,7 @@ router.post(
     }
   }
 );
+
+router.use(aloMhdRouter);
 
 export default router;
