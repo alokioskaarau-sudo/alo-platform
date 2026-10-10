@@ -25,8 +25,10 @@ function ensureSchema() {
       weekday INTEGER CHECK (weekday BETWEEN 0 AND 6),
       created_by_user_id BIGINT NOT NULL REFERENCES staff_users(id),
       active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      active_since DATE NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Zurich')::date,
       CHECK ((frequency = 'DAILY' AND weekday IS NULL) OR (frequency = 'WEEKLY' AND weekday IS NOT NULL))
     )`);
+    await db.query(`ALTER TABLE staff_task_routines ADD COLUMN IF NOT EXISTS active_since DATE NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Zurich')::date`);
     await db.query(`CREATE TABLE IF NOT EXISTS staff_task_routine_occurrences (
       routine_id BIGINT NOT NULL REFERENCES staff_task_routines(id) ON DELETE CASCADE,
       local_date DATE NOT NULL, task_id BIGINT NOT NULL UNIQUE REFERENCES staff_tasks(id) ON DELETE CASCADE,
@@ -36,27 +38,41 @@ function ensureSchema() {
   return schemaPromise;
 }
 async function materialize(workspace: string) {
-  const date = localDay();
-  const weekday = localWeekday();
+  // Generate missed days on demand, capped at 30 days. The active_since
+  // boundary prevents retroactive tasks for a paused routine.
   const routines = await db.query(`SELECT * FROM staff_task_routines
-    WHERE workspace=$1 AND active=TRUE AND (frequency='DAILY' OR weekday=$2)`, [workspace, weekday]);
+    WHERE workspace=$1 AND active=TRUE`, [workspace]);
+  const today = localDay();
+  const todayUtc = Date.parse(`${today}T00:00:00Z`);
   for (const routine of routines.rows) {
-    // Serializes concurrent requests for each routine/day, including multiple server instances.
-    const client = await db.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)', [Number(routine.id) % 2147483647, Number(date.replaceAll('-', ''))]);
-      const exists = await client.query(`SELECT 1 FROM staff_task_routine_occurrences WHERE routine_id=$1 AND local_date=$2::date`, [routine.id, date]);
-      if (!exists.rowCount) {
-        const task = await client.query(`INSERT INTO staff_tasks
-          (title, description, created_by_user_id, workspace, priority, due_at)
-          VALUES ($1,$2,$3,$4,$5,($6::date + INTERVAL '1 day') AT TIME ZONE 'Europe/Zurich') RETURNING id`,
-          [routine.title, routine.description, routine.created_by_user_id, routine.workspace, routine.priority, date]);
-        await client.query(`INSERT INTO staff_task_routine_occurrences (routine_id, local_date, task_id) VALUES ($1,$2,$3)`, [routine.id, date, task.rows[0].id]);
-      }
-      await client.query('COMMIT');
-    } catch (e) { await client.query('ROLLBACK'); throw e; }
-    finally { client.release(); }
+    const created = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Zurich', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(routine.created_at));
+    const activeSince = String(routine.active_since).slice(0,10).match(/^\d{4}-\d{2}-\d{2}$/)
+      ? String(routine.active_since).slice(0,10)
+      : new Date(routine.active_since).toISOString().slice(0,10);
+    const first = Math.max(todayUtc - 29*86400000, Date.parse(`${created}T00:00:00Z`), Date.parse(`${activeSince}T00:00:00Z`));
+    for (let time = first; time <= todayUtc; time += 86400000) {
+      const date = new Date(time).toISOString().slice(0,10);
+      const weekday = new Date(time).getUTCDay();
+      if (routine.frequency === 'WEEKLY' && Number(routine.weekday) !== weekday) continue;
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1::integer, $2::integer)',
+          [Number(routine.id) % 2147483647, Number(date.replaceAll('-', ''))]);
+        const exists = await client.query(`SELECT 1 FROM staff_task_routine_occurrences
+          WHERE routine_id=$1 AND local_date=$2::date`, [routine.id, date]);
+        if (!exists.rowCount) {
+          const task = await client.query(`INSERT INTO staff_tasks
+            (title, description, created_by_user_id, workspace, priority, due_at)
+            VALUES ($1,$2,$3,$4,$5,($6::date + INTERVAL '1 day') AT TIME ZONE 'Europe/Zurich') RETURNING id`,
+            [routine.title, routine.description, routine.created_by_user_id, routine.workspace, routine.priority, date]);
+          await client.query(`INSERT INTO staff_task_routine_occurrences (routine_id, local_date, task_id)
+            VALUES ($1,$2,$3)`, [routine.id, date, task.rows[0].id]);
+        }
+        await client.query('COMMIT');
+      } catch (e) { await client.query('ROLLBACK'); throw e; }
+      finally { client.release(); }
+    }
   }
 }
 router.get('/', requireStaffCapability('tasks.view'), async (req,res) => {
@@ -103,7 +119,9 @@ router.patch('/:id/active', requireStaffCapability('tasks.manage'), async (req,r
     const old=await db.query('SELECT workspace FROM staff_task_routines WHERE id=$1',[id]);
     if (!old.rows.length) return res.status(404).json({ok:false,error:'Routine nicht gefunden'});
     if (!allowed(user,old.rows[0].workspace)) return res.status(403).json({ok:false,error:'Kein Standortzugriff'});
-    const result=await db.query('UPDATE staff_task_routines SET active=$2 WHERE id=$1 RETURNING *',[id,req.body.active]);
+    const result=await db.query(`UPDATE staff_task_routines SET active=$2,
+      active_since=CASE WHEN active=FALSE AND $2=TRUE THEN (NOW() AT TIME ZONE 'Europe/Zurich')::date ELSE active_since END
+      WHERE id=$1 RETURNING *`,[id,req.body.active]);
     return res.json({ok:true,routine:result.rows[0]});
   } catch(e) { console.error('routine active',e); return res.status(500).json({ok:false,error:'Routine konnte nicht aktualisiert werden'}); }
 });

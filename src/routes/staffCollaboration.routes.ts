@@ -1580,7 +1580,8 @@ router.patch(
             SELECT
               id,
               assigned_to_user_id,
-              created_by_user_id
+              created_by_user_id,
+              workspace
             FROM staff_tasks
             WHERE
               id = $1
@@ -1604,6 +1605,17 @@ router.patch(
 
       const taskRow =
         access.rows[0];
+
+      // Standortzugriff gilt auch beim Statuswechsel, nicht nur beim Anzeigen.
+      const taskWorkspace = taskRow.workspace == null ? null :
+        String(taskRow.workspace).trim().toUpperCase();
+      if (taskWorkspace && !["AARAU","OLTEN","ONLINE"].includes(taskWorkspace)) {
+        return res.status(403).json({ok:false,error:"Ungültiger Aufgabenstandort."});
+      }
+      if (taskWorkspace && user.role !== "ADMIN" && user.role !== "MANAGER" &&
+          !userWorkspaces(user).has(taskWorkspace)) {
+        return res.status(403).json({ok:false,error:"Kein Zugriff auf diesen Standort."});
+      }
 
       const privileged =
         user.role === "ADMIN" ||
