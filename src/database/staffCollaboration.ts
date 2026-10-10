@@ -1,4 +1,4 @@
-﻿import { db } from "./db.js";
+import { db } from "./db.js";
 
 export type AloChannelType =
   | "GLOBAL"
@@ -1071,7 +1071,8 @@ export async function createTask(input: {
 
 export async function updateTaskStatus(
   taskId: string,
-  status: string
+  status: string,
+  completedByUserId: string
 ) {
   const allowed =
     new Set([
@@ -1101,11 +1102,16 @@ export async function updateTaskStatus(
                 )
               ELSE NULL
             END,
+          completed_by_user_id = CASE
+            WHEN $2 = 'DONE' THEN CASE
+              WHEN status = 'DONE' THEN completed_by_user_id
+              ELSE $3::bigint END
+            ELSE NULL END,
           updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND archived_at IS NULL
         RETURNING *
       `,
-      [taskId, status]
+      [taskId, status, completedByUserId]
     );
 
   return result.rows[0] || null;

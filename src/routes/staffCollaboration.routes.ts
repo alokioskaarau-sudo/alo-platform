@@ -1642,7 +1642,8 @@ router.patch(
       const task =
         await updateTaskStatus(
           taskId,
-          status
+          status,
+          user.id
         );
 
       return res.json({
