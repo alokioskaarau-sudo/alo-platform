@@ -733,6 +733,16 @@ router.patch(
               req.body.storeId
             );
 
+      // ALO_NOTES_TARGET_STORE_GUARD_V1
+      // Auch der neue Zielstandort muss freigegeben sein.
+      if (!canStore(staff, String(storeId))) {
+        res.status(403).json({
+          ok: false,
+          error: "Zielstandort nicht freigegeben.",
+        });
+        return;
+      }
+
       const title =
         req.body?.title ===
         undefined
