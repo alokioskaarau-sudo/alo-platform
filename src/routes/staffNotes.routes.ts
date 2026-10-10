@@ -327,6 +327,43 @@ const returningFields = `
    LIST
 ========================================================= */
 
+// ALO_SHIFT_BRIEFING_V3
+// Schichtuebergabe: offene Eintraege des freigegebenen Standorts.
+router.get('/shift-briefing', async (req, res) => {
+  try {
+    const staff = getStaffUser(res);
+    const store = cleanText(req.query.store).toLowerCase();
+    if (!validStore(store) || store === 'all') {
+      res.status(400).json({ ok: false, error: 'Standort aarau, olten oder online erforderlich.' });
+      return;
+    }
+    if (!canStore(staff, store)) {
+      res.status(403).json({ ok: false, error: 'Standort nicht freigegeben.' });
+      return;
+    }
+    await ensureReady();
+    const result = await db.query(`
+      SELECT ${returningFields}
+      FROM staff_notes
+      WHERE (store_id = $1 OR store_id = 'all') AND completed = FALSE
+      ORDER BY
+        CASE note_type WHEN 'handover' THEN 0 WHEN 'problem' THEN 1 WHEN 'task' THEN 2 ELSE 3 END,
+        CASE priority WHEN 'urgent' THEN 0 WHEN 'important' THEN 1 ELSE 2 END,
+        pinned DESC, due_at ASC NULLS LAST, created_at DESC
+      LIMIT 100
+    `, [store]);
+    const notes = result.rows;
+    res.json({ ok: true, storeId: store, generatedAt: new Date().toISOString(),
+      summary: { open: notes.length,
+        handovers: notes.filter(n => n.type === 'handover').length,
+        tasks: notes.filter(n => n.type === 'task').length,
+        urgent: notes.filter(n => n.priority === 'urgent').length }, notes });
+  } catch (error) {
+    console.error('SHIFT BRIEFING ERROR', error);
+    res.status(500).json({ ok: false, error: 'Schichtuebersicht nicht verfuegbar.' });
+  }
+});
+
 router.get(
   "/",
   async (req, res) => {
