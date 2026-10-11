@@ -37,6 +37,13 @@ function ensureSchema() {
   })().catch(e => { schemaPromise = null; throw e; });
   return schemaPromise;
 }
+export async function materializeStaffRoutines(
+  workspace: string
+) {
+  await ensureSchema();
+  await materialize(workspace);
+}
+
 async function materialize(workspace: string) {
   // Generate missed days on demand, capped at 30 days. The active_since
   // boundary prevents retroactive tasks for a paused routine.
@@ -50,8 +57,19 @@ async function materialize(workspace: string) {
       ? String(routine.active_since).slice(0,10)
       : new Date(routine.active_since).toISOString().slice(0,10);
     const first = Math.max(todayUtc - 29*86400000, Date.parse(`${created}T00:00:00Z`), Date.parse(`${activeSince}T00:00:00Z`));
+    const existing = await db.query(
+      `SELECT local_date::text AS local_date
+       FROM staff_task_routine_occurrences
+       WHERE routine_id = $1
+         AND local_date BETWEEN $2::date AND $3::date`,
+      [routine.id, new Date(first).toISOString().slice(0,10), today]
+    );
+    const existingDates = new Set(
+      existing.rows.map((row: { local_date: string }) => row.local_date)
+    );
     for (let time = first; time <= todayUtc; time += 86400000) {
       const date = new Date(time).toISOString().slice(0,10);
+      if (existingDates.has(date)) continue;
       const weekday = new Date(time).getUTCDay();
       if (routine.frequency === 'WEEKLY' && Number(routine.weekday) !== weekday) continue;
       const client = await db.connect();
