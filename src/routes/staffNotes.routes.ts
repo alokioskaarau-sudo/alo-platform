@@ -1,7 +1,26 @@
 import { Router } from "express";
 import { db } from "../database/db.js";
+import { requireStaffAuth, getStaffUser } from "../middleware/staffAuth.js";
+import { hasStaffCapability } from "../middleware/staffRbac.js";
 
 const router = Router();
+// ALO_NOTES_AUTH_V1
+router.use(requireStaffAuth);
+router.use((_req, res, next) => {
+  const staff = getStaffUser(res);
+  if (!hasStaffCapability(staff, "tasks.view")) {
+    res.status(403).json({ok:false,error:"Keine Berechtigung für Standortnotizen."});
+    return;
+  }
+  next();
+});
+const isLead = (staff: ReturnType<typeof getStaffUser>) =>
+  staff.role === "ADMIN" || staff.role === "MANAGER" ||
+  staff.jobKeys.some(j => j === "management" || j === "store_manager");
+const canStore = (staff: ReturnType<typeof getStaffUser>, store: string) =>
+  store === "all" ? isLead(staff) :
+  staff.allowedWorkspaces.includes(store.toUpperCase() as "AARAU" | "OLTEN" | "ONLINE");
+
 
 type NoteStore =
   | "aarau"
@@ -308,16 +327,57 @@ const returningFields = `
    LIST
 ========================================================= */
 
+// ALO_SHIFT_BRIEFING_V3
+// Schichtuebergabe: offene Eintraege des freigegebenen Standorts.
+router.get('/shift-briefing', async (req, res) => {
+  try {
+    const staff = getStaffUser(res);
+    const store = cleanText(req.query.store).toLowerCase();
+    if (!validStore(store) || store === 'all') {
+      res.status(400).json({ ok: false, error: 'Standort aarau, olten oder online erforderlich.' });
+      return;
+    }
+    if (!canStore(staff, store)) {
+      res.status(403).json({ ok: false, error: 'Standort nicht freigegeben.' });
+      return;
+    }
+    await ensureReady();
+    const result = await db.query(`
+      SELECT ${returningFields}
+      FROM staff_notes
+      WHERE (store_id = $1 OR store_id = 'all') AND completed = FALSE
+      ORDER BY
+        CASE note_type WHEN 'handover' THEN 0 WHEN 'problem' THEN 1 WHEN 'task' THEN 2 ELSE 3 END,
+        CASE priority WHEN 'urgent' THEN 0 WHEN 'important' THEN 1 ELSE 2 END,
+        pinned DESC, due_at ASC NULLS LAST, created_at DESC
+      LIMIT 100
+    `, [store]);
+    const notes = result.rows;
+    res.json({ ok: true, storeId: store, generatedAt: new Date().toISOString(),
+      summary: { open: notes.length,
+        handovers: notes.filter(n => n.type === 'handover').length,
+        tasks: notes.filter(n => n.type === 'task').length,
+        urgent: notes.filter(n => n.priority === 'urgent').length }, notes });
+  } catch (error) {
+    console.error('SHIFT BRIEFING ERROR', error);
+    res.status(500).json({ ok: false, error: 'Schichtuebersicht nicht verfuegbar.' });
+  }
+});
+
 router.get(
   "/",
   async (req, res) => {
     try {
       await ensureReady();
 
+      const staff = getStaffUser(res);
       const requestedStore =
         cleanText(
           req.query.store
         );
+      if (requestedStore && requestedStore !== "all" && !canStore(staff, requestedStore)) {
+        res.status(403).json({ok:false,error:"Standort nicht freigegeben."}); return;
+      }
 
       const requestedType =
         cleanText(
@@ -333,6 +393,9 @@ router.get(
 
       const where: string[] =
         [];
+      const permitted = staff.allowedWorkspaces.map(x => x.toLowerCase());
+      values.push(permitted);
+      where.push(`(store_id = ANY($${values.length}::text[]) OR store_id = 'all')`);
 
       if (
         requestedStore &&
@@ -473,10 +536,14 @@ router.post(
     try {
       await ensureReady();
 
+      const staff = getStaffUser(res);
       const storeId =
         cleanText(
           req.body?.storeId
         );
+      if (!canStore(staff, storeId)) {
+        res.status(403).json({ok:false,error:"Standort nicht freigegeben."}); return;
+      }
 
       const title =
         cleanText(
@@ -488,10 +555,7 @@ router.post(
           req.body?.body
         );
 
-      const createdBy =
-        cleanText(
-          req.body?.createdBy
-        );
+      const createdBy = staff.displayName || staff.username;
 
       const priority =
         cleanText(
@@ -520,6 +584,9 @@ router.post(
           dueAtRaw
         );
 
+      if (!canStore(staff, storeId)) {
+        res.status(403).json({ok:false,error:"Zielstandort nicht freigegeben."}); return;
+      }
       if (
         !validStore(storeId)
       ) {
@@ -690,6 +757,10 @@ router.patch(
 
       const existing =
         current.rows[0];
+      const staff = getStaffUser(res);
+      if (!canStore(staff, String(existing.store_id))) {
+        res.status(403).json({ok:false,error:"Standort nicht freigegeben."}); return;
+      }
 
       const storeId =
         req.body?.storeId ===
@@ -698,6 +769,16 @@ router.patch(
           : cleanText(
               req.body.storeId
             );
+
+      // ALO_NOTES_TARGET_STORE_GUARD_V1
+      // Auch der neue Zielstandort muss freigegeben sein.
+      if (!canStore(staff, String(storeId))) {
+        res.status(403).json({
+          ok: false,
+          error: "Zielstandort nicht freigegeben.",
+        });
+        return;
+      }
 
       const title =
         req.body?.title ===
@@ -745,10 +826,7 @@ router.patch(
           ? req.body.completed
           : existing.completed;
 
-      const completedBy =
-        cleanText(
-          req.body?.completedBy
-        );
+      const completedBy = staff.displayName || staff.username;
 
       let dueAt =
         existing.due_at;
@@ -936,6 +1014,14 @@ router.delete(
         return;
       }
 
+      const staff = getStaffUser(res);
+      if (!isLead(staff)) {
+        res.status(403).json({ok:false,error:"Löschen nur durch Leitung."}); return;
+      }
+      const existing = await db.query("SELECT store_id FROM staff_notes WHERE id = $1", [id]);
+      if (existing.rows.length && !canStore(staff, String(existing.rows[0].store_id))) {
+        res.status(403).json({ok:false,error:"Standort nicht freigegeben."}); return;
+      }
       const result =
         await db.query(
           `

@@ -1,4 +1,4 @@
-﻿import { db } from "./db.js";
+import { db } from "./db.js";
 
 export async function initializeDatabase() {
   // ==========================================================
@@ -2174,10 +2174,16 @@ console.log(
         ),
       due_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
+      completed_by_user_id BIGINT REFERENCES staff_users(id) ON DELETE SET NULL,
       archived_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await db.query(`
+    ALTER TABLE staff_tasks ADD COLUMN IF NOT EXISTS
+      completed_by_user_id BIGINT REFERENCES staff_users(id) ON DELETE SET NULL
   `);
 
   await db.query(`
