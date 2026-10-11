@@ -1,3 +1,4 @@
+import { materializeStaffRoutines } from "./staffRoutines.routes.js";
 import {
   AccessToken,
 } from "livekit-server-sdk";
@@ -295,6 +296,33 @@ function userWorkspaces(
 }
 
 
+
+function visibleStaffTasks(
+  tasks: any[],
+  user: AuthenticatedStaffUser
+): any[] {
+  const privileged =
+    user.role === "ADMIN" ||
+    user.role === "MANAGER";
+
+  const allowed = userWorkspaces(user);
+
+  return tasks.filter((task) => {
+    const location =
+      String(task.workspace ?? "")
+        .trim()
+        .toUpperCase();
+
+    if (!location) return true;
+
+    if (!["AARAU", "OLTEN", "ONLINE"].includes(location)) {
+      return false;
+    }
+
+    return privileged || allowed.has(location);
+  });
+}
+
 function isDriver(
   user: AuthenticatedStaffUser
 ): boolean {
@@ -467,8 +495,10 @@ router.get(
             user.id
           ),
           listTasks(
-            user.id
-          ),
+            user.id,
+            user.role === "ADMIN" ||
+              user.role === "MANAGER"
+          ).then((items) => visibleStaffTasks(items, user)),
           listCalendarEvents(),
         ]);
 
@@ -1414,14 +1444,31 @@ router.get(
       const user =
         getStaffUser(res);
 
+      const routineWorkspaces =
+        user.role === "ADMIN" ||
+        user.role === "MANAGER"
+          ? ["AARAU", "OLTEN", "ONLINE"]
+          : [...userWorkspaces(user)].filter(
+              (value) =>
+                ["AARAU", "OLTEN", "ONLINE"].includes(value)
+            );
+
+      for (const routineWorkspace of routineWorkspaces) {
+        await materializeStaffRoutines(routineWorkspace);
+      }
+
       const tasks =
         await listTasks(
-          user.id
-        );
+            user.id,
+            user.role === "ADMIN" ||
+              user.role === "MANAGER"
+          );
+
+      const visibleTasks = visibleStaffTasks(tasks, user);
 
       return res.json({
         ok: true,
-        tasks,
+        tasks: visibleTasks,
       });
 
     } catch (error) {
@@ -1500,6 +1547,18 @@ router.post(
             error:
               "Ungültiger Standort.",
           });
+      }
+
+      if (
+        workspace &&
+        user.role !== "ADMIN" &&
+        user.role !== "MANAGER" &&
+        !userWorkspaces(user).has(workspace)
+      ) {
+        return res.status(403).json({
+          ok: false,
+          error: "Kein Zugriff auf diesen Aufgabenstandort.",
+        });
       }
 
       const task =

@@ -976,7 +976,8 @@ export async function listDirectChannels(
 
 
 export async function listTasks(
-  staffUserId: string
+  staffUserId: string,
+  includeTeamTasks = false
 ) {
   const result =
     await db.query(
@@ -1000,7 +1001,8 @@ export async function listTasks(
         WHERE
           task.archived_at IS NULL
           AND (
-            task.assigned_to_user_id = $1
+            $2::boolean = TRUE
+            OR task.assigned_to_user_id = $1
             OR task.assigned_to_user_id IS NULL
           )
 
@@ -1014,7 +1016,7 @@ export async function listTasks(
           task.due_at ASC NULLS LAST,
           task.created_at DESC
       `,
-      [staffUserId]
+      [staffUserId, includeTeamTasks]
     );
 
   return result.rows;
