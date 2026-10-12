@@ -7187,6 +7187,19 @@ router.post(
   }
 );
 
-router.use(aloMhdRouter);
+router.use(
+  (req, res, next) => {
+    const path = req.path;
+
+    if (
+      path === "/api/alo-mhd" ||
+      path.startsWith("/api/alo-mhd/")
+    ) {
+      return aloMhdRouter(req, res, next);
+    }
+
+    return next();
+  }
+);
 
 export default router;
