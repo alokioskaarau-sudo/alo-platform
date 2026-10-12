@@ -983,7 +983,7 @@ export async function listTasks(
     await db.query(
       `
         SELECT
-          task.*,
+          task.*, occurrence.local_date::text AS "routineLocalDate",
           creator.display_name
             AS creator_name,
           assignee.display_name
@@ -997,6 +997,8 @@ export async function listTasks(
         LEFT JOIN staff_users assignee
           ON assignee.id =
             task.assigned_to_user_id
+        LEFT JOIN staff_task_routine_occurrences occurrence
+          ON occurrence.task_id = task.id
 
         WHERE
           task.archived_at IS NULL
