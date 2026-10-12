@@ -1916,6 +1916,11 @@ router.post(
           startsAt,
           endsAt,
 
+          reminderMinutesBefore:
+            req.body?.reminderMinutesBefore == null
+              ? null
+              : Number(req.body.reminderMinutesBefore),
+
           eventType:
             req.body?.eventType == null
               ? "GENERAL"

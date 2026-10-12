@@ -1175,6 +1175,7 @@ export async function createCalendarEvent(
     startsAt: string;
     endsAt: string;
     eventType?: string | null;
+    reminderMinutesBefore?: number | null;
   }
 ) {
   const title =
@@ -1186,8 +1187,16 @@ export async function createCalendarEvent(
     );
   }
 
-  const result =
-    await db.query(
+  // ALO_V49C_ATOMIC
+  const minutes = input.reminderMinutesBefore ?? null;
+  if (minutes !== null && ![10, 60, 1440, 2880, 10080].includes(minutes)) {
+    throw new Error("Ungueltige Erinnerung.");
+  }
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const result =
+    await client.query(
       `
         INSERT INTO staff_calendar_events (
           title,
@@ -1214,6 +1223,52 @@ export async function createCalendarEvent(
       ]
     );
 
-  return result.rows[0];
+    const event = result.rows[0];
+    if (minutes !== null) {
+      await client.query(
+        `INSERT INTO staff_calendar_reminders
+         (event_id, staff_user_id, minutes_before, remind_at)
+         VALUES ($1, $2, $3, $4)`,
+        [event.id, input.createdByUserId, minutes,
+         new Date(new Date(input.startsAt).getTime() - minutes * 60000).toISOString()]
+      );
+    }
+    await client.query("COMMIT");
+    return event;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
+
+// ALO_V49B_REMINDER
+export async function createCalendarReminder(
+  eventId: string,
+  staffUserId: string,
+  startsAt: string,
+  minutesBefore: number
+) {
+  if (![10, 60, 1440, 2880, 10080].includes(minutesBefore)) {
+    throw new Error("Ungueltige Erinnerung");
+  }
+
+  const remindAt = new Date(
+    new Date(startsAt).getTime() - minutesBefore * 60000
+  );
+
+  if (Number.isNaN(remindAt.getTime())) {
+    throw new Error("Ungueltiges Datum");
+  }
+
+  return db.query(
+    `INSERT INTO staff_calendar_reminders
+      (event_id, staff_user_id, minutes_before, remind_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (event_id, staff_user_id, minutes_before)
+     DO NOTHING`,
+    [eventId, staffUserId, minutesBefore, remindAt.toISOString()]
+  );
+}

@@ -2215,6 +2215,52 @@ console.log(
     );
   `);
 
+
+  // ALO_V49F_DELIVERIES: pro Geraet separat nachvollziehbare Expo-Annahme
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_calendar_reminder_deliveries (
+      id BIGSERIAL PRIMARY KEY,
+      reminder_id BIGINT NOT NULL REFERENCES staff_calendar_reminders(id) ON DELETE CASCADE,
+      push_token_id BIGINT NOT NULL REFERENCES staff_push_tokens(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      accepted_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (reminder_id, push_token_id),
+      CHECK (status IN ('PENDING', 'SENT', 'FAILED'))
+    );
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS staff_calendar_reminder_deliveries_status_idx
+    ON staff_calendar_reminder_deliveries (reminder_id, status);
+  `);
+
+  // ALO_CALENDAR_REMINDERS_V49
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_calendar_reminders (
+      id BIGSERIAL PRIMARY KEY,
+      event_id BIGINT NOT NULL REFERENCES staff_calendar_events(id) ON DELETE CASCADE,
+      staff_user_id BIGINT NOT NULL REFERENCES staff_users(id) ON DELETE CASCADE,
+      minutes_before INTEGER NOT NULL,
+      remind_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT $$PENDING$$,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      sent_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (minutes_before IN (10, 60, 1440, 2880, 10080)),
+      CHECK (status IN ($$PENDING$$, $$PROCESSING$$, $$SENT$$, $$FAILED$$)),
+      UNIQUE (event_id, staff_user_id, minutes_before)
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS staff_calendar_reminders_due_idx
+    ON staff_calendar_reminders (status, remind_at);
+  `);
+
   await db.query(`
     CREATE INDEX IF NOT EXISTS
       staff_calendar_events_time_idx

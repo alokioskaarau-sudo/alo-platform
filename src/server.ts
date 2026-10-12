@@ -75,6 +75,7 @@ import staffNotesRouter from "./routes/staffNotes.routes.js";
 import staffAuthRouter from "./routes/staffAuth.routes.js";
 import staffOrdersRouter from "./routes/staffOrders.routes.js";
 import staffPushRouter from "./routes/staffPush.routes.js";
+import { startCalendarReminderWorker } from "./modules/staff/calendarReminder.service.js"; // ALO_V49D_REMINDER_WORKER
 import staffCollaborationRouter from "./routes/staffCollaboration.routes.js";
 import staffRoutinesRouter from "./routes/staffRoutines.routes.js";
 import staffConsumptionRouter from "./routes/staffConsumption.routes.js";
@@ -1336,6 +1337,7 @@ async function startServer() {
     // --------------------------------------------------------
 
     await initializeDatabase();
+    startCalendarReminderWorker();
 
     console.log(
       "Datenbank initialisiert."
