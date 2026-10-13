@@ -57,6 +57,7 @@ export const STAFF_CAPABILITIES = [
   "staff.view",
   "staff.manage",
 
+  "schedule.manage",
   "settings.view",
   "settings.manage",
 ] as const;
@@ -116,6 +117,7 @@ const ROLE_CAPABILITIES:
         "staff.view",
         "staff.manage",
 
+        "schedule.manage",
         "settings.view",
       ]),
 
@@ -198,6 +200,7 @@ const JOB_CAPABILITIES:
         "analytics.view",
         "staff.view",
         "staff.manage",
+        "schedule.manage",
         "settings.view",
       ]),
 

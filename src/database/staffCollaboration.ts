@@ -1132,12 +1132,23 @@ export async function listCalendarEvents(
         SELECT
           event.*,
           creator.display_name
-            AS creator_name
+            AS creator_name,
+          reminder.minutes_before
+            AS "reminderMinutesBefore"
         FROM staff_calendar_events event
 
         JOIN staff_users creator
           ON creator.id =
             event.created_by_user_id
+
+        LEFT JOIN LATERAL (
+          SELECT r.minutes_before
+          FROM staff_calendar_reminders r
+          WHERE r.event_id = event.id
+            AND r.status <> 'SENT'
+          ORDER BY r.created_at DESC
+          LIMIT 1
+        ) reminder ON TRUE
 
         WHERE
           event.cancelled_at IS NULL
@@ -1271,4 +1282,192 @@ export async function createCalendarReminder(
      DO NOTHING`,
     [eventId, staffUserId, minutesBefore, remindAt.toISOString()]
   );
+}
+
+
+// ALO_V50_CALENDAR_MUTATIONS
+export async function updateCalendarEvent(
+  eventId: string,
+  actorUserId: string,
+  isManager: boolean,
+  input: {
+    title: string;
+    description?: string | null;
+    workspace?: string | null;
+    startsAt: string;
+    endsAt: string;
+    eventType: string;
+    reminderMinutesBefore?: number | null;
+  }
+) {
+  const title = String(input.title || "").trim();
+  if (!title) throw new Error("Terminname fehlt.");
+
+  const start = new Date(input.startsAt);
+  const end = new Date(input.endsAt);
+
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    end.getTime() <= start.getTime()
+  ) {
+    throw new Error("Ungültiger Zeitraum.");
+  }
+
+  const minutes = input.reminderMinutesBefore ?? null;
+  if (
+    minutes !== null &&
+    ![10, 60, 1440, 2880, 10080].includes(minutes)
+  ) {
+    throw new Error("Ungültige Erinnerung.");
+  }
+
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const existing = await client.query(
+      `SELECT * FROM staff_calendar_events
+       WHERE id = $1 AND cancelled_at IS NULL
+       FOR UPDATE`,
+      [eventId]
+    );
+
+    const current = existing.rows[0];
+
+    if (!current) {
+      await client.query("ROLLBACK");
+      return { status: "NOT_FOUND" as const };
+    }
+
+    if (
+      !isManager &&
+      String(current.created_by_user_id) !== String(actorUserId)
+    ) {
+      await client.query("ROLLBACK");
+      return { status: "FORBIDDEN" as const };
+    }
+
+    const updated = await client.query(
+      `UPDATE staff_calendar_events
+       SET title = $2,
+           description = $3,
+           workspace = $4,
+           starts_at = $5,
+           ends_at = $6,
+           event_type = $7,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        eventId,
+        title,
+        input.description?.trim() || null,
+        input.workspace || null,
+        start.toISOString(),
+        end.toISOString(),
+        input.eventType || "GENERAL",
+      ]
+    );
+
+
+    // V50: Alte noch nicht versendete Erinnerungen entfernen.
+    // SENT-Eintraege bleiben als Historie erhalten.
+    await client.query(
+      `DELETE FROM staff_calendar_reminders
+       WHERE event_id = $1 AND status <> 'SENT'`,
+      [eventId]
+    );
+
+    if (minutes !== null) {
+      const remindAt = new Date(
+        start.getTime() - minutes * 60000
+      ).toISOString();
+
+      // Keine bereits versendete Erinnerung erneut ausloesen.
+      await client.query(
+        `INSERT INTO staff_calendar_reminders
+         (event_id, staff_user_id, minutes_before, remind_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (event_id, staff_user_id, minutes_before)
+         DO NOTHING`,
+        [
+          eventId,
+          current.created_by_user_id,
+          minutes,
+          remindAt,
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return {
+      status: "OK" as const,
+      event: updated.rows[0],
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function deleteCalendarEvent(
+  eventId: string,
+  actorUserId: string,
+  isManager: boolean
+) {
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const existing = await client.query(
+      `SELECT created_by_user_id
+       FROM staff_calendar_events
+       WHERE id = $1 AND cancelled_at IS NULL
+       FOR UPDATE`,
+      [eventId]
+    );
+
+    const current = existing.rows[0];
+
+    if (!current) {
+      await client.query("ROLLBACK");
+      return "NOT_FOUND" as const;
+    }
+
+    if (
+      !isManager &&
+      String(current.created_by_user_id) !== String(actorUserId)
+    ) {
+      await client.query("ROLLBACK");
+      return "FORBIDDEN" as const;
+    }
+
+    await client.query(
+      `UPDATE staff_calendar_events
+       SET cancelled_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [eventId]
+    );
+
+    await client.query(
+      `DELETE FROM staff_calendar_reminders
+       WHERE event_id = $1 AND status <> 'SENT'`,
+      [eventId]
+    );
+
+    await client.query("COMMIT");
+    return "OK" as const;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }

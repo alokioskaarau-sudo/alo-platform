@@ -43,6 +43,8 @@ import {
   updateTaskStatus,
   listCalendarEvents,
   createCalendarEvent,
+  updateCalendarEvent,
+  deleteCalendarEvent,
 } from "../database/staffCollaboration.js";
 
 
@@ -1946,5 +1948,171 @@ router.post(
   }
 );
 
+
+
+// ALO_V50_CALENDAR_ROUTES
+router.patch(
+  "/calendar/:id",
+  requireStaffCapability("tasks.manage"),
+  async (req, res) => {
+    try {
+      const user = getStaffUser(res);
+      const privileged =
+        user.role === "ADMIN" || user.role === "MANAGER";
+
+      const id = String(req.params.id || "").trim();
+
+      if (!/^\d+$/.test(id)) {
+        return res.status(400).json({
+          ok: false,
+          error: "Ungültige Termin-ID.",
+        });
+      }
+
+      const workspaceRaw = req.body?.workspace;
+      const workspace =
+        workspaceRaw == null || String(workspaceRaw).trim() === ""
+          ? null
+          : normalizeWorkspace(workspaceRaw);
+
+      if (workspaceRaw && !workspace) {
+        return res.status(400).json({
+          ok: false,
+          error: "Ungültiger Standort.",
+        });
+      }
+
+      if (
+        !privileged &&
+        workspace &&
+        !userWorkspaces(user).has(workspace)
+      ) {
+        return res.status(403).json({
+          ok: false,
+          error: "Kein Zugriff auf diesen Standort.",
+        });
+      }
+
+      const startsAt = String(req.body?.startsAt || "").trim();
+      const endsAt = String(req.body?.endsAt || "").trim();
+
+      const start = new Date(startsAt);
+      const end = new Date(endsAt);
+
+      if (
+        !startsAt ||
+        !endsAt ||
+        Number.isNaN(start.getTime()) ||
+        Number.isNaN(end.getTime()) ||
+        end.getTime() <= start.getTime()
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Ungültiger Zeitraum.",
+        });
+      }
+
+      const result = await updateCalendarEvent(
+        id,
+        String(user.id),
+        privileged,
+        {
+          title: String(req.body?.title || ""),
+          description:
+            req.body?.description == null
+              ? null
+              : String(req.body.description),
+          workspace,
+          startsAt,
+          endsAt,
+          eventType: String(
+            req.body?.eventType || "GENERAL"
+          ).toUpperCase(),
+          reminderMinutesBefore:
+            req.body?.reminderMinutesBefore == null
+              ? null
+              : Number(req.body.reminderMinutesBefore),
+        }
+      );
+
+      if (result.status === "NOT_FOUND") {
+        return res.status(404).json({
+          ok: false,
+          error: "Termin nicht gefunden.",
+        });
+      }
+
+      if (result.status === "FORBIDDEN") {
+        return res.status(403).json({
+          ok: false,
+          error: "Du darfst diesen Termin nicht bearbeiten.",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        event: result.event,
+      });
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Termin konnte nicht bearbeitet werden."
+      );
+    }
+  }
+);
+
+router.delete(
+  "/calendar/:id",
+  requireStaffCapability("tasks.manage"),
+  async (req, res) => {
+    try {
+      const user = getStaffUser(res);
+      const privileged =
+        user.role === "ADMIN" || user.role === "MANAGER";
+
+      const id = String(req.params.id || "").trim();
+
+      if (!/^\d+$/.test(id)) {
+        return res.status(400).json({
+          ok: false,
+          error: "Ungültige Termin-ID.",
+        });
+      }
+
+      const result = await deleteCalendarEvent(
+        id,
+        String(user.id),
+        privileged
+      );
+
+      if (result === "NOT_FOUND") {
+        return res.status(404).json({
+          ok: false,
+          error: "Termin nicht gefunden.",
+        });
+      }
+
+      if (result === "FORBIDDEN") {
+        return res.status(403).json({
+          ok: false,
+          error: "Du darfst diesen Termin nicht löschen.",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        deleted: true,
+      });
+    } catch (error) {
+      return sendError(
+        res,
+        error,
+        "Termin konnte nicht gelöscht werden."
+      );
+    }
+  }
+);
 
 export default router;

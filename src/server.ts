@@ -77,6 +77,7 @@ import staffOrdersRouter from "./routes/staffOrders.routes.js";
 import staffPushRouter from "./routes/staffPush.routes.js";
 import { startCalendarReminderWorker } from "./modules/staff/calendarReminder.service.js"; // ALO_V49D_REMINDER_WORKER
 import staffCollaborationRouter from "./routes/staffCollaboration.routes.js";
+import staffSchedulingRouter from "./routes/staffScheduling.routes.js";
 import staffRoutinesRouter from "./routes/staffRoutines.routes.js";
 import staffConsumptionRouter from "./routes/staffConsumption.routes.js";
 
@@ -152,6 +153,7 @@ app.use("/api/staff-auth", staffAuthRouter);
 app.use("/api/staff-orders", staffOrdersRouter);
 app.use("/api/staff-push", staffPushRouter);
 app.use("/api/staff-collaboration", staffCollaborationRouter);
+app.use("/api/staff-scheduling", staffSchedulingRouter);
 app.use("/api/staff-routines", staffRoutinesRouter);
 app.use("/api/staff-consumption", staffConsumptionRouter);
 

@@ -1,4 +1,5 @@
 import { db } from "./db.js";
+import { ensureStaffSchedulingTables } from "./staffScheduling.js";
 
 export async function initializeDatabase() {
   // ==========================================================
@@ -1003,6 +1004,10 @@ export async function initializeDatabase() {
         )
     );
   `);
+
+  // ALO V51: Dienstplan und Abwesenheiten
+  await ensureStaffSchedulingTables();
+
 
   await db.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS
