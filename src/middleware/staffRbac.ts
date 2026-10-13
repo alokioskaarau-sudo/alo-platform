@@ -206,6 +206,7 @@ const JOB_CAPABILITIES:
 
     store_manager:
       new Set([
+        "schedule.manage",
         "dashboard.view",
         "orders.view",
         "orders.pack",
