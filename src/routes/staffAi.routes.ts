@@ -224,6 +224,8 @@ router.post("/chat", async (req, res) => {
 
     // ALO_STRUCTURED_APPROVAL_PREVIEW_V1
     let schedulePreview: SchedulePreview | null = null;
+    // ALO_227_PRODUCT_CARDS: source-backed display data, never model-generated.
+    let productCards: any[] = [];
     let approvalPreview: null | { productId: number; productTitle: string; workspace: "ONLINE"; quantity: number; reason: string; confirmationRequired: true; status: "PREVIEW_ONLY_NOT_SUBMITTED" } = null;
 
     const input: any[] = messages.map((m: any) => ({
@@ -240,6 +242,9 @@ router.post("/chat", async (req, res) => {
         "Hilf bei Kiosk-Alltag, Kundenservice und Produktfragen. " +
         "Erfinde keine internen Regeln, Preise oder Bestände. " +
         "Du darfst Produktinformationen ausschliesslich aus dem bereitgestellten Werkzeug verwenden. " +
+        "Sprich wie ein freundlicher, schneller Kollege. Antworte bei Produktfragen kurz und natürlich. " +
+        "Nenne keine IDs, Artikelnummern oder Barcodes, ausser ausdrücklich danach gefragt. " +
+        "Die Benutzeroberfläche zeigt Produktkarten und Bestände getrennt an; lies nicht alle Metadaten vor. " +
         "Erfinde niemals Bestände oder Preise. " +
         "Online-Bestände aus Snapshots sind möglicherweise nicht live. " +
         "Bei Bestandskorrekturen erst das Produkt suchen und dann nur eine Vorschau mit prepare_inventory_adjustment_request erstellen. " +
@@ -353,6 +358,11 @@ router.post("/chat", async (req, res) => {
           String(args.query || ""),
           getStaffUser(res).allowedWorkspaces
         );
+        productCards = products.slice(0, 16).map((p: any) => ({
+          id: p.id, title: p.title, brand: p.brand, unitSize: p.unitSize,
+          imageUrl: null, // First identify an authoritative product image source.
+          stock: p.stock
+        }));
 
         input.push({
           type: "function_call_output",
@@ -403,7 +413,7 @@ router.post("/chat", async (req, res) => {
       return;
     }
 
-    res.json({ ok: true, answer, approvalPreview, schedulePreview });
+    res.json({ ok: true, answer, approvalPreview, schedulePreview, productCards });
   } catch (error) {
     console.error("STAFF AI ERROR", error);
     res.status(502).json({
