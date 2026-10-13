@@ -37,7 +37,8 @@ async function searchAloProducts(query: string, allowedWorkspaces: string[]) {
   const result = await db.query(`
     WITH matched AS (
       SELECT p.id, p.title, p.barcode, p.brand, p.unit_size,
-        p.category, p.country, p.ingredients, p.allergens
+        p.category, p.country, p.ingredients, p.allergens,
+          EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = p.id) AS has_image
       FROM products p
       WHERE (${tokenFilter}) OR ${compact} LIKE $${compactIndex}
       ORDER BY CASE
@@ -62,6 +63,7 @@ async function searchAloProducts(query: string, allowedWorkspaces: string[]) {
         brand: row.brand, unitSize: row.unit_size,
         category: row.category, country: row.country,
         ingredients: row.ingredients, allergens: row.allergens,
+          hasImage: Boolean(row.has_image),
         stock: Object.fromEntries(locations.map(loc => [loc, null]))
       });
     }
@@ -360,7 +362,7 @@ router.post("/chat", async (req, res) => {
         );
         productCards = products.slice(0, 16).map((p: any) => ({
           id: p.id, title: p.title, brand: p.brand, unitSize: p.unitSize,
-          imageUrl: null, // First identify an authoritative product image source.
+          imageUrl: p.hasImage ? `/api/products/${encodeURIComponent(String(p.id))}/image` : null,
           stock: p.stock
         }));
 
