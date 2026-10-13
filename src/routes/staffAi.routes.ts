@@ -4,6 +4,7 @@ import multer from "multer";
 import { toFile } from "openai";
 import { requireStaffAuth, getStaffUser } from "../middleware/staffAuth.js";
 import { db } from "../database/db.js";
+import { effectiveStaffCapabilities } from "../middleware/staffRbac.js";
 
 const router = Router();
 router.use(requireStaffAuth);
@@ -75,6 +76,74 @@ async function searchAloProducts(query: string, allowedWorkspaces: string[]) {
   return Array.from(products.values());
 }
 
+
+// ALO_216_SCHEDULE_AI_PREVIEW: read-only proposal; NEVER writes schedule data.
+type SchedulePreview = {
+  staffUserId: number;
+  employeeName: string;
+  workspace: "AARAU" | "OLTEN";
+  startsAt: string;
+  endsAt: string;
+  shiftPreset: "EARLY" | "LATE" | "FULL" | "CUSTOM";
+  conflicts: Array<{ type: "SHIFT" | "ABSENCE"; description: string }>;
+  confirmationRequired: true;
+  status: "PREVIEW_ONLY_NOT_SAVED";
+};
+
+async function prepareAloSchedulePreview(args: any): Promise<SchedulePreview> {
+  const staffUserId = Number(args.staffUserId);
+  const startsAt = new Date(args.startsAt);
+  const endsAt = new Date(args.endsAt);
+  const workspace = String(args.workspace || "");
+  const shiftPreset = String(args.shiftPreset || "CUSTOM");
+  if (!Number.isSafeInteger(staffUserId) || staffUserId <= 0 ||
+      !["AARAU", "OLTEN"].includes(workspace) ||
+      !["EARLY", "LATE", "FULL", "CUSTOM"].includes(shiftPreset) ||
+      typeof args.startsAt !== "string" || typeof args.endsAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(args.startsAt) ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(args.endsAt) ||
+      !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) ||
+      startsAt >= endsAt || endsAt.getTime() - startsAt.getTime() > 24*60*60*1000 ||
+      startsAt.getTime() < Date.now() - 60*1000 ||
+      startsAt.getTime() > Date.now() + 180*24*60*60*1000) {
+    throw new Error("Ungültige Schichtangaben. Bitte Person, Standort und genaue zukünftige Start-/Endzeit angeben.");
+  }
+  const employee = await db.query(
+    `SELECT id, display_name AS "displayName" FROM staff_users
+     WHERE id=$1 AND active=TRUE AND approved_at IS NOT NULL LIMIT 1`,
+    [staffUserId]
+  );
+  if (!employee.rows.length) throw new Error("Aktiver Mitarbeiter nicht gefunden.");
+  const clashes = await db.query(
+    `SELECT workspace, starts_at, ends_at, status
+     FROM staff_schedule_shifts
+     WHERE staff_user_id=$1 AND status <> 'CANCELLED'
+       AND starts_at < $3 AND ends_at > $2
+     ORDER BY starts_at LIMIT 10`,
+    [staffUserId, startsAt, endsAt]
+  );
+  const absences = await db.query(
+    `SELECT request_type, starts_at, ends_at FROM staff_schedule_requests
+     WHERE staff_user_id=$1 AND status='APPROVED'
+       AND starts_at < $3 AND ends_at > $2 LIMIT 10`,
+    [staffUserId, startsAt, endsAt]
+  );
+  return {
+    staffUserId, employeeName: String(employee.rows[0].displayName),
+    workspace: workspace as "AARAU" | "OLTEN",
+    startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(),
+    shiftPreset: shiftPreset as SchedulePreview["shiftPreset"],
+    conflicts: [
+      ...clashes.rows.map((c:any) => ({type:"SHIFT" as const, description:
+        `${c.workspace}: ${new Date(c.starts_at).toISOString()} – ${new Date(c.ends_at).toISOString()} (${c.status})`})),
+      ...absences.rows.map((a:any) => ({type:"ABSENCE" as const, description:
+        `${a.request_type}: ${new Date(a.starts_at).toISOString()} – ${new Date(a.ends_at).toISOString()}`}))
+    ],
+    confirmationRequired: true,
+    status: "PREVIEW_ONLY_NOT_SAVED"
+  };
+}
+
 // ALO_STAFF_AI_V40
 router.post("/chat", async (req, res) => {
   const messages = req.body?.messages;
@@ -135,9 +204,26 @@ router.post("/chat", async (req, res) => {
         additionalProperties: false
       },
       strict: true
+    }, {
+      type: "function",
+      name: "search_schedule_employees",
+      description: "Sucht aktive ALO Mitarbeitende nach Namen, damit Schichtvorschläge der richtigen Person zugeordnet werden. Nur fuer Admins mit schedule.manage.",
+      parameters: {type:"object", properties:{query:{type:"string"}}, required:["query"], additionalProperties:false},
+      strict: true
+    }, {
+      type: "function",
+      name: "prepare_schedule_shift_preview",
+      description: "Prueft einen neuen Dienst und erstellt NUR eine unverbindliche Vorschau. KEINE Speicherung, KEINE Veroeffentlichung. Erst employee ID suchen, genaue ISO-8601-Zeit inklusive Offset und Standort ermitteln. Nur fuer Planungsberechtigte.",
+      parameters: {type:"object", properties:{
+        staffUserId:{type:"integer"}, workspace:{type:"string",enum:["AARAU","OLTEN"]},
+        startsAt:{type:"string"}, endsAt:{type:"string"},
+        shiftPreset:{type:"string",enum:["EARLY","LATE","FULL","CUSTOM"]}
+      }, required:["staffUserId","workspace","startsAt","endsAt","shiftPreset"],additionalProperties:false},
+      strict: true
     }];
 
     // ALO_STRUCTURED_APPROVAL_PREVIEW_V1
+    let schedulePreview: SchedulePreview | null = null;
     let approvalPreview: null | { productId: number; productTitle: string; workspace: "ONLINE"; quantity: number; reason: string; confirmationRequired: true; status: "PREVIEW_ONLY_NOT_SUBMITTED" } = null;
 
     const input: any[] = messages.map((m: any) => ({
@@ -157,7 +243,11 @@ router.post("/chat", async (req, res) => {
         "Erfinde niemals Bestände oder Preise. " +
         "Online-Bestände aus Snapshots sind möglicherweise nicht live. " +
         "Bei Bestandskorrekturen erst das Produkt suchen und dann nur eine Vorschau mit prepare_inventory_adjustment_request erstellen. " +
-        "Niemals behaupten, ein Antrag sei eingereicht oder Bestand geaendert. Eine Bestaetigung im Chat allein fuehrt keine Aktion aus.",
+        "Niemals behaupten, ein Antrag sei eingereicht oder Bestand geaendert. Eine Bestaetigung im Chat allein fuehrt keine Aktion aus. " +
+        "Bei Dienstplanfragen suche zuerst mit search_schedule_employees die eindeutige Mitarbeiter-ID. " +
+        "Das heutige Datum ist " + new Date().toLocaleDateString("de-CH", {timeZone:"Europe/Zurich"}) + ". " +
+        "Fuer Schichtvorschlaege nutze prepare_schedule_shift_preview, mit ISO-8601 Uhrzeiten samt Schweizer Zeitzonen-Offset. " +
+        "Schichten werden NIE im Chat gespeichert oder veroeffentlicht. Fehlende Angaben erfragen, Konflikte nennen.",
       tools,
       input
     });
@@ -172,6 +262,38 @@ router.post("/chat", async (req, res) => {
       input.push(...response.output);
 
       for (const call of calls) {
+        if (call.name === "search_schedule_employees" || call.name === "prepare_schedule_shift_preview") {
+          const actor = getStaffUser(res);
+          let result: any;
+          if (!effectiveStaffCapabilities(actor).has("schedule.manage")) {
+            result = {ok:false,error:"Keine Berechtigung zur Schichtplanung."};
+          } else {
+            try {
+              const args = JSON.parse(call.arguments || "{}");
+              if (call.name === "search_schedule_employees") {
+                const query = String(args.query || "").trim().slice(0,80);
+                if (query.length < 2) {
+                  result = {ok:false,error:"Bitte mindestens 2 Zeichen des Namens nennen."};
+                } else {
+                  const rows = await db.query(
+                    `SELECT id, display_name AS "displayName", default_workspace AS "defaultWorkspace"
+                     FROM staff_users WHERE active=TRUE AND approved_at IS NOT NULL
+                     AND display_name ILIKE $1 ORDER BY display_name LIMIT 15`,
+                    [`%${query}%`]
+                  );
+                  result = {ok:true,employees:rows.rows};
+                }
+              } else {
+                schedulePreview = await prepareAloSchedulePreview(args);
+                result = {ok:true,...schedulePreview,message:"Nur Vorschau. Kein Dienst gespeichert oder veroeffentlicht."};
+              }
+            } catch (error:any) {
+              result = {ok:false,error:String(error?.message || "Vorschau konnte nicht geprueft werden.")};
+            }
+          }
+          input.push({type:"function_call_output",call_id:call.call_id,output:JSON.stringify(result)});
+          continue;
+        }
         if (call.name === "prepare_inventory_adjustment_request") {
           const args = JSON.parse(call.arguments || "{}");
           const staff = getStaffUser(res);
@@ -249,7 +371,9 @@ router.post("/chat", async (req, res) => {
           "Erfinde keine Preise oder Bestände. " +
           "Online-Snapshot-Bestände sind nicht zwingend live. " +
           "Bestandsantraege nur als Vorschau vorbereiten. Nie behaupten, sie seien gespeichert oder ausgefuehrt. " +
-          "Fuer eine echte Einreichung ist eine separate bestaetigte Aktion erforderlich.",
+          "Fuer eine echte Einreichung ist eine separate bestaetigte Aktion erforderlich. " +
+          "Schichtvorschlaege sind ausschliesslich Vorschauen, nie als gespeichert oder veroeffentlicht darstellen. " +
+          "Frage fehlende Schichtdaten nach, verwende Tools und informiere ueber Konflikte.",
         tools,
         input
       });
@@ -279,7 +403,7 @@ router.post("/chat", async (req, res) => {
       return;
     }
 
-    res.json({ ok: true, answer, approvalPreview });
+    res.json({ ok: true, answer, approvalPreview, schedulePreview });
   } catch (error) {
     console.error("STAFF AI ERROR", error);
     res.status(502).json({
