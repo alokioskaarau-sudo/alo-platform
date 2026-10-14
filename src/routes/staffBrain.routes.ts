@@ -282,12 +282,25 @@ router.patch("/:id", async (req, res) => {
   try {
     await ensureSchema();
 
+    // ALO_269_MEMORY_AUDIT: update and event in one statement.
     const result = await db.query(`
-      UPDATE alo_brain_memories
-      SET title = $3, content = $4, updated_at = NOW()
-      WHERE id = $1 AND owner_id = $2
-      RETURNING id, title, content
-    `, [req.params.id, owner(res), title, content]);
+      WITH updated AS (
+        UPDATE alo_brain_memories
+        SET title = $3, content = $4, updated_at = NOW()
+        WHERE id = $1 AND owner_id = $2
+        RETURNING id, title, content
+      ),
+      logged AS (
+        INSERT INTO alo_brain_events
+          (id, owner_id, memory_id, event_type, description)
+        SELECT $5, $2, id, 'MEMORY_UPDATED', title
+        FROM updated
+        RETURNING id
+      )
+      SELECT updated.id, updated.title, updated.content
+      FROM updated
+      JOIN logged ON TRUE
+    `, [req.params.id, owner(res), title, content, randomUUID()]);
 
     if (!result.rows.length) {
       res.status(404).json({ ok: false, error: "Nicht gefunden." });
@@ -314,11 +327,24 @@ router.delete("/:id", async (req, res) => {
   try {
     await ensureSchema();
 
+    // ALO_269_MEMORY_AUDIT: deletion and event are atomic.
     const result = await db.query(`
-      DELETE FROM alo_brain_memories
-      WHERE id = $1 AND owner_id = $2
-      RETURNING id
-    `, [req.params.id, owner(res)]);
+      WITH deleted AS (
+        DELETE FROM alo_brain_memories
+        WHERE id = $1 AND owner_id = $2
+        RETURNING id, title
+      ),
+      logged AS (
+        INSERT INTO alo_brain_events
+          (id, owner_id, memory_id, event_type, description)
+        SELECT $3, $2, id, 'MEMORY_DELETED', title
+        FROM deleted
+        RETURNING id
+      )
+      SELECT deleted.id
+      FROM deleted
+      JOIN logged ON TRUE
+    `, [req.params.id, owner(res), randomUUID()]);
 
     if (!result.rows.length) {
       res.status(404).json({ ok: false, error: "Nicht gefunden." });
