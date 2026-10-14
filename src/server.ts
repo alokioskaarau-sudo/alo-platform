@@ -66,6 +66,7 @@ import {
   initPrinterPairingTables,
 } from "./routes/printerPairing.routes.js";
 import staffAiRouter from "./routes/staffAi.routes.js";
+import staffBrainRouter from "./routes/staffBrain.routes.js";
 import deliveryAiRouter from './routes/deliveryAi.routes.js';
 import productAiRouter from './routes/productAi.routes.js';
 import productsRouter from "./routes/products.routes.js";
@@ -147,6 +148,8 @@ app.use('/api/ai', productAiRouter);
 app.use(productsRouter);
 app.use(productOpsRouter);
 app.use("/api/staff-ai", staffAiRouter);
+// ALO_261_BRAIN_API
+app.use("/api/staff-brain", staffBrainRouter);
 app.use("/api/receiving", receivingRouter);
 app.use("/api/staff-notes", staffNotesRouter);
 app.use("/api/staff-auth", staffAuthRouter);
