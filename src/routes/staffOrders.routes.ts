@@ -1,4 +1,4 @@
-﻿import { Router } from "express";
+import { Router } from "express";
 import { PDFDocument } from "pdf-lib";
 import { db } from "../database/db.js";
 import {
@@ -869,6 +869,71 @@ router.post(
   }
 );
 
+
+// ALO_ORDER_ARCHIVE_SEARCH_V2
+// Exact read-only archive lookup of existing documents, no 500-order dashboard limit.
+// Customer names are not in these document tables: this endpoint searches order
+// number/name and Shopify order ID only. It does NOT create a label or print job.
+router.get('/archive-search', requireStaffAuth, async (req, res) => {
+  try {
+    const query = String(req.query.q ?? '').trim().slice(0, 100).replace(/^#/, '');
+    if (query.length < 3) {
+      return res.status(400).json({ok: false, error: 'SEARCH_QUERY_TOO_SHORT'});
+    }
+    const pattern = '%' + query.replace(/[\\%_]/g, '\\$&') + '%';
+    const result = await db.query<{
+      shopify_order_id: string;
+      shopify_order_name: string | null;
+      label_id: string | null;
+      packing_slip_id: string | null;
+      invoice_id: string | null;
+    }>(`
+      WITH matches AS (
+        SELECT shopify_order_id FROM shipping_labels
+          WHERE shopify_order_name ILIKE $1 ESCAPE '\\' OR shopify_order_id ILIKE $1 ESCAPE '\\'
+        UNION
+        SELECT shopify_order_id FROM packing_slips
+          WHERE shopify_order_name ILIKE $1 ESCAPE '\\' OR shopify_order_id ILIKE $1 ESCAPE '\\'
+        UNION
+        SELECT shopify_order_id FROM invoices
+          WHERE shopify_order_name ILIKE $1 ESCAPE '\\' OR shopify_order_id ILIKE $1 ESCAPE '\\'
+      )
+      SELECT m.shopify_order_id,
+        COALESCE(sl.shopify_order_name, ps.shopify_order_name, iv.shopify_order_name) AS shopify_order_name,
+        sl.id AS label_id, ps.id AS packing_slip_id, iv.id AS invoice_id
+      FROM matches m
+      LEFT JOIN LATERAL (
+        SELECT id, shopify_order_name FROM shipping_labels
+        WHERE shopify_order_id = m.shopify_order_id ORDER BY created_at DESC, id DESC LIMIT 1
+      ) sl ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT id, shopify_order_name FROM packing_slips
+        WHERE shopify_order_id = m.shopify_order_id ORDER BY created_at DESC, id DESC LIMIT 1
+      ) ps ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT id, shopify_order_name FROM invoices
+        WHERE shopify_order_id = m.shopify_order_id ORDER BY created_at DESC, id DESC LIMIT 1
+      ) iv ON TRUE
+      ORDER BY CASE WHEN REPLACE(COALESCE(sl.shopify_order_name, ps.shopify_order_name, iv.shopify_order_name, ''), '#', '')
+                         ILIKE $2 THEN 0 ELSE 1 END,
+               m.shopify_order_id DESC
+      LIMIT 40
+    `, [pattern, query]);
+    const orders = result.rows.map(row => ({
+      id: String(row.shopify_order_id),
+      orderNumber: String(row.shopify_order_name ?? ''),
+      customerName: '',
+      status: 'ARCHIVED_DOCUMENT',
+      hasShippingLabel: Boolean(row.label_id),
+      hasPackingSlip: Boolean(row.packing_slip_id),
+      hasInvoice: Boolean(row.invoice_id)
+    }));
+    return res.json({ok: true, orders, scope: 'document_archive', searched: orders.length});
+  } catch (error) {
+    console.error('STAFF ARCHIVE SEARCH V2 ERROR', error);
+    return res.status(500).json({ok: false, error: 'ARCHIVE_SEARCH_FAILED'});
+  }
+});
 
 router.get(
   "/:orderId",
@@ -1992,28 +2057,18 @@ router.post(
         });
       }
 
-      const dashboardOrders =
-        await getOrderDashboard(500);
-
-      const order =
-        dashboardOrders.find(
-          (item) =>
-            item.shopify_order_id === orderId
-        );
-
-      if (!order) {
-        return res.status(404).json({
-          ok: false,
-          error: "ORDER_NOT_FOUND",
-        });
-      }
-
-      const documentId =
-        documentType === "SHIPPING_LABEL"
-          ? order.label_id
-          : documentType === "PACKING_SLIP"
-            ? order.packing_slip_id
-            : order.invoice_id;
+      // ALO_ORDER_ARCHIVE_SEARCH_V2: retrieve original archived document by
+      // internal Shopify order ID, regardless of age. Never create a new label.
+      const table = documentType === "SHIPPING_LABEL"
+        ? "shipping_labels"
+        : documentType === "PACKING_SLIP"
+          ? "packing_slips"
+          : "invoices";
+      const documentRow = await db.query<{id: string}>(
+        `SELECT id FROM ${table} WHERE shopify_order_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [orderId]
+      );
+      const documentId = documentRow.rows[0]?.id ?? null;
 
       if (!documentId) {
         return res.status(409).json({
