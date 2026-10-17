@@ -935,6 +935,151 @@ router.get('/archive-search', requireStaffAuth, async (req, res) => {
   }
 });
 
+// ALO_LIVE_PACK_READONLY_V2
+// Staff-authentifiziert, nur lesend.
+// Vor /:orderId registrieren.
+router.get(
+  "/live/packing",
+  requireStaffAuth,
+  async (_req, res) => {
+    try {
+      const latest = await getLatestShopifyOrders(50);
+
+      const active = latest.filter((order: any) => {
+        const fulfilled = String(
+          order?.displayFulfillmentStatus ?? ""
+        ).toUpperCase();
+
+        return !order?.cancelledAt &&
+          fulfilled !== "FULFILLED";
+      });
+
+      const orderIds: string[] = Array.from(
+        new Set<string>(
+          active
+            .map((order: any): string =>
+              String(order?.id ?? "").trim()
+            )
+            .filter((id: string) => id.length > 0)
+        )
+      );
+
+      if (orderIds.length === 0) {
+        res.setHeader("Cache-Control", "no-store");
+        return res.json({ ok: true, orders: [] });
+      }
+
+      const [workflows, packResult] = await Promise.all([
+        getOrderFulfillmentWorkflows(orderIds),
+        db.query<{
+          shopify_order_id: string;
+          expected: number;
+          packed: number;
+          unavailable: number;
+        }>(
+          `
+          SELECT
+            shopify_order_id,
+            COALESCE(SUM(expected_quantity), 0)::int
+              AS expected,
+            COALESCE(SUM(packed_quantity), 0)::int
+              AS packed,
+            COALESCE(SUM(unavailable_quantity), 0)::int
+              AS unavailable
+          FROM order_pack_items
+          WHERE shopify_order_id = ANY($1::text[])
+          GROUP BY shopify_order_id
+          `,
+          [orderIds]
+        ),
+      ]);
+
+      const workflowsById = new Map(
+        workflows.map((workflow) => [
+          String(workflow.shopify_order_id),
+          workflow,
+        ])
+      );
+
+      const progressById = new Map(
+        packResult.rows.map((row) => [
+          String(row.shopify_order_id),
+          row,
+        ])
+      );
+
+      const orders = active.flatMap((order: any) => {
+        const orderId = String(order?.id ?? "").trim();
+
+        if (!orderId) return [];
+
+        const workflow = workflowsById.get(orderId) ?? null;
+
+        const status = getOperationalOrderStatus(
+          order,
+          workflow
+        );
+
+        if (
+          status === "COMPLETED" ||
+          status === "CANCELLED"
+        ) return [];
+
+        const progress = progressById.get(orderId);
+
+        const expected = Math.max(
+          0, Number(progress?.expected ?? 0)
+        );
+
+        const packed = Math.max(
+          0, Number(progress?.packed ?? 0)
+        );
+
+        const unavailable = Math.max(
+          0, Number(progress?.unavailable ?? 0)
+        );
+
+        const complete =
+          expected > 0 &&
+          packed + unavailable >= expected;
+
+        const percent = expected > 0
+          ? Math.min(
+              100,
+              Math.round(
+                100 * (packed + unavailable) / expected
+              )
+            )
+          : 0;
+
+        return [{
+          orderId,
+          expected,
+          packed,
+          unavailable,
+          percent,
+          status,
+          complete,
+        }];
+      });
+
+      res.setHeader("Cache-Control", "no-store");
+
+      return res.json({
+        ok: true,
+        orders,
+      });
+    } catch (error) {
+      console.error("ALO LIVE PACK ERROR", error);
+
+      return res.status(500).json({
+        ok: false,
+        error: "LIVE_PACK_UNAVAILABLE",
+      });
+    }
+  }
+);
+
 router.get(
   "/:orderId",
   requireStaffAuth,
