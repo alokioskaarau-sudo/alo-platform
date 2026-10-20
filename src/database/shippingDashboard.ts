@@ -294,6 +294,15 @@ export async function createPrintJob(
     );
   }
 
+  const invalidated = await db.query(
+    `SELECT 1 FROM shipping_label_address_invalidations
+     WHERE shopify_order_id = $1 LIMIT 1`,
+    [label.shopify_order_id]
+  );
+  if (invalidated.rows.length) {
+    throw new Error("SHIPPING_LABEL_INVALIDATED_REPLACE_REQUIRED");
+  }
+
   const existing =
     await db.query(
       `
@@ -825,6 +834,18 @@ export async function createManualReprintJob(
       );
     }
 
+    if (documentType === "SHIPPING_LABEL") {
+      const blocked = await client.query(
+        `SELECT 1 FROM shipping_label_address_invalidations inv
+         JOIN shipping_labels sl ON sl.shopify_order_id = inv.shopify_order_id
+         WHERE sl.id = $1 LIMIT 1`,
+        [documentId]
+      );
+      if (blocked.rows.length) {
+        throw new Error("SHIPPING_LABEL_INVALIDATED_REPLACE_REQUIRED");
+      }
+    }
+
     if (
       document.status !==
       "COMPLETED"
@@ -1146,6 +1167,14 @@ export async function claimNextPrintJob(
 
         WHERE
           pj.status = 'PENDING'
+
+          AND (
+            pj.document_type <> 'SHIPPING_LABEL'
+            OR NOT EXISTS (
+              SELECT 1 FROM shipping_label_address_invalidations inv
+              WHERE inv.shopify_order_id = sl.shopify_order_id
+            )
+          )
 
           AND pj.document_type = $2
 

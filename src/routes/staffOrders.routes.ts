@@ -1156,6 +1156,22 @@ router.patch("/:orderId/shipping-address", requireStaffAuth, async (req, res) =>
     if (body.countryCode && body.countryCode !== "CH") {
       return res.status(400).json({ ok: false, error: "ONLY_CH_SUPPORTED" });
     }
+    // Fail closed BEFORE changing Shopify: even an uncertain response must not allow old-label reprint.
+    if (existingLabel?.status === "COMPLETED") {
+      const busy = await db.query(
+        `SELECT id FROM print_jobs WHERE shipping_label_id=$1 AND document_type='SHIPPING_LABEL'
+         AND status IN ('PENDING','PRINTING') LIMIT 1`,
+        [existingLabel.id]
+      );
+      if (busy.rows.length) {
+        return res.status(409).json({ok:false,error:"ACTIVE_LABEL_PRINT_JOB_MUST_FINISH_FIRST"});
+      }
+      await db.query(
+        `INSERT INTO shipping_label_address_invalidations (shopify_order_id)
+         VALUES ($1) ON CONFLICT (shopify_order_id)
+         DO UPDATE SET invalidated_at=NOW()`, [current.id]
+      );
+    }
     const updated = await updateShopifyShippingAddress(orderId, {
       firstName: body.firstName.trim(), lastName: body.lastName.trim(),
       address1: body.address1.trim(),
@@ -2389,6 +2405,10 @@ router.post("/:orderId/replace-shipping-label", requireStaffAuth, async (req, re
         VALUES ($1,NULL,'SHIPPING_LABEL',NULL,'PENDING') RETURNING id`,[live.id]);
       await client.query(`UPDATE shipping_label_replacements SET status='QUEUED',new_ident_code=$2,
         finished_at=NOW() WHERE id=$1`,[replacementId,ident]);
+      await client.query(
+        `DELETE FROM shipping_label_address_invalidations WHERE shopify_order_id=$1`,
+        [order.id]
+      );
       await client.query('COMMIT');
       return res.json({ok:true,queued:true,orderId:order.id,replacementId,
         printJobId:job.rows[0].id,trackingNumber:ident,
@@ -2453,6 +2473,16 @@ router.post(
                 ? "PACKING_SLIP_NOT_AVAILABLE"
                 : "INVOICE_NOT_AVAILABLE",
         });
+      }
+
+      if (documentType === "SHIPPING_LABEL") {
+        const blocked = await db.query(
+          `SELECT 1 FROM shipping_label_address_invalidations WHERE shopify_order_id=$1 LIMIT 1`,
+          [orderId]
+        );
+        if (blocked.rows.length) {
+          return res.status(409).json({ok:false,error:"SHIPPING_LABEL_INVALIDATED_REPLACE_REQUIRED"});
+        }
       }
 
       const result =

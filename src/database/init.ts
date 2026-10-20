@@ -359,6 +359,14 @@ export async function initializeDatabase() {
   // PRINT JOBS
   // ==========================================================
 
+  // Block old shipping labels after any shipping-address edit, including failed Shopify updates.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS shipping_label_address_invalidations (
+      shopify_order_id TEXT PRIMARY KEY,
+      invalidated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   // ALO SHIPPING REPLACEMENT V1: append-only audit, strict one-shot per order.
   await db.query(`
     CREATE TABLE IF NOT EXISTS shipping_label_replacements (
