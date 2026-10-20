@@ -5,8 +5,10 @@ import {
   getShopifyOrderById,
   getShopifyOrdersByIds,
   getLatestShopifyOrders,
+  updateShopifyShippingAddress,
 } from "../integrations/shopify/orders.js";
 
+import { findShippingLabel } from "../database/shippingLabels.js";
 import {
   fulfillShopifyOrderWithSwissPostTracking,
 } from "../modules/shipping/fulfillment.service.js";
@@ -42,8 +44,15 @@ import {
 } from "../database/aloNowDeliveries.js";
 import {
   getOrderFulfillmentType,
+  getStaffOrderChannel,
 } from "../modules/orders/orderFulfillmentType.js";
 
+// ALO_PICKUP_CONFIRM_IMPORTS_V1
+import { fulfillShopifyPickupOrder } from "../modules/shipping/fulfillment.service.js";
+import { isPickupOrderFullyPacked } from "../database/orderPackItems.js";
+
+import { createSwissPostPreviewLabel } from "../integrations/swisspost/label.js";
+import { splitSwissStreetAddress } from "../modules/shipping/shopifyShipping.js";
 const router = Router();
 
 type OperationalOrderStatus =
@@ -74,8 +83,10 @@ function getOperationalOrderStatus(
     return "COMPLETED";
   }
 
+  // Ein lokaler Abschluss allein ist kein Shopify-Fulfillment.
+  // Der Auftrag bleibt sichtbar, bis Shopify FULFILLED bestaetigt.
   if (workflow?.pack_status === "COMPLETED") {
-    return "COMPLETED";
+    return "READY_TO_SHIP";
   }
 
   if (workflow) {
@@ -105,7 +116,7 @@ function getOperationalOrderStatus(
 router.get(
   "/",
   requireStaffAuth,
-  async (_req, res) => {
+  async (req, res) => {
     try {
       const staffUser =
         getStaffUser(res);
@@ -219,6 +230,14 @@ router.get(
              */
             return {
               ...(dashboard ?? {}),
+              // ALO_ORDER_CHANNEL_V1
+              order_channel:
+                getStaffOrderChannel(shopify),
+
+              fulfillment_type:
+                getStaffOrderChannel(shopify),
+
+
 
               shopify_order_id:
                 orderId,
@@ -347,10 +366,43 @@ router.get(
           return true;
         });
 
+      // ALO_ORDER_CHANNEL_FILTER_V1
+      // Kein Filter = bisherige API bleibt kompatibel.
+      // ALO_UNKNOWN_QUEUE_V1
+      const requestedChannel =
+        typeof req.query.channel === "string"
+          ? req.query.channel.trim().toUpperCase()
+          : "";
+
+      const allowedChannels = [
+        "",
+        "ALL",
+        "SHIPPING",
+        "ALO_NOW",
+        "PICKUP",
+          "UNKNOWN",
+      ];
+
+      if (!allowedChannels.includes(requestedChannel)) {
+        return res.status(400).json({
+          ok: false,
+          error: "INVALID_ORDER_CHANNEL",
+        });
+      }
+
+      const channelOrders =
+        !requestedChannel || requestedChannel === "ALL"
+          ? activeOrders
+          : activeOrders.filter(
+              (order: any) =>
+                order.order_channel === requestedChannel
+            );
+
+
       /*
        * Neueste zuerst.
        */
-      activeOrders.sort(
+      channelOrders.sort(
         (a: any, b: any) => {
           const aTime =
             new Date(
@@ -372,16 +424,16 @@ router.get(
 
       const stats = {
         total:
-          activeOrders.length,
+          channelOrders.length,
 
         current:
-          activeOrders.length,
+          channelOrders.length,
 
         completed:
           0,
 
         error:
-          activeOrders.filter(
+          channelOrders.filter(
             (order: any) =>
               String(
                 order.dashboard_status ||
@@ -396,7 +448,7 @@ router.get(
 
       console.log(
         "[STAFF ORDERS] ACTIVE SHOPIFY QUEUE",
-        activeOrders.map(
+        channelOrders.map(
           (order: any) => ({
             id:
               order.shopify_order_id,
@@ -427,7 +479,7 @@ router.get(
         stats,
 
         orders:
-          activeOrders,
+          channelOrders,
       });
     } catch (error) {
       console.error(
@@ -1079,6 +1131,52 @@ router.get(
     }
   }
 );
+
+// ALO_SHIPPING_ADDRESS_EDIT_V1
+router.patch("/:orderId/shipping-address", requireStaffAuth, async (req, res) => {
+  try {
+    const orderId = String(req.params.orderId || "").trim();
+    if (!/^(?:gid:\/\/shopify\/Order\/)?\d+$/.test(orderId)) {
+      return res.status(400).json({ ok: false, error: "INVALID_ORDER_ID" });
+    }
+    const current = await getShopifyOrderById(orderId);
+    if (!current || current.cancelledAt ||
+        String(current.displayFulfillmentStatus).toUpperCase() === "FULFILLED") {
+      return res.status(409).json({ ok: false, error: "ORDER_NOT_EDITABLE" });
+    }
+    // Versandlabel mit alter Adresse darf nach Aenderung nicht als korrekt gelten.
+    const existingLabel = await findShippingLabel(current.id, "LIVE");
+    const body = req.body ?? {};
+    const required = ["firstName", "lastName", "address1", "zip", "city"] as const;
+    for (const key of required) {
+      if (typeof body[key] !== "string" || !body[key].trim() || body[key].length > 160) {
+        return res.status(400).json({ ok: false, error: `INVALID_${key}` });
+      }
+    }
+    if (body.countryCode && body.countryCode !== "CH") {
+      return res.status(400).json({ ok: false, error: "ONLY_CH_SUPPORTED" });
+    }
+    const updated = await updateShopifyShippingAddress(orderId, {
+      firstName: body.firstName.trim(), lastName: body.lastName.trim(),
+      address1: body.address1.trim(),
+      address2: String(body.address2 ?? "").trim().slice(0, 160),
+      zip: body.zip.trim(), city: body.city.trim(), countryCode: "CH",
+    });
+    const verified = await getShopifyOrderById(orderId);
+    const actual = verified?.shippingAddress;
+    if (!actual || required.some(key => actual[key] !== String(body[key]).trim())) {
+      return res.status(502).json({ ok: false, error: "SHOPIFY_ADDRESS_VERIFY_FAILED" });
+    }
+    return res.json({
+      ok: true, shippingAddress: actual,
+      labelReplacementRequired: existingLabel?.status === "COMPLETED",
+      printBlockedUntilReplacement: existingLabel?.status === "COMPLETED",
+    });
+  } catch (error) {
+    console.error("STAFF SHIPPING ADDRESS UPDATE FAILED", error);
+    return res.status(502).json({ ok: false, error: "SHOPIFY_ADDRESS_UPDATE_FAILED" });
+  }
+});
 
 router.get(
   "/:orderId",
@@ -1911,24 +2009,27 @@ router.patch(
       }
 
       const readyToShipFulfillmentType =
-        getOrderFulfillmentType(
-          readyToShipShopifyOrder
-        );
+          getStaffOrderChannel(
+            readyToShipShopifyOrder
+          );
 
-      if (
-        readyToShipFulfillmentType ===
-        "ALO_NOW"
-      ) {
-        return res.status(409).json({
-          ok: false,
-          error:
-            "ALO_NOW_READY_TO_SHIP_NOT_ALLOWED",
-          fulfillmentType:
-            "ALO_NOW",
-          workflow,
-          retryable: false,
-        });
-      }
+        // ALO_SHIPPING_CHANNEL_GUARD_V1
+        // Nur echte Versandbestellungen dürfen
+        // Swiss-Post-Fulfillment auslösen.
+        if (
+          readyToShipFulfillmentType !== "SHIPPING" &&
+          readyToShipFulfillmentType !== "PICKUP"
+        ) {
+          return res.status(409).json({
+            ok: false,
+            error:
+              "ORDER_CHANNEL_NOT_SHIPPING",
+            orderChannel:
+              readyToShipFulfillmentType,
+            workflow,
+            retryable: false,
+          });
+        }
 
       if (
         workflow.pack_status !==
@@ -1959,6 +2060,21 @@ router.patch(
           ok: false,
           error:
             "ORDER_NOT_CLAIMED_BY_STAFF",
+        });
+      }
+
+      // ALO_PICKUP_READY_ONLY_V1
+      // Bereit zur Abholung, keine Uebergabe.
+      // Kein Shopify-Fulfillment ausloesen.
+      if (
+        readyToShipFulfillmentType === "PICKUP"
+      ) {
+        return res.json({
+          ok: true,
+          fulfillmentType: "PICKUP",
+          workflow,
+          pickupReady: true,
+          fulfilled: false,
         });
       }
 
@@ -2177,6 +2293,118 @@ router.patch(
   }
 );
 
+
+// ALO SHIPPING REPLACEMENT V1 – explicitly initiated by staff, NEVER by normal reprint.
+// Not a Swiss Post void/cancellation: the earlier identCode remains auditable.
+router.post("/:orderId/replace-shipping-label", requireStaffAuth, async (req, res) => {
+  const orderId = String(req.params.orderId || "").trim();
+  if (req.body?.confirmNewPostage !== true || req.body?.parcelStillAtKiosk !== true) {
+    return res.status(400).json({ok:false,error:"REPLACEMENT_REQUIRES_EXPLICIT_CONFIRMATION"});
+  }
+  try {
+    const order = await getShopifyOrderById(orderId);
+    if (!order || String(order.displayFinancialStatus).toUpperCase() !== "PAID" ||
+        String(order.displayFulfillmentStatus).toUpperCase() === "FULFILLED") {
+      return res.status(409).json({ok:false,error:"ORDER_NOT_ELIGIBLE"});
+    }
+    const a = order.shippingAddress;
+    if (!a?.firstName?.trim() || !a?.lastName?.trim() || !a?.address1?.trim() ||
+        !a?.zip?.trim() || !a?.city?.trim() || a?.countryCodeV2 !== "CH") {
+      return res.status(409).json({ok:false,error:"SHOPIFY_SHIPPING_ADDRESS_INCOMPLETE"});
+    }
+    const live = await findShippingLabel(order.id, "LIVE");
+    if (!live || live.status !== "COMPLETED" || !live.label_pdf_base64 ||
+        !live.swisspost_ident_code || !live.weight_grams || live.weight_grams <= 0) {
+      return res.status(409).json({ok:false,error:"ORIGINAL_LIVE_LABEL_MISSING"});
+    }
+    const busy = await db.query(
+      `SELECT id FROM print_jobs WHERE shipping_label_id=$1 AND document_type='SHIPPING_LABEL'
+       AND status IN ('PENDING','PRINTING') LIMIT 1`, [live.id]
+    );
+    if (busy.rows.length) return res.status(409).json({ok:false,error:"ORIGINAL_PRINT_JOB_STILL_ACTIVE"});
+    const addr1 = a.address1.trim();
+    const addr2 = String(a.address2 || "").trim();
+    const houseOnly = /^\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(addr2);
+    const existingHouse = /\s+\d+[A-Za-z]?(?:[-/]\d+[A-Za-z]?)?$/.test(addr1);
+    const {street,houseNumber} = splitSwissStreetAddress(
+      houseOnly && !existingHouse ? `${addr1} ${addr2}` : addr1
+    );
+    if (!street || !houseNumber) return res.status(409).json({ok:false,error:"STREET_NUMBER_NOT_RESOLVED"});
+    // Claim once BEFORE external API call. Do not auto-retry after unknown Post API outcome.
+    const claimed = await db.query(
+      `INSERT INTO shipping_label_replacements (shopify_order_id,shipping_label_id,old_label)
+       VALUES ($1,$2,$3::jsonb) ON CONFLICT (shopify_order_id) DO NOTHING RETURNING id`,
+      [order.id,live.id,JSON.stringify({identCode:live.swisspost_ident_code,
+       oldPdfBase64:live.label_pdf_base64,weightGrams:live.weight_grams,
+       originalStatus:live.status,originalUpdatedAt:live.updated_at})]
+    );
+    if (!claimed.rows.length) return res.status(409).json({ok:false,error:"REPLACEMENT_ALREADY_REQUESTED_CHECK_STATUS"});
+    const replacementId = claimed.rows[0].id;
+    // Unique itemId avoids accidentally requesting the same old postal item ID.
+    let result: any;
+    try {
+      result = await createSwissPostPreviewLabel({
+        itemId:`ALO-REPLACEMENT-${replacementId}`,
+        recipient:{name1:`${a.firstName.trim()} ${a.lastName.trim()}`,
+          street,houseNo:houseNumber,zip:a.zip.trim(),city:a.city.trim(),country:"CH"},
+        weightGrams:live.weight_grams,service:"ECO"
+      });
+    } catch(error:any) {
+      await db.query(`UPDATE shipping_label_replacements SET status='NEEDS_REVIEW',error_message=$2,
+        finished_at=NOW() WHERE id=$1`,[replacementId,"Swiss Post response uncertain; manual review required"]);
+      throw error;
+    }
+    const pdf = result?.item?.label?.[0];
+    const ident = result?.item?.identCode;
+    if (typeof pdf !== 'string' || !pdf.startsWith('JVBER') ||
+        typeof ident !== 'string' || !ident.trim() || ident === live.swisspost_ident_code) {
+      await db.query(`UPDATE shipping_label_replacements SET status='NEEDS_REVIEW',error_message=$2,
+        finished_at=NOW() WHERE id=$1`,[replacementId,'Swiss Post returned invalid or duplicate label']);
+      return res.status(502).json({ok:false,error:"POST_LABEL_RESPONSE_NEEDS_REVIEW"});
+    }
+    // Persist newly issued label before the second database transaction,
+    // so a failed queue step is recoverable without reissuing postage.
+    await db.query(`UPDATE shipping_label_replacements SET
+      status='ISSUED_PENDING_QUEUE', new_ident_code=$2,new_pdf_base64=$3
+      WHERE id=$1`,[replacementId,ident,pdf]);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const current = await client.query(
+        `SELECT id,status,swisspost_ident_code FROM shipping_labels WHERE id=$1 FOR UPDATE`,[live.id]
+      );
+      if (!current.rows[0] || current.rows[0].status !== 'COMPLETED' ||
+          current.rows[0].swisspost_ident_code !== live.swisspost_ident_code) {
+        throw new Error('ORIGINAL_LABEL_CHANGED_NEEDS_REVIEW');
+      }
+      const active = await client.query(
+        `SELECT id FROM print_jobs WHERE shipping_label_id=$1 AND status IN ('PENDING','PRINTING') LIMIT 1`,[live.id]
+      );
+      if (active.rows.length) throw new Error('PRINT_JOB_BECAME_ACTIVE_NEEDS_REVIEW');
+      await client.query(`UPDATE shipping_labels SET swisspost_ident_code=$2,tracking_number=$2,
+         label_pdf_base64=$3,print_status='QUEUED',print_count=0,printed_at=NULL,
+         updated_at=NOW() WHERE id=$1`,[live.id,ident,pdf]);
+      const job = await client.query(`INSERT INTO print_jobs
+        (shipping_label_id,packing_slip_id,document_type,printer_name,status)
+        VALUES ($1,NULL,'SHIPPING_LABEL',NULL,'PENDING') RETURNING id`,[live.id]);
+      await client.query(`UPDATE shipping_label_replacements SET status='QUEUED',new_ident_code=$2,
+        finished_at=NOW() WHERE id=$1`,[replacementId,ident]);
+      await client.query('COMMIT');
+      return res.json({ok:true,queued:true,orderId:order.id,replacementId,
+        printJobId:job.rows[0].id,trackingNumber:ident,
+        warning:'Original Swiss Post label was NOT automatically cancelled'});
+    } catch (error:any) {
+      await client.query('ROLLBACK');
+      await db.query(`UPDATE shipping_label_replacements SET status='NEEDS_REVIEW',
+        error_message=$2,finished_at=NOW() WHERE id=$1`,[replacementId,
+        String(error?.message || error).slice(0,500)]);
+      throw error;
+    } finally { client.release(); }
+  } catch (error:any) {
+    console.error('STAFF LABEL REPLACEMENT FAILED',String(error?.message || error));
+    return res.status(409).json({ok:false,error:String(error?.message || 'REPLACEMENT_FAILED')});
+  }
+});
 
 router.post(
   "/:orderId/reprint",

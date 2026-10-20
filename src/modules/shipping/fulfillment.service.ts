@@ -1,3 +1,4 @@
+import { validatePickupFulfillmentOrders } from "./pickupCore.js";
 import {
   getFulfillmentOrdersForOrder,
   createShopifyFulfillment,
@@ -346,5 +347,68 @@ export async function fulfillShopifyAloNowOrder(
           fulfillmentOrder.id
       ),
     fulfillments,
+  };
+}
+
+// ALO_PICKUP_FULFILLMENT_V1
+// Ausschliesslich vollstaendige PICKUP-Bestellungen.
+export async function fulfillShopifyPickupOrder(
+  order: ShopifyOrder,
+  dependencies: {
+    getFulfillmentOrdersForOrder: typeof getFulfillmentOrdersForOrder;
+    createShopifyLocalFulfillment: typeof createShopifyLocalFulfillment;
+  } = {
+    getFulfillmentOrdersForOrder,
+    createShopifyLocalFulfillment,
+  }
+) {
+  // ALO_PICKUP_RETRY_CHANNEL_GUARD_V1
+  const data = await dependencies.getFulfillmentOrdersForOrder(order.id);
+
+  if (data?.fulfillmentOrders?.pageInfo?.hasNextPage !== false) {
+    throw new Error("PICKUP_FULFILLMENT_LIST_INCOMPLETE");
+  }
+
+  const items = data?.fulfillmentOrders?.nodes ?? [];
+
+  if (items.length === 0) {
+    throw new Error("PICKUP_NO_FULFILLMENT_ORDERS");
+  }
+
+  validatePickupFulfillmentOrders(items);
+
+  const results = [];
+
+  for (const item of items) {
+    const remaining = (item.lineItems?.nodes ?? [])
+      .reduce(
+        (sum: number, line: any) =>
+          sum + Number(line.remainingQuantity ?? 0),
+        0
+      );
+
+    if (remaining <= 0) continue;
+
+    if (
+      item.status !== "OPEN" &&
+      item.status !== "IN_PROGRESS"
+    ) {
+      throw new Error("PICKUP_FULFILLMENT_NOT_OPEN");
+    }
+
+    const fulfillment = await dependencies.createShopifyLocalFulfillment({
+      fulfillmentOrderId: item.id,
+      notifyCustomer: false,
+    });
+
+    results.push({
+      fulfillmentOrderId: item.id,
+      fulfillment,
+    });
+  }
+
+  return {
+    alreadyFulfilled: results.length === 0,
+    fulfillments: results,
   };
 }

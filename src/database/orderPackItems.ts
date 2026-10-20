@@ -824,3 +824,30 @@ export async function markInventoryZeroSyncFailed(
 
   return result.rows[0] ?? null;
 }
+
+export async function isPickupOrderFullyPacked(
+  shopifyOrderId: string
+): Promise<boolean> {
+  const result = await db.query<{
+    total_items: string;
+    incomplete_items: string;
+  }>(
+    `
+      SELECT
+        COUNT(*)::text AS total_items,
+        COUNT(*) FILTER (
+          WHERE
+            packed_quantity <> expected_quantity
+            OR unavailable_quantity <> 0
+        )::text AS incomplete_items
+      FROM order_pack_items
+      WHERE shopify_order_id = $1
+    `,
+    [shopifyOrderId]
+  );
+
+  return (
+    Number(result.rows[0]?.total_items ?? 0) > 0 &&
+    Number(result.rows[0]?.incomplete_items ?? 0) === 0
+  );
+}

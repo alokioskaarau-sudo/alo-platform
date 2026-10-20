@@ -2,6 +2,69 @@ import { db } from "./db.js";
 import { ensureStaffSchedulingTables } from "./staffScheduling.js";
 
 export async function initializeDatabase() {
+  // ALO_NOW_CUSTOMER_STATUS_V5: only SHA-256 hash stored, never raw token.
+  // Applied after CREATE TABLE below because older installs already have the table.
+  // ALO_NOW_ORDER_REQUESTS_V1
+  // Unverbindliche Anfragen. Keine Shopify Order, keine Zahlung, keine Fahrer-Dispatch.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS alo_now_order_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_request_id TEXT NOT NULL UNIQUE,
+      workspace TEXT NOT NULL CHECK (workspace IN ('AARAU','OLTEN')),
+      delivery_address TEXT NOT NULL,
+      items JSONB NOT NULL,
+      quote_status TEXT NOT NULL CHECK (quote_status IN ('STANDARD','MANUAL_APPROVAL')),
+      road_distance_km NUMERIC(9,2) NOT NULL CHECK (road_distance_km >= 0),
+      quoted_delivery_fee_chf NUMERIC(9,2),
+      status TEXT NOT NULL DEFAULT 'PENDING_REVIEW'
+        CHECK (status IN ('PENDING_REVIEW','CONTACTED','REJECTED')),
+      reviewed_by TEXT,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS alo_now_order_requests_pending_idx
+    ON alo_now_order_requests (status, created_at DESC);
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD COLUMN IF NOT EXISTS customer_status_token_hash TEXT;
+  `);
+
+  // ALO_NOW_SHOPIFY_CART_GUARD_V1: verified snapshot, not a payment commitment.
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD COLUMN IF NOT EXISTS verified_subtotal_chf NUMERIC(12,2),
+      ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+  `);
+
+  // ALO_NOW_DRIVER_PREACCEPT_V2: reservation only, NOT an accepted paid order.
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD COLUMN IF NOT EXISTS offered_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS driver_user_id TEXT,
+      ADD COLUMN IF NOT EXISTS driver_accepted_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS reservation_expires_at TIMESTAMPTZ;
+  `);
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      DROP CONSTRAINT IF EXISTS alo_now_order_requests_status_check;
+  `);
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD CONSTRAINT alo_now_order_requests_status_check CHECK
+      (status IN ('PENDING_REVIEW','CONTACTED','REJECTED','DRIVER_OFFERED','DRIVER_ACCEPTED'));
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS alo_now_order_requests_driver_offers_idx
+      ON alo_now_order_requests (workspace, created_at DESC)
+      WHERE status = 'DRIVER_OFFERED';
+  `);
+
+
   // ==========================================================
   // SHIPPING LABELS
   // ==========================================================
@@ -295,6 +358,22 @@ export async function initializeDatabase() {
   // ==========================================================
   // PRINT JOBS
   // ==========================================================
+
+  // ALO SHIPPING REPLACEMENT V1: append-only audit, strict one-shot per order.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS shipping_label_replacements (
+      id BIGSERIAL PRIMARY KEY,
+      shopify_order_id TEXT NOT NULL UNIQUE,
+      shipping_label_id BIGINT NOT NULL REFERENCES shipping_labels(id),
+      status TEXT NOT NULL DEFAULT 'PREPARING',
+      old_label JSONB NOT NULL,
+      new_ident_code TEXT,
+      new_pdf_base64 TEXT,
+      error_message TEXT,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ
+    );
+  `);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS print_jobs (
@@ -1094,6 +1173,18 @@ export async function initializeDatabase() {
         NOT NULL
         DEFAULT NOW()
     );
+  `);
+
+
+  // ALO_NOW_DRIVER_PROFILE_MIGRATION_V11
+  // Existing tables receive missing driver capacity fields.
+  await db.query(`
+    ALTER TABLE alo_driver_profiles
+      ADD COLUMN IF NOT EXISTS transport_type TEXT,
+      ADD COLUMN IF NOT EXISTS approved_for_age_restricted
+        BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS max_active_deliveries
+        INTEGER NOT NULL DEFAULT 3;
   `);
 
   await db.query(`

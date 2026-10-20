@@ -92,6 +92,7 @@ const ORDER_FIELDS = `
   }
 
   fulfillmentOrders(first: 20) {
+    pageInfo { hasNextPage }
     edges {
       node {
         id
@@ -450,4 +451,53 @@ export async function getShopifyOrderById(
     );
 
   return data?.order ?? null;
+}
+
+
+// ALO_SHIPPING_ADDRESS_EDIT_V1
+// Aendert ausschliesslich die Lieferadresse einer vorhandenen Bestellung.
+export type AloShippingAddressInput = {
+  firstName: string;
+  lastName: string;
+  address1: string;
+  address2?: string;
+  zip: string;
+  city: string;
+  countryCode?: "CH";
+};
+
+export async function updateShopifyShippingAddress(
+  orderId: string,
+  address: AloShippingAddressInput
+) {
+  const id = orderId.startsWith("gid://shopify/Order/")
+    ? orderId : `gid://shopify/Order/${orderId}`;
+  const mutation = `
+    mutation AloUpdateShippingAddress($input: OrderInput!) {
+      orderUpdate(input: $input) {
+        order { id shippingAddress { firstName lastName address1 address2 zip city countryCodeV2 } }
+        userErrors { field message }
+      }
+    }
+  `;
+  const result = await shopifyGraphQL(mutation, {
+    input: {
+      id,
+      shippingAddress: {
+        firstName: address.firstName,
+        lastName: address.lastName,
+        address1: address.address1,
+        address2: address.address2 || "",
+        zip: address.zip,
+        city: address.city,
+        countryCode: "CH",
+      },
+    },
+  });
+  const payload = result?.orderUpdate;
+  if (!payload || payload.userErrors?.length) {
+    throw new Error("SHOPIFY_ADDRESS_UPDATE_FAILED: " +
+      JSON.stringify(payload?.userErrors ?? []));
+  }
+  return payload.order;
 }
