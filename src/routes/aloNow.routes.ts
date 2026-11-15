@@ -1553,7 +1553,13 @@ aloNowRouter.post(
 // V128: GPS AND ROUTE BRIDGE
 aloNowRouter.use(aloNowGpsRouter);
 
-aloNowRouter.use("/test-tour-bridge", aloNowRouteBridgeRouter);
+// V136: Test routing is disabled unless explicitly enabled.
+if (
+  process.env.NODE_ENV !== "production" &&
+  process.env.ALO_NOW_TEST_BRIDGE_ENABLED === "true"
+) {
+  aloNowRouter.use("/test-tour-bridge", aloNowRouteBridgeRouter);
+}
 
 
 /**
