@@ -77,6 +77,10 @@ export function buildTipCheckoutV170(
         draftOrder {
           id
           invoiceUrl
+          customAttributes {
+            key
+            value
+          }
           totalPriceSet {
             shopMoney {
               amount

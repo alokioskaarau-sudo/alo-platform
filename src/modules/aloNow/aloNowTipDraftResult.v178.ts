@@ -64,6 +64,88 @@ export type TipDraftVerifiedV178 =
       reason: string;
     };
 
+/**
+ * The Shopify response must confirm all four
+ * checkout identity attributes.
+ *
+ * Duplicate or missing attributes fail closed.
+ * The response must originate from trusted Shopify
+ * server-side transport, not a browser request.
+ */
+function matchesTipDraftAttributesV182(
+  response: unknown,
+  requestId: string,
+  checkoutReference: string,
+  originalOrderId: string
+): boolean {
+  if (
+    response === null ||
+    typeof response !== "object"
+  ) return false;
+
+  const root = response as Record<string, unknown>;
+
+  const data =
+    root.data && typeof root.data === "object"
+      ? root.data as Record<string, unknown>
+      : root;
+
+  const mutation = data.draftOrderCreate;
+
+  if (
+    mutation === null ||
+    typeof mutation !== "object"
+  ) return false;
+
+  const draft = (
+    mutation as Record<string, unknown>
+  ).draftOrder;
+
+  if (
+    draft === null ||
+    typeof draft !== "object"
+  ) return false;
+
+  const attributes = (
+    draft as Record<string, unknown>
+  ).customAttributes;
+
+  if (
+    !Array.isArray(attributes) ||
+    attributes.length !== 4
+  ) return false;
+
+  const values = new Map<string, string>();
+
+  for (const attribute of attributes) {
+    if (
+      attribute === null ||
+      typeof attribute !== "object"
+    ) return false;
+
+    const item = attribute as Record<string, unknown>;
+
+    if (
+      typeof item.key !== "string" ||
+      typeof item.value !== "string" ||
+      values.has(item.key)
+    ) return false;
+
+    values.set(item.key, item.value);
+  }
+
+  return (
+    values.get("alo_now_tip_purpose") ===
+      "POST_DELIVERY_TIP" &&
+    values.get("alo_now_request_id") ===
+      requestId &&
+    values.get("alo_now_original_order_id") ===
+      originalOrderId &&
+    values.get("alo_now_tip_checkout_reference") ===
+      checkoutReference
+  );
+}
+
 export function verifyTipDraftResultV178(
   requestId: string,
   checkoutReference: string,
@@ -131,6 +213,20 @@ export function verifyTipDraftResultV178(
     return {
       ok: false,
       reason: "SHOPIFY_DRAFT_ID_INVALID"
+    };
+  }
+
+  if (
+    !matchesTipDraftAttributesV182(
+      shopifyResponse,
+      requestId,
+      checkoutReference,
+      record.original_shopify_order_id
+    )
+  ) {
+    return {
+      ok: false,
+      reason: "SHOPIFY_DRAFT_IDENTITY_MISMATCH"
     };
   }
 
