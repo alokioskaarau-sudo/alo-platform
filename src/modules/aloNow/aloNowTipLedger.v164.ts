@@ -91,6 +91,28 @@ export async function recordVerifiedTipV164(
     await client.query("BEGIN");
     transactionOpen = true;
 
+    // V165: refuse writes unless PostgreSQL enforces
+    // global capture-source uniqueness.
+    const sourceIndex = await client.query<{
+      ready: boolean;
+    }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = 'alo_now_driver_finance_events'
+           AND indexname = 'alo_now_tip_source_unique_v165'
+           AND indexdef ILIKE '%UNIQUE INDEX%'
+           AND indexdef ILIKE '%(source_reference)%'
+           AND indexdef ILIKE '%ONLINE_TIP_EARNED%'
+       ) AS ready`
+    );
+
+    if (sourceIndex.rows[0]?.ready !== true) {
+      await client.query("ROLLBACK");
+      transactionOpen = false;
+      return "BLOCKED";
+    }
+
     const linked = await client.query<{
       workspace: string;
       phase: string;
