@@ -7,11 +7,16 @@
  * Never retry an uncertain Shopify draft automatically.
  */
 
+import {
+  evaluateTipEligibilityV171
+} from "./aloNowTipEligibility.v171.js";
+
 export type TipDraftClaimRowV175 = {
   checkout_reference: string;
   original_shopify_order_id: string;
   amount_rappen: string;
   currency: string;
+  taxable: boolean;
   status: string;
   draft_order_id: string | null;
 };
@@ -27,6 +32,7 @@ export type TipDraftClaimResultV175 =
       checkoutReference: string;
       originalOrderId: string;
       amountRappen: number;
+      taxable: boolean;
     }
   | { ok: false; reason: string };
 
@@ -169,12 +175,82 @@ export async function claimTipDraftCreationV175(
       };
     }
 
+    // Re-read payment and delivery under transaction locks.
+    // An old checkout reservation is not current delivery
+    // authorization.
+    const payments = await client.query<{
+      shopify_order_id: string | null;
+      phase: string;
+      payment_method: string | null;
+    }>(
+      `SELECT shopify_order_id,phase,payment_method
+       FROM alo_now_payment_states
+       WHERE request_id=$1::uuid
+       FOR UPDATE`,
+      [requestId]
+    );
+
+    if (payments.rows.length !== 1) {
+      return {
+        ok: false,
+        reason: "PAYMENT_BINDING_NOT_UNIQUE"
+      };
+    }
+
+    const payment = payments.rows[0];
+
+    if (
+      payment.phase !== "PAYMENT_CONFIRMED" ||
+      payment.payment_method !== "ONLINE" ||
+      !payment.shopify_order_id
+    ) {
+      return {
+        ok: false,
+        reason: "ORIGINAL_PAYMENT_NOT_CONFIRMED"
+      };
+    }
+
+    const deliveries = await client.query<{
+      shopify_order_id: string;
+      delivery_status: string;
+      assigned_driver_user_id: string | null;
+    }>(
+      `SELECT
+         shopify_order_id,
+         delivery_status,
+         assigned_driver_user_id::text
+           AS assigned_driver_user_id
+       FROM alo_now_deliveries
+       WHERE shopify_order_id=$1
+       FOR UPDATE`,
+      [payment.shopify_order_id]
+    );
+
+    const eligibility = evaluateTipEligibilityV171(
+      requestId,
+      deliveries.rows.map(row => ({
+        request_id: requestId,
+        shopify_order_id: row.shopify_order_id,
+        payment_phase: payment.phase,
+        delivery_status: row.delivery_status,
+        driver_user_id: row.assigned_driver_user_id
+      }))
+    );
+
+    if (!eligibility.eligible) {
+      return {
+        ok: false,
+        reason: eligibility.reason
+      };
+    }
+
     const intent = await client.query<TipDraftClaimRowV175>(
       `SELECT
          checkout_reference::text,
          original_shopify_order_id,
          amount_rappen::text,
          currency,
+         taxable,
          status,
          draft_order_id
        FROM alo_now_tip_checkout_intents_v171
@@ -192,6 +268,23 @@ export async function claimTipDraftCreationV175(
 
     const row = intent.rows[0];
 
+    if (
+      row.original_shopify_order_id !==
+      eligibility.originalOrderId
+    ) {
+      return {
+        ok: false,
+        reason: "ORIGINAL_ORDER_BINDING_CHANGED"
+      };
+    }
+
+    if (typeof row.taxable !== "boolean") {
+      return {
+        ok: false,
+        reason: "TIP_TAX_POLICY_INVALID"
+      };
+    }
+
     // Persist uncertainty BEFORE any future Shopify
     // mutation. Do not make the external call here.
     const updated = await client.query(
@@ -203,13 +296,15 @@ export async function claimTipDraftCreationV175(
          AND original_shopify_order_id=$3
          AND amount_rappen=$4::bigint
          AND currency='CHF'
+         AND taxable=$5
          AND status='RESERVED'
          AND draft_order_id IS NULL`,
       [
         requestId,
         checkoutReference,
         row.original_shopify_order_id,
-        row.amount_rappen
+        row.amount_rappen,
+        row.taxable
       ]
     );
 
@@ -228,7 +323,8 @@ export async function claimTipDraftCreationV175(
       action: "CLAIMED",
       checkoutReference,
       originalOrderId: row.original_shopify_order_id,
-      amountRappen: Number(row.amount_rappen)
+      amountRappen: Number(row.amount_rappen),
+      taxable: row.taxable
     };
   } catch {
     return {
