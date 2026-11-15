@@ -28,7 +28,8 @@ export function buildAloNowCustomerTimeline(
   fulfillment: {
     packStatus?: string | null;
     deliveryStatus?: string | null;
-  } = {}
+  } = {},
+  gpsPositionAvailable = false
 ) {
   const validCreatedAt =
     createdAt instanceof Date &&
@@ -140,7 +141,10 @@ export function buildAloNowCustomerTimeline(
     deliveredConfirmed,
     packStatus: paymentConfirmed ? packStatus : null,
     deliveryStatus: paymentConfirmed ? deliveryStatus : null,
-    gpsAvailable: false,
+    gpsAvailable:
+      paymentConfirmed &&
+      deliveryStatus === "ON_THE_WAY" &&
+      gpsPositionAvailable,
     tipCheckoutAvailable: false
   };
 }

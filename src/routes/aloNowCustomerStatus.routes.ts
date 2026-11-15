@@ -136,8 +136,51 @@ aloNowCustomerStatusRouter.get(
         deliveryStatus = delivery?.delivery_status ?? null;
       }
 
+      // Optional, fail-closed customer GPS.
+      // No GPS is queried before customer-token validation.
+      let gpsPosition: {
+        latitude: number;
+        longitude: number;
+        accuracyMeters: number;
+        updatedAt: string;
+      } | null = null;
+
+      if (
+        process.env.ALO_NOW_CUSTOMER_GPS_ENABLED === "true" &&
+        process.env.ALO_NOW_CUSTOMER_PAYMENT_TIMELINE_ENABLED
+          === "true" &&
+        process.env.ALO_NOW_CUSTOMER_FULFILLMENT_TIMELINE_ENABLED
+          === "true" &&
+        process.env.ALO_NOW_GPS_INGEST_ENABLED === "true" &&
+        process.env.ALO_NOW_GPS_CLEANUP_ENABLED === "true" &&
+        paymentConfirmed &&
+        deliveryStatus === "ON_THE_WAY" &&
+        shopifyOrderId
+      ) {
+        try {
+          const { readAloNowCustomerGps } = await import(
+            "../modules/aloNow/aloNowCustomerGps.js"
+          );
+
+          gpsPosition = await readAloNowCustomerGps(
+            requestId,
+            shopifyOrderId
+          );
+        } catch (gpsError) {
+          console.error(
+            "ALO NOW CUSTOMER GPS UNAVAILABLE",
+            gpsError instanceof Error
+              ? gpsError.name
+              : "UNKNOWN"
+          );
+
+          gpsPosition = null;
+        }
+      }
+
       return res.status(200).json({
         ok: true,
+        gps: gpsPosition,
         requestId: row.id,
         status: row.status,
         createdAt: row.created_at,
@@ -147,7 +190,8 @@ aloNowCustomerStatusRouter.get(
           new Date(row.created_at),
           new Date(),
           paymentPhase,
-          { packStatus, deliveryStatus }
+          { packStatus, deliveryStatus },
+          gpsPosition !== null
         )
       });
 
