@@ -907,3 +907,71 @@ export async function findAloNowTipDraftByReferenceV191(
 
   return { status: "INCOMPLETE" };
 }
+
+/**
+ * ALO NOW V192
+ *
+ * Authenticated Shopify draft creation transport.
+ *
+ * SECURITY:
+ * - Disabled until explicitly approved in code.
+ * - No customer HTTP route.
+ * - Must be invoked only after a committed V175 claim.
+ * - Never automatically retry uncertain responses.
+ *
+ * The caller must verify and persist the result.
+ */
+const ALO_TIP_DRAFT_LIVE_WRITES_V192 = false;
+
+export async function createAloNowTipDraftV192(
+  request: {
+    query: string;
+    variables: {
+      input: Record<string, unknown>;
+    };
+  }
+): Promise<unknown> {
+  if (!ALO_TIP_DRAFT_LIVE_WRITES_V192) {
+    return {
+      ok: false,
+      reason: "SHOPIFY_TIP_DRAFT_WRITES_DISABLED"
+    };
+  }
+
+  if (
+    !request ||
+    typeof request.query !== "string" ||
+    !request.query.includes(
+      "mutation AloNowCreateTipDraftV170"
+    ) ||
+    !request.query.includes(
+      "draftOrderCreate(input: $input)"
+    )
+  ) {
+    throw new Error("TIP_MUTATION_NOT_ALLOWED");
+  }
+
+  const input = request.variables?.input;
+
+  if (
+    !input ||
+    input.presentmentCurrencyCode !== "CHF" ||
+    input.allowDiscountCodesInCheckout !== false ||
+    input.acceptAutomaticDiscounts !== false ||
+    !Array.isArray(input.lineItems) ||
+    input.lineItems.length !== 1 ||
+    !Array.isArray(input.customAttributes) ||
+    input.customAttributes.length !== 4
+  ) {
+    throw new Error("TIP_DRAFT_INPUT_INVALID");
+  }
+
+  // Existing server-side Shopify authentication.
+  // Never retry this mutation automatically.
+  const data = await shopifyGraphQL(
+    request.query,
+    request.variables
+  );
+
+  return { data };
+}
