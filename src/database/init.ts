@@ -1,3 +1,4 @@
+import { ensureAloNowGpsSchema } from "./aloNowGpsSchema.js";
 import { db } from "./db.js";
 import { ensureStaffSchedulingTables } from "./staffScheduling.js";
 
@@ -2339,6 +2340,8 @@ console.log(
     );
   `);
 
+
+  await ensureAloNowGpsSchema();
 }
 
 
