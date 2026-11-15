@@ -518,3 +518,49 @@ const ALO_NOW_ALLOWED_PROVENANCE_QUERY = `
     }
   }
 `;
+
+// ALO NOW V169 - read-only Shopify tip-order payment evidence.
+// Uses the existing authenticated Shopify Admin GraphQL client.
+// A paid order alone does NOT authorize a driver-wallet credit.
+export async function getAloNowTipOrderTransactionsV169(
+  orderId: string
+): Promise<unknown> {
+  if (!/^gid:\/\/shopify\/Order\/[1-9][0-9]*$/.test(orderId)) {
+    throw new Error("INVALID_SHOPIFY_TIP_ORDER_ID");
+  }
+
+  const query = `
+    query AloNowTipOrderTransactionsV169($id: ID!) {
+      order(id: $id) {
+        id
+        test
+        cancelledAt
+        displayFinancialStatus
+        totalPriceSet {
+          shopMoney { amount currencyCode }
+        }
+        totalReceivedSet {
+          shopMoney { amount currencyCode }
+        }
+        totalRefundedSet {
+          shopMoney { amount currencyCode }
+        }
+        transactions {
+          id
+          kind
+          status
+          manualPaymentGateway
+          amountSet {
+            shopMoney { amount currencyCode }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await shopifyGraphQL(query, {
+    id: orderId
+  });
+
+  return response?.order ?? null;
+}
