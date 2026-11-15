@@ -1,3 +1,5 @@
+import aloNowGpsRouter from "./aloNowGps.routes.js";
+import { aloNowRouteBridgeRouter } from "./aloNowRouteBridge.routes.js";
 import { heartbeatAloNowDriver } from "../database/aloNowDrivers.js";
 import { getAloNowDelivery } from "../database/aloNowDeliveries.js";
 import { getVerifiedAloNowQuote } from "../modules/aloNow/aloNowVerifiedRouting.service.js";
@@ -1545,3 +1547,9 @@ aloNowRouter.post(
     }
   }
 );
+
+
+// V128: GPS AND ROUTE BRIDGE
+aloNowRouter.use(aloNowGpsRouter);
+
+aloNowRouter.use("/test-tour-bridge", aloNowRouteBridgeRouter);

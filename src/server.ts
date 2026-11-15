@@ -1,3 +1,4 @@
+import { startAloNowGpsCleanupScheduler } from "./modules/aloNow/aloNowGpsScheduler.service.js";
 import express from "express";
 
 import { env } from "./config/env.js";
@@ -1342,6 +1343,8 @@ async function startServer() {
     // --------------------------------------------------------
 
     await initializeDatabase();
+    // V129: START GPS RETENTION AFTER DATABASE INIT
+    startAloNowGpsCleanupScheduler();
     startCalendarReminderWorker();
 
     console.log(
