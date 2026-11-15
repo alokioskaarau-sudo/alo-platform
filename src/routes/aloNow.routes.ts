@@ -1,3 +1,4 @@
+import { aloNowFinanceV962Router } from "./aloNowFinanceV962.routes.js";
 import aloNowGpsRouter from "./aloNowGps.routes.js";
 import { aloNowRouteBridgeRouter } from "./aloNowRouteBridge.routes.js";
 import { heartbeatAloNowDriver } from "../database/aloNowDrivers.js";
@@ -1553,3 +1554,13 @@ aloNowRouter.post(
 aloNowRouter.use(aloNowGpsRouter);
 
 aloNowRouter.use("/test-tour-bridge", aloNowRouteBridgeRouter);
+
+
+/**
+ * V133 - Finance routes remain OFF by default.
+ * Do not enable before authorization,
+ * payment and database integration tests.
+ */
+if (process.env.ALO_NOW_FINANCE_ROUTER_ENABLED === "true") {
+  aloNowRouter.use(aloNowFinanceV962Router);
+}
