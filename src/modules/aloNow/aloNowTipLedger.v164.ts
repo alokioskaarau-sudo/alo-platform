@@ -46,7 +46,7 @@ export function matchesVerifiedTipCaptureV164(
     evidence.provider === "SHOPIFY" &&
     evidence.purpose === "POST_DELIVERY_TIP" &&
     evidence.status === "CAPTURED" &&
-    evidence.orderId === decision.orderId &&
+    evidence.orderId === decision.tipOrderId &&
     evidence.currency === "CHF" &&
     evidence.amountRappen === decision.amountRappen &&
     Number.isSafeInteger(evidence.amountRappen) &&
@@ -132,9 +132,25 @@ export async function recordVerifiedTipV164(
          ON r.id = p.request_id
        JOIN alo_now_deliveries d
          ON d.shopify_order_id = p.shopify_order_id
+       JOIN alo_now_tip_order_links t
+         ON t.request_id = r.id
+        AND t.original_shopify_order_id = p.shopify_order_id
        WHERE p.shopify_order_id = $1
-       FOR UPDATE OF p, r, d`,
-      [decision.orderId]
+         AND t.tip_shopify_order_id = $2
+         AND t.expected_amount_rappen = $3
+         AND t.currency = 'CHF'
+         AND t.status IN ('PENDING','VERIFIED')
+         AND (
+           t.verified_capture_reference IS NULL
+           OR t.verified_capture_reference = $4
+         )
+       FOR UPDATE OF p, r, d, t`,
+      [
+        decision.orderId,
+        decision.tipOrderId,
+        decision.amountRappen,
+        decision.sourceReference
+      ]
     );
 
     if (linked.rows.length !== 1) {

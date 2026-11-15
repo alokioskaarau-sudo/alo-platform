@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 export type TipCreditInputV163 = {
   orderId: string;
   requestOrderId: string;
+  tipOrderId: string;
   delivered: boolean;
 
   assignedDriverUserId: string;
@@ -42,6 +43,7 @@ export type TipCreditDecisionV163 =
       eventType: "ONLINE_TIP_EARNED";
       eventKey: string;
       orderId: string;
+      tipOrderId: string;
       driverUserId: string;
       workspace: "AARAU" | "OLTEN";
       amountRappen: number;
@@ -62,8 +64,10 @@ export function decideTipCreditV163(
 ): TipCreditDecisionV163 {
   if (
     !orderRef.test(input.orderId) ||
+    !orderRef.test(input.tipOrderId) ||
     input.orderId !== input.requestOrderId ||
-    input.orderId !== input.captureOrderId
+    input.tipOrderId === input.orderId ||
+    input.tipOrderId !== input.captureOrderId
   ) {
     return blocked("ORDER_BINDING_FAILED");
   }
@@ -128,6 +132,7 @@ export function decideTipCreditV163(
     eventType: "ONLINE_TIP_EARNED",
     eventKey: `alo-now-tip:${digest}`,
     orderId: input.orderId,
+    tipOrderId: input.tipOrderId,
     driverUserId: input.assignedDriverUserId,
     workspace: input.workspace,
     amountRappen: input.amountRappen,
