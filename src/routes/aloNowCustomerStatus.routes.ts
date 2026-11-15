@@ -1,3 +1,4 @@
+import { buildAloNowCustomerTimeline } from "../modules/aloNow/aloNowCustomerTimeline.js";
 
 import { Router } from "express";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -80,7 +81,11 @@ aloNowCustomerStatusRouter.get(
         requestId: row.id,
         status: row.status,
         createdAt: row.created_at,
-        updatedAt: row.updated_at
+        updatedAt: row.updated_at,
+        timeline: buildAloNowCustomerTimeline(
+          row.status,
+          new Date(row.created_at)
+        )
       });
 
     } catch (error) {
