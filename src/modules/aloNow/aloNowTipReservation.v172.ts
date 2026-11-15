@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  decideTipReservationConflictV173
+} from "./aloNowTipReservationConflict.v173.js";
+
+import type {
+  ExistingTipIntentV173
+} from "./aloNowTipReservationConflict.v173.js";
+
+import {
   evaluateTipEligibilityV171
 } from "./aloNowTipEligibility.v171.js";
 
@@ -220,14 +228,45 @@ export async function reserveTipCheckoutV172(
     );
 
     if (inserted.rowCount !== 1) {
-      // A previous reservation is not permission to
-      // create or repeat a Shopify draft.
+      // Do not interpret an arbitrary unique-key
+      // conflict as the same checkout attempt.
+      const previous =
+        await client.query<ExistingTipIntentV173>(
+          `SELECT
+             original_shopify_order_id,
+             amount_rappen::text AS amount_rappen,
+             taxable,
+             status,
+             draft_order_id
+           FROM alo_now_tip_checkout_intents_v171
+           WHERE request_id=$1::uuid
+           FOR UPDATE`,
+          [input.requestId]
+        );
+
+      const decision =
+        decideTipReservationConflictV173(
+          previous.rows,
+          {
+            originalOrderId:
+              eligibility.originalOrderId,
+            amountRappen: input.amountRappen,
+            taxable: input.taxable
+          }
+        );
+
+      if (!decision.ok) {
+        return decision;
+      }
+
+      // The same reservation already exists.
+      // Never create another Shopify draft here.
       await client.query("COMMIT");
       active = false;
 
       return {
         ok: true,
-        action: "ALREADY_RESERVED"
+        action: decision.action
       };
     }
 
