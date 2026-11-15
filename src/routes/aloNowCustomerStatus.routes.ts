@@ -80,6 +80,7 @@ aloNowCustomerStatusRouter.get(
       // Read payment state only for the authenticated request.
       // Disabled until the production schema is approved.
       let paymentPhase: string | null = null;
+      let shopifyOrderId: string | null = null;
 
       if (
         process.env.ALO_NOW_CUSTOMER_PAYMENT_TIMELINE_ENABLED ===
@@ -87,8 +88,9 @@ aloNowCustomerStatusRouter.get(
       ) {
         const payment = await db.query<{
           phase: string | null;
+          shopify_order_id: string | null;
         }>(
-          `SELECT phase
+          `SELECT phase, shopify_order_id
            FROM alo_now_payment_states
            WHERE request_id = $1::uuid
            ORDER BY version DESC
@@ -97,6 +99,41 @@ aloNowCustomerStatusRouter.get(
         );
 
         paymentPhase = payment.rows[0]?.phase ?? null;
+        shopifyOrderId =
+          payment.rows[0]?.shopify_order_id ?? null;
+      }
+
+      // Read only the Shopify order linked to this token-owned
+      // request and its verified payment state.
+      let packStatus: string | null = null;
+      let deliveryStatus: string | null = null;
+
+      const paymentConfirmed =
+        paymentPhase === "PAYMENT_CONFIRMED" ||
+        paymentPhase === "CASH_CONFIRMED";
+
+      if (
+        process.env.ALO_NOW_CUSTOMER_FULFILLMENT_TIMELINE_ENABLED
+          === "true" &&
+        paymentConfirmed &&
+        typeof shopifyOrderId === "string" &&
+        shopifyOrderId.length > 0
+      ) {
+        const [
+          { getOrderFulfillmentWorkflow },
+          { getAloNowDelivery }
+        ] = await Promise.all([
+          import("../database/orderFulfillmentWorkflow.js"),
+          import("../database/aloNowDeliveries.js")
+        ]);
+
+        const [workflow, delivery] = await Promise.all([
+          getOrderFulfillmentWorkflow(shopifyOrderId),
+          getAloNowDelivery(shopifyOrderId)
+        ]);
+
+        packStatus = workflow?.pack_status ?? null;
+        deliveryStatus = delivery?.delivery_status ?? null;
       }
 
       return res.status(200).json({
@@ -109,7 +146,8 @@ aloNowCustomerStatusRouter.get(
           row.status,
           new Date(row.created_at),
           new Date(),
-          paymentPhase
+          paymentPhase,
+          { packStatus, deliveryStatus }
         )
       });
 

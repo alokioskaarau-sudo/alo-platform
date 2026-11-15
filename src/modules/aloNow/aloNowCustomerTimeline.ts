@@ -24,17 +24,52 @@ export function buildAloNowCustomerTimeline(
   status: string,
   createdAt: Date,
   serverTime: Date = new Date(),
-  paymentPhase: string | null = null
+  paymentPhase: string | null = null,
+  fulfillment: {
+    packStatus?: string | null;
+    deliveryStatus?: string | null;
+  } = {}
 ) {
   const validCreatedAt =
     createdAt instanceof Date &&
     Number.isFinite(createdAt.getTime());
 
+  const paymentConfirmed =
+    paymentPhase === "PAYMENT_CONFIRMED" ||
+    paymentPhase === "CASH_CONFIRMED";
+
+  const packStatus = fulfillment.packStatus ?? null;
+  const deliveryStatus = fulfillment.deliveryStatus ?? null;
+
+  const packingStarted =
+    paymentConfirmed &&
+    ["PACKING", "IN_PROGRESS", "PACKED", "COMPLETED"]
+      .includes(packStatus ?? "");
+
+  const packingConfirmed =
+    paymentConfirmed &&
+    ["PACKED", "COMPLETED"].includes(packStatus ?? "");
+
+  const driverEnRouteConfirmed =
+    paymentConfirmed &&
+    ["PICKED_UP", "ON_THE_WAY", "DELIVERED"]
+      .includes(deliveryStatus ?? "");
+
+  const deliveredConfirmed =
+    paymentConfirmed &&
+    deliveryStatus === "DELIVERED";
+
+  const highestStage =
+    deliveredConfirmed ? 4 :
+    driverEnRouteConfirmed ? 3 :
+    packingStarted ? 2 :
+    paymentConfirmed ? 1 : 0;
+
   const waitingForReview =
     status === "PENDING_REVIEW" ||
     status === "CONTACTED";
 
-  const reviewTargetAt = validCreatedAt && waitingForReview
+  const reviewTargetAt = validCreatedAt && waitingForReview && !paymentConfirmed
     ? new Date(createdAt.getTime() + 10 * 60 * 1000)
     : null;
 
@@ -66,8 +101,18 @@ export function buildAloNowCustomerTimeline(
   return {
     status,
     message:
-      messages[status] ??
-      "Der aktuelle Auftragsstatus wird geprüft.",
+      deliveredConfirmed
+        ? "Deine Bestellung wurde zugestellt."
+        : driverEnRouteConfirmed
+        ? "Dein Fahrer ist unterwegs."
+        : packingConfirmed
+        ? "Deine Bestellung ist gepackt und wartet auf die Abfahrt."
+        : packingStarted
+        ? "Wir packen deine Bestellung."
+        : paymentConfirmed
+        ? "Deine Zahlung ist bestätigt."
+        : messages[status] ??
+          "Der aktuelle Auftragsstatus wird geprüft.",
     terminal: isClosed,
     serverTime: serverTime.toISOString(),
     review: {
@@ -79,19 +124,22 @@ export function buildAloNowCustomerTimeline(
     steps: STEPS.map((step, index) => ({
       step,
       state: (
-        index === 0
+        index < highestStage
           ? "complete"
+          : index === highestStage
+          ? "active"
           : "pending"
       ) as CustomerTimelineState
     })),
     driverReserved: status === "DRIVER_ACCEPTED",
-    paymentConfirmed:
-      paymentPhase === "PAYMENT_CONFIRMED" ||
-      paymentPhase === "CASH_CONFIRMED",
+    paymentConfirmed,
     paymentPhase,
-    packingConfirmed: false,
-    driverEnRouteConfirmed: false,
-    deliveredConfirmed: false,
+    packingStarted,
+    packingConfirmed,
+    driverEnRouteConfirmed,
+    deliveredConfirmed,
+    packStatus: paymentConfirmed ? packStatus : null,
+    deliveryStatus: paymentConfirmed ? deliveryStatus : null,
     gpsAvailable: false,
     tipCheckoutAvailable: false
   };
