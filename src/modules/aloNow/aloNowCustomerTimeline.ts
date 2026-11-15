@@ -23,7 +23,8 @@ const STEPS: CustomerTimelineStep[] = [
 export function buildAloNowCustomerTimeline(
   status: string,
   createdAt: Date,
-  serverTime: Date = new Date()
+  serverTime: Date = new Date(),
+  paymentPhase: string | null = null
 ) {
   const validCreatedAt =
     createdAt instanceof Date &&
@@ -84,7 +85,10 @@ export function buildAloNowCustomerTimeline(
       ) as CustomerTimelineState
     })),
     driverReserved: status === "DRIVER_ACCEPTED",
-    paymentConfirmed: false,
+    paymentConfirmed:
+      paymentPhase === "PAYMENT_CONFIRMED" ||
+      paymentPhase === "CASH_CONFIRMED",
+    paymentPhase,
     packingConfirmed: false,
     driverEnRouteConfirmed: false,
     deliveredConfirmed: false,

@@ -76,6 +76,29 @@ aloNowCustomerStatusRouter.get(
         });
       }
 
+      // The request token has already been verified above.
+      // Read payment state only for the authenticated request.
+      // Disabled until the production schema is approved.
+      let paymentPhase: string | null = null;
+
+      if (
+        process.env.ALO_NOW_CUSTOMER_PAYMENT_TIMELINE_ENABLED ===
+        "true"
+      ) {
+        const payment = await db.query<{
+          phase: string | null;
+        }>(
+          `SELECT phase
+           FROM alo_now_payment_states
+           WHERE request_id = $1::uuid
+           ORDER BY version DESC
+           LIMIT 1`,
+          [requestId]
+        );
+
+        paymentPhase = payment.rows[0]?.phase ?? null;
+      }
+
       return res.status(200).json({
         ok: true,
         requestId: row.id,
@@ -84,7 +107,9 @@ aloNowCustomerStatusRouter.get(
         updatedAt: row.updated_at,
         timeline: buildAloNowCustomerTimeline(
           row.status,
-          new Date(row.created_at)
+          new Date(row.created_at),
+          new Date(),
+          paymentPhase
         )
       });
 
