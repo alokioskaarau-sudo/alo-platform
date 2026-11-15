@@ -564,3 +564,147 @@ export async function getAloNowTipOrderTransactionsV169(
 
   return response?.order ?? null;
 }
+
+/**
+ * ALO NOW V184
+ *
+ * Read-only Shopify Admin GraphQL capability probe.
+ * Reuses existing authenticated Shopify GraphQL client.
+ *
+ * No mutation, draft creation, invoice sending or
+ * payment operation.
+ *
+ * Returns only field names and permission booleans.
+ * Never returns Shopify credentials or customer data.
+ */
+export async function probeAloNowTipShopifyV184() {
+  const query = `
+    query AloNowTipCapabilitiesV184 {
+      currentAppInstallation {
+        accessScopes {
+          handle
+        }
+      }
+      draftInput: __type(name: "DraftOrderInput") {
+        inputFields { name }
+      }
+      lineInput: __type(name: "DraftOrderLineItemInput") {
+        inputFields { name }
+      }
+      draftType: __type(name: "DraftOrder") {
+        fields { name }
+      }
+      mutationType: __type(name: "Mutation") {
+        fields { name }
+      }
+    }
+  `;
+
+  const data = await shopifyGraphQL(query, {});
+
+  const fieldNames = (
+    value: unknown
+  ): Set<string> => {
+    if (
+      value === null ||
+      typeof value !== "object"
+    ) return new Set();
+
+    const obj = value as Record<string, unknown>;
+    const fields = Array.isArray(obj.inputFields)
+      ? obj.inputFields
+      : Array.isArray(obj.fields)
+        ? obj.fields
+        : [];
+
+    return new Set(
+      fields
+        .filter(
+          (x): x is Record<string, unknown> =>
+            x !== null &&
+            typeof x === "object" &&
+            !Array.isArray(x)
+        )
+        .map(x => x.name)
+        .filter((x): x is string =>
+          typeof x === "string"
+        )
+    );
+  };
+
+  const scopes = new Set<string>(
+    (
+      data?.currentAppInstallation?.accessScopes ??
+      []
+    )
+      .map((x: { handle?: unknown }) => x.handle)
+      .filter(
+        (x: unknown): x is string =>
+          typeof x === "string"
+      )
+  );
+
+  const draftInput = fieldNames(data?.draftInput);
+  const lineInput = fieldNames(data?.lineInput);
+  const draftType = fieldNames(data?.draftType);
+  const mutations = fieldNames(data?.mutationType);
+
+  return {
+    probe: "ALO_NOW_TIP_V184",
+    readOnly: true as const,
+
+    permissions: {
+      writeDraftOrders: scopes.has(
+        "write_draft_orders"
+      ),
+      writeQuickSale: scopes.has(
+        "write_quick_sale"
+      ),
+      readDraftOrders: scopes.has(
+        "read_draft_orders"
+      )
+    },
+
+    requiredSchema: {
+      draftOrderCreate:
+        mutations.has("draftOrderCreate"),
+
+      draftCustomAttributes:
+        draftInput.has("customAttributes"),
+
+      draftPresentmentCurrency:
+        draftInput.has("presentmentCurrencyCode"),
+
+      draftDiscountProtection:
+        draftInput.has(
+          "allowDiscountCodesInCheckout"
+        ) &&
+        draftInput.has(
+          "acceptAutomaticDiscounts"
+        ),
+
+      customItemPrice:
+        lineInput.has(
+          "originalUnitPriceWithCurrency"
+        ),
+
+      customItemShipping:
+        lineInput.has("requiresShipping"),
+
+      customItemTax:
+        lineInput.has("taxable"),
+
+      draftResponseAttributes:
+        draftType.has("customAttributes"),
+
+      draftInvoiceUrl:
+        draftType.has("invoiceUrl"),
+
+      draftTotal:
+        draftType.has("totalPriceSet")
+    },
+
+    note:
+      "Schema and scope checks do not authorize writes."
+  };
+}
