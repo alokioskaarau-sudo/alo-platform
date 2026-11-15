@@ -773,3 +773,137 @@ export async function findAloNowTipDraftsV190() {
     }))
   };
 }
+
+/**
+ * ALO NOW V191
+ *
+ * Read-only reconciliation of Shopify tip draft orders.
+ * Never use a missing/incomplete result to authorize
+ * an automatic retry of draftOrderCreate.
+ */
+export async function findAloNowTipDraftByReferenceV191(
+  reference: string
+): Promise<
+  | { status: "FOUND"; draftOrderId: string }
+  | { status: "NOT_FOUND" }
+  | { status: "AMBIGUOUS" }
+  | { status: "INCOMPLETE" }
+> {
+  const UUID =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  if (!UUID.test(reference)) {
+    throw new Error("INVALID_TIP_REFERENCE");
+  }
+
+  const query = `
+    query AloNowTipReconcileV191($after: String) {
+      draftOrders(
+        first: 100
+        after: $after
+        query: "tag:ALO_NOW_TIP"
+        sortKey: ID
+      ) {
+        nodes {
+          id
+          customAttributes {
+            key
+            value
+          }
+        }
+        pageInfo {
+          endCursor
+          hasNextPage
+        }
+      }
+    }
+  `;
+
+  let after: string | null = null;
+  const seen = new Set<string>();
+  const matches = new Set<string>();
+
+  // Bound the read. An incomplete scan is never
+  // treated as proof that a draft does not exist.
+  for (let page = 0; page < 20; page++) {
+    const data = await shopifyGraphQL(query, { after });
+    const connection = data?.draftOrders;
+
+    if (
+      !connection ||
+      !Array.isArray(connection.nodes) ||
+      !connection.pageInfo
+    ) {
+      return { status: "INCOMPLETE" };
+    }
+
+    for (const node of connection.nodes) {
+      if (
+        typeof node?.id !== "string" ||
+        !/^gid:\/\/shopify\/DraftOrder\/[1-9][0-9]*$/.test(
+          node.id
+        ) ||
+        !Array.isArray(node.customAttributes)
+      ) {
+        return { status: "INCOMPLETE" };
+      }
+
+      if (seen.has(node.id)) {
+        return { status: "INCOMPLETE" };
+      }
+
+      seen.add(node.id);
+
+      const fields = new Map<string, string>();
+      for (const item of node.customAttributes) {
+        if (
+          typeof item?.key !== "string" ||
+          typeof item?.value !== "string" ||
+          fields.has(item.key)
+        ) {
+          return { status: "INCOMPLETE" };
+        }
+        fields.set(item.key, item.value);
+      }
+
+      if (
+        fields.get("alo_now_tip_checkout_reference") ===
+          reference &&
+        fields.get("alo_now_tip_purpose") ===
+          "POST_DELIVERY_TIP"
+      ) {
+        matches.add(node.id);
+      }
+    }
+
+    if (matches.size > 1) {
+      return { status: "AMBIGUOUS" };
+    }
+
+    if (connection.pageInfo.hasNextPage === false) {
+      if (matches.size === 0) {
+        return { status: "NOT_FOUND" };
+      }
+
+      return {
+        status: "FOUND",
+        draftOrderId: [...matches][0]
+      };
+    }
+
+    const next = connection.pageInfo.endCursor;
+
+    if (
+      connection.pageInfo.hasNextPage !== true ||
+      typeof next !== "string" ||
+      next.length === 0 ||
+      next === after
+    ) {
+      return { status: "INCOMPLETE" };
+    }
+
+    after = next;
+  }
+
+  return { status: "INCOMPLETE" };
+}
