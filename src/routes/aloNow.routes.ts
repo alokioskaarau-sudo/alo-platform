@@ -1,3 +1,4 @@
+import { aloNowCustomerStatusRouter } from "./aloNowCustomerStatus.routes.js";
 import { aloNowFinanceV962Router } from "./aloNowFinanceV962.routes.js";
 import aloNowGpsRouter from "./aloNowGps.routes.js";
 import { aloNowRouteBridgeRouter } from "./aloNowRouteBridge.routes.js";
@@ -1552,6 +1553,9 @@ aloNowRouter.post(
 
 // V128: GPS AND ROUTE BRIDGE
 aloNowRouter.use(aloNowGpsRouter);
+// V155: Customer-owned order status, token protected.
+aloNowRouter.use(aloNowCustomerStatusRouter);
+
 
 // V136: Test routing is disabled unless explicitly enabled.
 if (
