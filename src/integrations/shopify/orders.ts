@@ -708,3 +708,68 @@ export async function probeAloNowTipShopifyV184() {
       "Schema and scope checks do not authorize writes."
   };
 }
+
+/**
+ * ALO NOW V190
+ *
+ * Read-only Shopify draft discovery.
+ *
+ * Does not create, modify, complete or send invoices.
+ * No customer details returned.
+ */
+export async function findAloNowTipDraftsV190() {
+  const query = `
+    query AloNowTipDraftDiscoveryV190 {
+      draftOrders(
+        first: 10,
+        query: "tag:ALO_NOW_TIP"
+      ) {
+        nodes {
+          id
+          status
+          customAttributes {
+            key
+            value
+          }
+        }
+        pageInfo {
+          hasNextPage
+        }
+      }
+    }
+  `;
+
+  const data = await shopifyGraphQL(query, {});
+
+  if (!data?.draftOrders) {
+    throw new Error("SHOPIFY_DRAFT_QUERY_INVALID");
+  }
+
+  const nodes = data.draftOrders.nodes;
+
+  if (!Array.isArray(nodes)) {
+    throw new Error("SHOPIFY_DRAFT_LIST_INVALID");
+  }
+
+  return {
+    connected: true as const,
+    readOnly: true as const,
+    retrievedCount: nodes.length,
+    hasMore: data.draftOrders.pageInfo?.hasNextPage
+      === true,
+    tipDrafts: nodes.map((item: {
+      id?: unknown;
+      status?: unknown;
+      customAttributes?: unknown;
+    }) => ({
+      id: typeof item.id === "string"
+        ? item.id
+        : null,
+      status: typeof item.status === "string"
+        ? item.status
+        : null,
+      attributesPresent:
+        Array.isArray(item.customAttributes)
+    }))
+  };
+}
