@@ -2,6 +2,70 @@ import { db } from "./db.js";
 import { ensureStaffSchedulingTables } from "./staffScheduling.js";
 
 export async function initializeDatabase() {
+  // ALO KIOSK DELIVERY V121
+  // Original migration from V94
+  // Preserves existing Staff initialization
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS alo_now_order_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_request_id TEXT NOT NULL UNIQUE,
+      workspace TEXT NOT NULL CHECK (workspace IN ('AARAU','OLTEN')),
+      delivery_address TEXT NOT NULL,
+      items JSONB NOT NULL,
+      quote_status TEXT NOT NULL CHECK (quote_status IN ('STANDARD','MANUAL_APPROVAL')),
+      road_distance_km NUMERIC(9,2) NOT NULL CHECK (road_distance_km >= 0),
+      quoted_delivery_fee_chf NUMERIC(9,2),
+      status TEXT NOT NULL DEFAULT 'PENDING_REVIEW'
+        CHECK (status IN ('PENDING_REVIEW','CONTACTED','REJECTED')),
+      reviewed_by TEXT,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS alo_now_order_requests_pending_idx
+    ON alo_now_order_requests (status, created_at DESC);
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD COLUMN IF NOT EXISTS customer_status_token_hash TEXT;
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD COLUMN IF NOT EXISTS verified_subtotal_chf NUMERIC(12,2),
+      ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD COLUMN IF NOT EXISTS offered_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS driver_user_id TEXT,
+      ADD COLUMN IF NOT EXISTS driver_accepted_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS reservation_expires_at TIMESTAMPTZ;
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      DROP CONSTRAINT IF EXISTS alo_now_order_requests_status_check;
+  `);
+
+  await db.query(`
+    ALTER TABLE alo_now_order_requests
+      ADD CONSTRAINT alo_now_order_requests_status_check CHECK
+      (status IN ('PENDING_REVIEW','CONTACTED','REJECTED','DRIVER_OFFERED','DRIVER_ACCEPTED'));
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS alo_now_order_requests_driver_offers_idx
+      ON alo_now_order_requests (workspace, created_at DESC)
+      WHERE status = 'DRIVER_OFFERED';
+  `);
+
   // ==========================================================
   // SHIPPING LABELS
   // ==========================================================

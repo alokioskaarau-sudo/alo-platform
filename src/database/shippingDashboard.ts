@@ -2198,3 +2198,116 @@ export async function getStaffInvoicesByIds(
 
   return result.rows;
 }
+
+
+export async function createAloNowAutomaticPackingSlipPrintJobV370(
+  packingSlipId: string,
+  printerName?: string
+) {
+  if (
+    typeof packingSlipId !== "string" ||
+    !packingSlipId.trim()
+  ) {
+    throw new Error("ALO_NOW_PACKING_SLIP_ID_REQUIRED");
+  }
+
+  const client = await db.connect();
+  let active = false;
+  let destroy = false;
+
+  try {
+    await client.query("BEGIN");
+    active = true;
+
+    await client.query("SET LOCAL lock_timeout = '3s'");
+    await client.query("SET LOCAL statement_timeout = '12s'");
+
+    // Lock the parent BEFORE checking or creating print jobs.
+    const slips = await client.query(
+      `SELECT id,status,pdf_base64
+       FROM packing_slips
+       WHERE id=$1
+       FOR UPDATE`,
+      [packingSlipId]
+    );
+
+    const slip = slips.rows[0];
+
+    if (!slip) {
+      throw new Error("ALO_NOW_PACKING_SLIP_NOT_FOUND");
+    }
+
+    if (
+      slip.status !== "COMPLETED" ||
+      !slip.pdf_base64
+    ) {
+      throw new Error("ALO_NOW_PACKING_SLIP_NOT_READY");
+    }
+
+    // Historical jobs of ALL statuses count.
+    const previous = await client.query(
+      `SELECT *
+       FROM print_jobs
+       WHERE packing_slip_id=$1
+         AND document_type='PACKING_SLIP'
+       LIMIT 1`,
+      [packingSlipId]
+    );
+
+    if (previous.rows[0]) {
+      await client.query("COMMIT");
+      active = false;
+
+      return {
+        created: false,
+        job: previous.rows[0]
+      };
+    }
+
+    const inserted = await client.query(
+      `INSERT INTO print_jobs (
+         shipping_label_id,
+         packing_slip_id,
+         document_type,
+         printer_name,
+         status
+       )
+       VALUES (NULL,$1,'PACKING_SLIP',$2,'PENDING')
+       RETURNING *`,
+      [packingSlipId, printerName ?? null]
+    );
+
+    if (inserted.rowCount !== 1) {
+      throw new Error("ALO_NOW_PRINT_INSERT_FAILED");
+    }
+
+    await client.query(
+      `UPDATE packing_slips
+       SET print_status='QUEUED',
+           printer_name=COALESCE($2,printer_name),
+           updated_at=NOW()
+       WHERE id=$1`,
+      [packingSlipId, printerName ?? null]
+    );
+
+    await client.query("COMMIT");
+    active = false;
+
+    return {
+      created: true,
+      job: inserted.rows[0]
+    };
+  } catch (error) {
+    destroy = true;
+    throw error;
+  } finally {
+    if (active) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        destroy = true;
+      }
+    }
+    client.release(destroy);
+  }
+}

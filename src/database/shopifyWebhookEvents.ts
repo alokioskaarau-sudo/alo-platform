@@ -264,3 +264,137 @@ export async function markWebhookFailed(
     ]
   );
 }
+
+
+export async function claimPendingPaidWebhookV380(
+  eventId: string
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE shopify_webhook_events
+     SET status='PROCESSING',
+         attempts=attempts+1,
+         processing_started_at=NOW(),
+         error_message=NULL,
+         updated_at=NOW()
+     WHERE id=$1
+       AND topic='orders/paid'
+       AND status='PENDING'
+     RETURNING id`,
+    [eventId]
+  );
+  return result.rowCount === 1;
+}
+
+
+export async function claimOrderScopedPaidWebhookV383(
+  eventId: string,
+  orderId: string
+): Promise<boolean> {
+  if (
+    !/^gid:\/\/shopify\/Order\/[1-9][0-9]*$/.test(orderId)
+  ) {
+    return false;
+  }
+
+  const client = await db.connect();
+  let transactionOpen = false;
+  let destroy = false;
+
+  try {
+    await client.query("BEGIN");
+    transactionOpen = true;
+
+    await client.query("SET LOCAL lock_timeout = '3s'");
+    await client.query("SET LOCAL statement_timeout = '12s'");
+
+    // Fester Namespace + Hash der Order-ID.
+    // Hashkollisionen blockieren höchstens zusätzliche Orders.
+    await client.query(
+      "SELECT pg_advisory_xact_lock(383, hashtext($1))",
+      [orderId]
+    );
+
+    const event = await client.query<{
+      id: string;
+      status: string;
+      shopify_order_id: string | null;
+    }>(
+      `SELECT id::text, status, shopify_order_id
+       FROM shopify_webhook_events
+       WHERE id=$1
+         AND topic='orders/paid'
+       FOR UPDATE`,
+      [eventId]
+    );
+
+    const row = event.rows[0];
+
+    if (
+      !row ||
+      row.status !== "PENDING" ||
+      row.shopify_order_id !== orderId
+    ) {
+      await client.query("ROLLBACK");
+      transactionOpen = false;
+      return false;
+    }
+
+    const conflict = await client.query(
+      `SELECT 1
+       FROM shopify_webhook_events
+       WHERE shopify_order_id=$1
+         AND topic='orders/paid'
+         AND id<>$2
+         AND status IN (
+           'PROCESSING',
+           'COMPLETED',
+           'FAILED',
+           'NEEDS_REVIEW'
+         )
+       LIMIT 1`,
+      [orderId, eventId]
+    );
+
+    if (conflict.rowCount) {
+      await client.query("ROLLBACK");
+      transactionOpen = false;
+      return false;
+    }
+
+    const updated = await client.query(
+      `UPDATE shopify_webhook_events
+       SET status='PROCESSING',
+           attempts=attempts+1,
+           processing_started_at=NOW(),
+           error_message=NULL,
+           updated_at=NOW()
+       WHERE id=$1
+         AND topic='orders/paid'
+         AND shopify_order_id=$2
+         AND status='PENDING'
+       RETURNING id`,
+      [eventId, orderId]
+    );
+
+    if (updated.rowCount !== 1) {
+      throw new Error("ORDER_WEBHOOK_CLAIM_CONFLICT");
+    }
+
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return true;
+
+  } catch (error) {
+    destroy = true;
+    throw error;
+  } finally {
+    if (transactionOpen) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        destroy = true;
+      }
+    }
+    client.release(destroy);
+  }
+}

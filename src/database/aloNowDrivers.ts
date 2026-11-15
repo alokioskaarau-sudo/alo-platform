@@ -257,3 +257,24 @@ export async function setAloDriverAvailability(
     client.release();
   }
 }
+
+
+// V123: ORIGINAL DRIVER HEARTBEAT
+export async function heartbeatAloNowDriver(staffUserId: string): Promise<{
+  ok: boolean;
+  lastSeenAt: Date | null;
+}> {
+  const result = await db.query<{ last_seen_at: Date }>(
+    `UPDATE alo_driver_profiles
+     SET last_seen_at = NOW(), updated_at = NOW()
+     WHERE staff_user_id = $1
+       AND approved = TRUE
+       AND availability_status = 'ONLINE'
+     RETURNING last_seen_at`,
+    [staffUserId]
+  );
+  return {
+    ok: Boolean(result.rows[0]),
+    lastSeenAt: result.rows[0]?.last_seen_at ?? null,
+  };
+}
