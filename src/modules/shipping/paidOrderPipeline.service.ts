@@ -39,8 +39,8 @@ import {
   ensureAloNowDelivery,
 } from "../../database/aloNowDeliveries.js";
 import {
-  getOrderFulfillmentType,
-} from "../orders/orderFulfillmentType.js";
+  requireVerifiedAloNowChannelV2298,
+} from "../orders/aloNowPaidChannelGuard.v2298.js";
 
 import {
   getAloNowOrderAgeRequirement,
@@ -121,7 +121,7 @@ export async function processPaidShopifyOrder(
   // ----------------------------------------------------------
 
   const fulfillmentType =
-    getOrderFulfillmentType(
+    requireVerifiedAloNowChannelV2298(
       order
     );
 
