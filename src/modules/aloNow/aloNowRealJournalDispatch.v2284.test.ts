@@ -78,3 +78,49 @@ test('V2284 real journal timeout becomes durable reconciliation, never retries',
     assert.equal(calls,1);
   } finally {await client.end();}
 });
+
+test('V2285 concurrent journal dispatch permits one claim and one Shopify invocation', async()=>{
+  const {client: first,payload,shopifyOrderId}=await fixture();
+  const concurrentFulfillmentId='gid://shopify/Fulfillment/'+shopifyOrderId.split('/').at(-1);
+  const second=new pg.Client(config); await second.connect();
+  let calls=0;
+  let startShopify!:()=>void;
+  const shopifyEntered=new Promise<void>(resolve=>{startShopify=resolve;});
+  let releaseShopify!:()=>void;
+  const shopifyHold=new Promise<void>(resolve=>{releaseShopify=resolve;});
+  try {
+    const firstDispatch=dispatchJournalEntryV1592({payload,db:first,createFulfillment:async()=>{
+      calls++;startShopify();await shopifyHold;
+      return {id:concurrentFulfillmentId,status:'SUCCESS'};
+    }});
+    await shopifyEntered;
+    const observed=await second.query(
+      'SELECT state FROM alo_now_fulfillment_journal_v1586 WHERE shopify_order_id=$1',[shopifyOrderId]);
+    assert.equal(observed.rows[0]?.state,'DISPATCHING');
+    await assert.rejects(dispatchJournalEntryV1592({payload,db:second,
+      createFulfillment:async()=>{calls++;return {id:concurrentFulfillmentId,status:'SUCCESS'};}}),
+      /JOURNAL_NOT_PREPARED_OR_ALREADY_DISPATCHED/);
+    assert.equal(calls,1);
+    releaseShopify();
+    await firstDispatch;
+    const final=await second.query(
+      'SELECT state,shopify_fulfillment_id FROM alo_now_fulfillment_journal_v1586 WHERE shopify_order_id=$1',[shopifyOrderId]);
+    assert.equal(final.rows[0]?.state,'CONFIRMED');
+    assert.equal(final.rows[0]?.shopify_fulfillment_id,concurrentFulfillmentId);
+    assert.equal(calls,1);
+  } finally {releaseShopify?.();await first.end();await second.end();}
+});
+
+test('V2285 altered line payload never claims journal or calls Shopify',async()=>{
+  const {client,payload,shopifyOrderId}=await fixture();let calls=0;
+  try {
+    const changed={...payload,lines:[{...payload.lines[0],quantity:2}]};
+    await assert.rejects(dispatchJournalEntryV1592({payload:changed,db:client,
+      createFulfillment:async()=>{calls++;return {id:fulfilledId,status:'SUCCESS'};}}),
+      /JOURNAL_NOT_PREPARED_OR_ALREADY_DISPATCHED/);
+    assert.equal(calls,0);
+    const row=await client.query(
+      'SELECT state FROM alo_now_fulfillment_journal_v1586 WHERE shopify_order_id=$1',[shopifyOrderId]);
+    assert.equal(row.rows[0]?.state,'PREPARED');
+  } finally {await client.end();}
+});
