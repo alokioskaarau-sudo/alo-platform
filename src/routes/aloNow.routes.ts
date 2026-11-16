@@ -1,3 +1,4 @@
+import { aloNowDriverOrderEvidenceRouterV2291 } from "./aloNowDriverOrderEvidence.v2291.routes.js";
 import { aloNowCustomerStatusRouter } from "./aloNowCustomerStatus.routes.js";
 import { aloNowFinanceV962Router } from "./aloNowFinanceV962.routes.js";
 import aloNowGpsRouter from "./aloNowGps.routes.js";
@@ -1550,6 +1551,11 @@ aloNowRouter.post(
   }
 );
 
+
+// V2291: Driver-owned Shopify payment evidence, disabled by default.
+if (process.env.ALO_NOW_DRIVER_ORDER_EVIDENCE_ENABLED === "true") {
+  aloNowRouter.use(aloNowDriverOrderEvidenceRouterV2291);
+}
 
 // V128: GPS AND ROUTE BRIDGE
 aloNowRouter.use(aloNowGpsRouter);
