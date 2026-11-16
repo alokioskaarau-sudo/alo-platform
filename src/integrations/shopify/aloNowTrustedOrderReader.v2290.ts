@@ -69,7 +69,7 @@ export function makeTrustedOrderReaderV2290(transport: TransportV2290) {
 
 // Production transport: uses existing shop credentials; does NOT create fulfillments.
 // It is intentionally not mounted to an API route in V2290.
-export const readTrustedShopifyOrderV2290 = makeTrustedOrderReaderV2290(async (query, variables) => {
+export const shopifyOrderReadTransportV2290: TransportV2290 = async (query, variables) => {
   const { env } = await import('../../config/env.js');
   const { getShopifyAccessToken } = await import('./auth.js');
   const rawShop = String(env.shopify.shop ?? '').trim();
@@ -88,4 +88,5 @@ export const readTrustedShopifyOrderV2290 = makeTrustedOrderReaderV2290(async (q
   );
   if (response.status !== 200) throw new Error('SHOPIFY_ORDER_HTTP_FAILURE');
   return response.data as unknown;
-});
+};
+export const readTrustedShopifyOrderV2290 = makeTrustedOrderReaderV2290(shopifyOrderReadTransportV2290);
