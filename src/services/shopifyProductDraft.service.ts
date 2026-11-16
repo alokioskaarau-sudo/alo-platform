@@ -783,11 +783,16 @@ export async function createShopifyProductDraft(
         draft?.receiving?.articleNumber
       );
 
-      await syncAgeRequirementMetafieldSafe(
-        row.shopify_product_id,
-        row.age_requirement,
-        row.age_requirement_reviewed_at
-      );
+      if (
+        row.age_requirement_reviewed_at &&
+        !(await syncAgeRequirementMetafieldSafe(
+          row.shopify_product_id,
+          row.age_requirement,
+          row.age_requirement_reviewed_at
+        ))
+      ) {
+        throw new Error("ALO_AGE_SHOPIFY_SYNC_NOT_CONFIRMED");
+      }
 
       return {
         ok: true as const,
@@ -977,11 +982,16 @@ export async function createShopifyProductDraft(
       draft?.receiving?.articleNumber
     );
 
-    await syncAgeRequirementMetafieldSafe(
-      match.productId,
-      row.age_requirement,
-      row.age_requirement_reviewed_at
-    );
+    if (
+      row.age_requirement_reviewed_at &&
+      !(await syncAgeRequirementMetafieldSafe(
+        match.productId,
+        row.age_requirement,
+        row.age_requirement_reviewed_at
+      ))
+    ) {
+      throw new Error("ALO_AGE_SHOPIFY_SYNC_NOT_CONFIRMED");
+    }
 
     return {
       ok: true as const,

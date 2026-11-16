@@ -1,3 +1,4 @@
+import { requireReviewedAgeV2319, syncAndVerifyShopifyAgeV2319, verifyShopifyAgeV2319 } from "../modules/products/aloAgeShopifyGuard.v2319.js";
 import aloMhdRouter from "./aloMhd.routes.js";
 import {
   getShopifyOnlineInventory,
@@ -6108,6 +6109,16 @@ router.post(
         return;
       }
 
+      // V2319: sync explicitly reviewed age before any other product mutations.
+      const reviewedAgeV2319 = requireReviewedAgeV2319(row);
+      if (reviewedAgeV2319 !== null) {
+        await syncAndVerifyShopifyAgeV2319(
+          shopifyGraphql,
+          String(row.shopify_product_id),
+          reviewedAgeV2319
+        );
+      }
+
       const draft =
         row.product_data ?? {};
 
@@ -6258,6 +6269,15 @@ router.post(
       ) {
         throw new Error(
           "Shopify hat kein aktualisiertes Produkt zurückgegeben."
+        );
+      }
+
+      // V2319: verify again after productUpdate, which may carry other metafields.
+      if (reviewedAgeV2319 !== null) {
+        await verifyShopifyAgeV2319(
+          shopifyGraphql,
+          String(row.shopify_product_id),
+          reviewedAgeV2319
         );
       }
 
@@ -6754,6 +6774,8 @@ router.post(
               shopify_variant_id,
               shopify_inventory_item_id,
               shopify_status,
+              age_requirement,
+              age_requirement_reviewed_at,
               product_data
             FROM products
             WHERE id = $1
@@ -6869,6 +6891,19 @@ router.post(
             "Die gespeicherte Shopify-Verknüpfung ist verwaist: Das Shopify-Produkt existiert nicht mehr.",
         });
         return;
+      }
+
+      // V2319: before ACTIVE, read Shopify's actual stored age metadata.
+      // Never infer verified 16+/18+ from a successful product-status mutation.
+      if (requestedStatus === "ACTIVE") {
+        const reviewedAgeV2319 = requireReviewedAgeV2319(row);
+        if (reviewedAgeV2319 !== null) {
+          await verifyShopifyAgeV2319(
+            shopifyGraphql,
+            shopifyProductId,
+            reviewedAgeV2319
+          );
+        }
       }
 
       const data =
