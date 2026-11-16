@@ -28,7 +28,7 @@ export async function inspectProductionPartialPreflightV2277(
     throw new Error("INVALID_V2277_PREFLIGHT_CONTEXT");
   }
   const client=await deps.pool.connect();
-  let attempted=false,locked=false,unlocked=false;
+  let attempted=false,locked=false,unlocked=false,destroy=false;
   try {
     attempted=true;
     await client.query("SELECT pg_advisory_lock($1::bigint)",[orderLockKeyV1643(orderId)]);
@@ -45,6 +45,14 @@ export async function inspectProductionPartialPreflightV2277(
     if (payment.status!=="ONLINE_PAYMENT_PRECHECK_PASSED") throw new Error("PAYMENT_NOT_VERIFIED");
     const plan=buildPartialDispatchPlanV1641(snapshot);
     return {ok:true,status:"PREFLIGHT_ONLY_NOT_AUTHORIZED",pendingFulfillmentOrders:plan.payloads.length};
+  } catch (error) {
+    // A failed ROLLBACK means transaction state is unknown. Even if the
+    // advisory unlock succeeds, the pool must discard this connection.
+    if (error instanceof Error &&
+        error.message === "SNAPSHOT_ROLLBACK_UNCERTAIN_DESTROY_CLIENT") {
+      destroy=true;
+    }
+    throw error;
   } finally {
     if (locked) {
       try {
@@ -53,7 +61,7 @@ export async function inspectProductionPartialPreflightV2277(
       } catch {unlocked=false;}
     }
     // Do not reuse a session whose lock state is uncertain.
-    client.release(attempted&&!unlocked);
+    client.release(destroy||(attempted&&!unlocked));
     if (locked&&!unlocked) throw new Error("V2277_LOCK_RELEASE_UNCERTAIN");
   }
 }

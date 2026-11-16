@@ -94,3 +94,29 @@ test("V2278 Shopify read failure still releases acquired lock",async()=>{
   assert.equal(h.stats().locked,false);
   assert.equal(h.stats().released,true);
 });
+
+
+test("V2279 rollback uncertainty destroys DB session even when unlock succeeds",async()=>{
+  const h=harness();
+  let releasedWith: boolean | undefined;
+  let unlocked=false;
+  const deps={...h.deps,pool:{async connect(){
+    const client=await h.deps.pool.connect();
+    return {
+      async query(sql:string,params?:unknown[]){
+        if(sql.includes("FROM alo_now_deliveries")) throw new Error("SIMULATED_READ_FAILURE");
+        if(sql.trim()==="ROLLBACK") throw new Error("SIMULATED_ROLLBACK_FAILURE");
+        if(sql.includes("pg_advisory_unlock(")) unlocked=true;
+        return client.query(sql);
+      },
+      release(destroy?:boolean){releasedWith=destroy;}
+    };
+  }}};
+  await assert.rejects(
+    inspectProductionPartialPreflightV2277({shopifyOrderId:order,staffUserId:"7"},deps),
+    /SNAPSHOT_ROLLBACK_UNCERTAIN_DESTROY_CLIENT/
+  );
+  assert.equal(unlocked,true);
+  assert.equal(releasedWith,true);
+  assert.equal(h.stats().shopReads,0);
+});
