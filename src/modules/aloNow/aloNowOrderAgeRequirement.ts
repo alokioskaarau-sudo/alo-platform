@@ -23,6 +23,17 @@ function readProductAgeRequirement(
       ?.ageRequirement
       ?.value;
 
+  // V2308: no explicit age selection means unrestricted.
+  // Preserve fail-closed handling when Shopify does not supply a product,
+  // or an explicitly stored age value is invalid.
+  if (!lineItem?.variant?.product) {
+    return null;
+  }
+
+  if (rawValue == null || rawValue === "") {
+    return "NONE";
+  }
+
   if (
     rawValue === "NONE" ||
     rawValue === "AGE_16" ||
