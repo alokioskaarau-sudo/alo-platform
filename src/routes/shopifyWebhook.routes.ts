@@ -6,8 +6,8 @@ import {
 } from "node:crypto";
 
 import {
-  processPaidShopifyOrder,
-} from "../modules/shipping/paidOrderPipeline.service.js";
+  processPaidOrderWithAloNowV2697
+} from "../modules/aloNow/aloNowPaidOrderRouter.v2697.js";
 
 import {
   createWebhookEvent,
@@ -109,7 +109,7 @@ async function processStoredWebhook(
 
     attempt = claim.attempt;
 
-    const result = await processPaidShopifyOrder(orderId);
+    const result = await processPaidOrderWithAloNowV2697(orderId);
 
     const completed = await finishClaimedWebhookEvent(
       eventId,

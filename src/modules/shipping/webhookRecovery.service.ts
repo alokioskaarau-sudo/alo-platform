@@ -1,8 +1,8 @@
 import { db } from "../../database/db.js";
 
 import {
-  processPaidShopifyOrder,
-} from "./paidOrderPipeline.service.js";
+  processPaidOrderWithAloNowV2697
+} from "../aloNow/aloNowPaidOrderRouter.v2697.js";
 
 import {
   claimWebhookEvent,
@@ -69,7 +69,7 @@ async function recoverEvent(
       attempt,
     });
 
-    const result = await processPaidShopifyOrder(
+    const result = await processPaidOrderWithAloNowV2697(
       event.shopify_order_id
     );
 

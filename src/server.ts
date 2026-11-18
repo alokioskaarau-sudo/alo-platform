@@ -182,7 +182,7 @@ app.use(
 
       res.setHeader(
         "Access-Control-Allow-Methods",
-        "GET, OPTIONS"
+        "GET, POST, OPTIONS"
       );
 
       res.setHeader(

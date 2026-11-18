@@ -457,3 +457,70 @@ export async function getShopifyOrderById(
 
   return data?.order ?? null;
 }
+
+// ALO NOW V2675 - Verified Shopify read adapters
+export async function readAloNowShopifyPaymentGraphQL(
+  query: string,
+  variables: Record<string, unknown>
+): Promise<unknown> {
+  const id = variables?.id;
+
+  if (
+    typeof id !== "string" ||
+    !/^gid:\/\/shopify\/Order\/[1-9][0-9]*$/.test(id)
+  ) {
+    throw new Error("ALO_NOW_INVALID_SHOPIFY_ORDER");
+  }
+
+  const allowed = /^\s*query\s+AloNowReadPaymentEvidence\(\$id:\s*ID!\)\s*\{\s*node\(id:\s*\$id\)\s*\{\s*\.\.\.\s+on\s+Order\s*\{\s*id\s+displayFinancialStatus\s+cancelledAt\s+totalPriceSet\s*\{\s*shopMoney\s*\{\s*amount\s+currencyCode\s*\}\s*\}\s*totalOutstandingSet\s*\{\s*shopMoney\s*\{\s*amount\s+currencyCode\s*\}\s*\}\s*\}\s*\}\s*\}\s*$/;
+
+  if (!allowed.test(query) ||
+      Object.keys(variables).length !== 1) {
+    throw new Error("ALO_NOW_PAYMENT_QUERY_NOT_ALLOWED");
+  }
+
+  return shopifyGraphQL(query, { id });
+}
+
+
+export async function readAloNowShopifyProvenanceGraphQL(
+  query: string,
+  variables: Record<string, unknown>
+): Promise<unknown> {
+  const id = variables?.id;
+
+  if (
+    typeof id !== "string" ||
+    !/^gid:\/\/shopify\/Order\/[1-9][0-9]*$/.test(id)
+  ) {
+    throw new Error("ALO_NOW_INVALID_SHOPIFY_ORDER");
+  }
+
+  if (
+    Object.keys(variables).length !== 1 ||
+    query.replace(/\s+/g, "") !==
+      ALO_NOW_ALLOWED_PROVENANCE_QUERY.replace(/\s+/g, "")
+  ) {
+    throw new Error("ALO_NOW_PROVENANCE_QUERY_NOT_ALLOWED");
+  }
+
+  return shopifyGraphQL(
+    ALO_NOW_ALLOWED_PROVENANCE_QUERY,
+    { id }
+  );
+}
+
+
+const ALO_NOW_ALLOWED_PROVENANCE_QUERY = `
+  query AloNowReadOrderProvenance($id: ID!) {
+    node(id: $id) {
+      ... on Order {
+        id
+        customAttributes {
+          key
+          value
+        }
+      }
+    }
+  }
+`;
