@@ -303,7 +303,8 @@ export async function createPrintJob(
           AND document_type = 'SHIPPING_LABEL'
           AND status IN (
             'PENDING',
-            'PRINTING'
+            'PRINTING',
+            'PRINTED'
           )
         LIMIT 1
       `,
@@ -378,124 +379,54 @@ export async function createPackingSlipPrintJob(
   packingSlipId: string,
   printerName?: string
 ) {
-
-  const result =
-    await db.query(
-      `
-        SELECT
-          id,
-          shopify_order_name,
-          status,
-          pdf_base64
-        FROM packing_slips
-        WHERE id = $1
-        LIMIT 1
-      `,
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext($1::text))",
+      ["packing-slip-print:" + packingSlipId]
+    );
+    const result = await client.query(
+      "SELECT id, status, pdf_base64 FROM packing_slips WHERE id = $1 LIMIT 1",
       [packingSlipId]
     );
+    const slip = result.rows[0];
+    if (!slip) throw new Error("Lieferschein wurde nicht gefunden.");
+    if (slip.status !== "COMPLETED")
+      throw new Error("Nur vollständig erstellte Lieferscheine können gedruckt werden.");
+    if (!slip.pdf_base64)
+      throw new Error("Lieferschein enthält kein PDF.");
 
-  const slip =
-    result.rows[0];
-
-  if (!slip) {
-    throw new Error(
-      "Lieferschein wurde nicht gefunden."
+    const existing = await client.query(
+      "SELECT * FROM print_jobs WHERE packing_slip_id = $1 AND document_type = $2 AND status IN ($3,$4,$5) ORDER BY id DESC LIMIT 1",
+      [packingSlipId,"PACKING_SLIP","PENDING","PRINTING","PRINTED"]
     );
+    if (existing.rows[0]) {
+      await client.query("COMMIT");
+      return {created:false,job:existing.rows[0]};
+    }
+
+    const insert = await client.query(
+      "INSERT INTO print_jobs (shipping_label_id,packing_slip_id,document_type,printer_name,status) VALUES (NULL,$1,$2,$3,$4) RETURNING *",
+      [packingSlipId,"PACKING_SLIP",printerName??null,"PENDING"]
+    );
+    await client.query(
+      "UPDATE packing_slips SET print_status = $2, printer_name = COALESCE($3,printer_name), updated_at = NOW() WHERE id = $1",
+      [packingSlipId,"QUEUED",printerName??null]
+    );
+    await client.query("COMMIT");
+    return {created:true,job:insert.rows[0]};
+  } catch(error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-
-  if (
-    slip.status !== "COMPLETED"
-  ) {
-    throw new Error(
-      "Nur vollständig erstellte Lieferscheine können gedruckt werden."
-    );
-  }
-
-  if (!slip.pdf_base64) {
-    throw new Error(
-      "Lieferschein enthält kein PDF."
-    );
-  }
-
-  const existing =
-    await db.query(
-      `
-        SELECT *
-        FROM print_jobs
-        WHERE packing_slip_id = $1
-          AND document_type = 'PACKING_SLIP'
-          AND status IN (
-            'PENDING',
-            'PRINTING'
-          )
-        LIMIT 1
-      `,
-      [packingSlipId]
-    );
-
-  if (existing.rows[0]) {
-    return {
-      created: false,
-      job: existing.rows[0],
-    };
-  }
-
-  const insert =
-    await db.query(
-      `
-        INSERT INTO print_jobs (
-          shipping_label_id,
-          packing_slip_id,
-          document_type,
-          printer_name,
-          status
-        )
-        VALUES (
-          NULL,
-          $1,
-          'PACKING_SLIP',
-          $2,
-          'PENDING'
-        )
-        RETURNING *
-      `,
-      [
-        packingSlipId,
-        printerName ?? null,
-      ]
-    );
-
-  await db.query(
-    `
-      UPDATE packing_slips
-      SET
-        print_status = 'QUEUED',
-
-        printer_name = COALESCE(
-          $2,
-          printer_name
-        ),
-
-        updated_at = NOW()
-
-      WHERE id = $1
-    `,
-    [
-      packingSlipId,
-      printerName ?? null,
-    ]
-  );
-
-  return {
-    created: true,
-    job: insert.rows[0],
-  };
 }
 
 
-
 // ==========================================================
-// INVOICE PRINT JOB
+// // INVOICE PRINT JOB
 // ==========================================================
 
 export async function createInvoicePrintJob(

@@ -264,3 +264,89 @@ export async function markWebhookFailed(
     ]
   );
 }
+
+
+// ALO_WEBHOOK_ATOMIC_CLAIM_V1
+// Atomare Übernahme eines Webhook-Events.
+// Die zurückgegebene attempts-Zahl identifiziert den Versuch.
+export async function claimWebhookEvent(
+  id: string,
+  allowRecovery: boolean = false
+): Promise<{
+  claimed: boolean;
+  attempt: number | null;
+}> {
+  const result = await db.query<ShopifyWebhookEvent>(
+    `
+      UPDATE shopify_webhook_events
+      SET
+        status = 'PROCESSING',
+        attempts = attempts + 1,
+        processing_started_at = NOW(),
+        error_message = NULL,
+        updated_at = NOW()
+      WHERE id = $1
+        AND (
+          status = 'PENDING'
+          OR (
+            $2::boolean = TRUE
+            AND (
+              (status = 'FAILED' AND attempts < 3)
+              OR (
+                status = 'PROCESSING'
+                AND processing_started_at <
+                  NOW() - INTERVAL '30 minutes'
+              )
+            )
+          )
+        )
+      RETURNING *
+    `,
+    [id, allowRecovery]
+  );
+
+  const event = result.rows[0];
+
+  return {
+    claimed: Boolean(event),
+    attempt: event ? Number(event.attempts) : null,
+  };
+}
+
+
+// ALO_WEBHOOK_SAFE_FINISH_V1
+// Nur der aktuelle Verarbeitungsversuch darf den Event abschliessen.
+export async function finishClaimedWebhookEvent(
+  id: string,
+  attempt: number,
+  status: "COMPLETED" | "FAILED" | "NEEDS_REVIEW",
+  errorMessage: string | null = null
+): Promise<boolean> {
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new Error("Ungültige Webhook-Versuchsnummer.");
+  }
+
+  const result = await db.query<{ id: string }>(
+    `
+      UPDATE shopify_webhook_events
+      SET
+        status = $3,
+        error_message = CASE
+          WHEN $3 = 'COMPLETED' THEN NULL
+          ELSE $4
+        END,
+        processed_at = CASE
+          WHEN $3 = 'COMPLETED' THEN NOW()
+          ELSE processed_at
+        END,
+        updated_at = NOW()
+      WHERE id = $1
+        AND attempts = $2
+        AND status = 'PROCESSING'
+      RETURNING id
+    `,
+    [id, attempt, status, errorMessage]
+  );
+
+  return result.rows.length === 1;
+}

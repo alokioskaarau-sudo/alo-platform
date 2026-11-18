@@ -98,6 +98,76 @@ export function isPickupOrder(
   );
 }
 
+
+// ALO_STAFF_SAFE_CHANNEL_V1
+// Nur fuer die operative Staff-Bestellliste.
+// Die bestehende Paid-Order-Pipeline bleibt unveraendert.
+// ALO_STRICT_MIXED_CHANNEL_V1
+// Alle Fulfillment Orders muessen demselben
+// eindeutig erkannten Kanal angehoeren.
+export function getStaffOrderChannel(
+  order: any
+): "SHIPPING" | "PICKUP" | "ALO_NOW" | "UNKNOWN" {
+  const fulfillmentOrders =
+    getFulfillmentOrders(order);
+
+  if (fulfillmentOrders.length === 0) {
+    return "UNKNOWN";
+  }
+
+  // ALO_FULFILLMENT_PAGINATION_GUARD_V1
+  if (order?.fulfillmentOrders?.pageInfo?.hasNextPage !== false) return "UNKNOWN";
+
+  const channels = fulfillmentOrders.map(
+    (item: any) => {
+      const methodType = String(
+        item?.deliveryMethod?.methodType ?? ""
+      ).trim().toUpperCase();
+
+      const presentedName = String(
+        item?.deliveryMethod?.presentedName ?? ""
+      ).trim().toUpperCase();
+
+      if (
+        presentedName === "ALO NOW" ||
+        presentedName.startsWith("ALO NOW ") ||
+        presentedName.startsWith("ALO NOW -")
+      ) {
+        return "ALO_NOW";
+      }
+
+      if (
+        methodType === "PICK_UP" ||
+        methodType === "PICKUP" ||
+        presentedName.includes("ABHOLUNG") ||
+        presentedName.includes("PICKUP")
+      ) {
+        return "PICKUP";
+      }
+
+      if (
+        methodType === "SHIPPING" &&
+        !presentedName.includes("ALO NOW")
+      ) {
+        return "SHIPPING";
+      }
+
+      return "UNKNOWN";
+    }
+  );
+
+  const first = channels[0];
+
+  if (
+    first === "UNKNOWN" ||
+    channels.some(channel => channel !== first)
+  ) {
+    return "UNKNOWN";
+  }
+
+  return first;
+}
+
 export function getOrderFulfillmentType(
   order: any
 ): AloOrderFulfillmentType {

@@ -6,14 +6,16 @@ import {
 } from "node:crypto";
 
 import {
-  processPaidShopifyOrder,
-} from "../modules/shipping/paidOrderPipeline.service.js";
+  processPaidOrderWithAloNowV2697
+} from "../modules/aloNow/aloNowPaidOrderRouter.v2697.js";
 
 import {
   createWebhookEvent,
   markWebhookProcessing,
   markWebhookCompleted,
   markWebhookFailed,
+  claimWebhookEvent,
+  finishClaimedWebhookEvent,
 } from "../database/shopifyWebhookEvents.js";
 
 import {
@@ -90,56 +92,73 @@ function verifyShopifyWebhook(
 // PAID ORDER VERARBEITEN
 // ============================================================
 
+// ALO_SAFE_ORDER_WEBHOOK_V1
 async function processStoredWebhook(
   eventId: string,
   orderId: string
 ) {
+  let attempt: number | null = null;
+
   try {
-    await markWebhookProcessing(
-      eventId
-    );
+    const claim = await claimWebhookEvent(eventId);
 
-    const result =
-      await processPaidShopifyOrder(
-        orderId
-      );
+    if (!claim.claimed || claim.attempt === null) {
+      console.log("Webhook wird bereits verarbeitet oder ist abgeschlossen:", eventId);
+      return;
+    }
 
-    await markWebhookCompleted(
-      eventId
-    );
+    attempt = claim.attempt;
 
-    console.log(
-      "Shopify Webhook vollständig verarbeitet:",
-      {
-        eventId,
-        orderId,
-        orderName:
-          result?.orderName ??
-          null,
-        skipped:
-          result?.skipped ??
-          false,
-      }
-    );
+    const result = await processPaidOrderWithAloNowV2697(orderId);
 
-  } catch (error: any) {
-    const message =
-      error?.message ??
-      String(error);
-
-    await markWebhookFailed(
+    const completed = await finishClaimedWebhookEvent(
       eventId,
-      message
+      attempt,
+      "COMPLETED"
     );
 
-    console.error(
-      "Shopify Webhook Verarbeitung fehlgeschlagen:",
-      {
+    if (!completed) {
+      console.warn("Webhook-Abschluss verworfen: Versuch nicht mehr aktuell.", {
         eventId,
-        orderId,
-        error: message,
+        attempt,
+      });
+      return;
+    }
+
+    console.log("Shopify Webhook vollständig verarbeitet:", {
+      eventId,
+      orderId,
+      orderName: result?.orderName ?? null,
+      skipped: result?.skipped ?? false,
+    });
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+
+    if (attempt !== null) {
+      try {
+        const failed = await finishClaimedWebhookEvent(
+          eventId,
+          attempt,
+          "FAILED",
+          message
+        );
+
+        if (!failed) {
+          console.warn("Webhook-Fehlerstatus verworfen: Versuch nicht mehr aktuell.", {
+            eventId,
+            attempt,
+          });
+        }
+      } catch (statusError) {
+        console.error("Webhook-Fehlerstatus konnte nicht gespeichert werden:", statusError);
       }
-    );
+    }
+
+    console.error("Shopify Webhook Verarbeitung fehlgeschlagen:", {
+      eventId,
+      orderId,
+      error: message,
+    });
   }
 }
 
@@ -525,55 +544,78 @@ const PRODUCT_WEBHOOK_TOPICS =
     "products/update",
   ]);
 
+// ALO_SAFE_PRODUCT_WEBHOOK_V1
 async function processStoredProductWebhook(
   eventId: string,
   payload: any
 ) {
+  let attempt: number | null = null;
+
   try {
-    await markWebhookProcessing(
-      eventId
-    );
+    const claim = await claimWebhookEvent(eventId);
 
-    const result =
-      await processShopifyProductWebhook(
-        payload
-      );
+    if (!claim.claimed || claim.attempt === null) {
+      console.log("Produkt-Webhook bereits übernommen oder abgeschlossen:", eventId);
+      return;
+    }
 
-    await markWebhookCompleted(
-      eventId
-    );
+    attempt = claim.attempt;
 
-    console.log(
-      "Shopify Product Webhook vollständig verarbeitet:",
-      {
-        eventId,
-        action:
-          result.action,
-        productMasterId:
-          "productMasterId" in result
-            ? result.productMasterId
-            : null,
-        shopifyProductId:
-          result.shopifyProductId,
-      }
-    );
-  } catch (error: any) {
-    const message =
-      error?.message ??
-      String(error);
+    const result = await processShopifyProductWebhook(payload);
 
-    await markWebhookFailed(
+    const completed = await finishClaimedWebhookEvent(
       eventId,
-      message
+      attempt,
+      "COMPLETED"
     );
 
-    console.error(
-      "Shopify Product Webhook Verarbeitung fehlgeschlagen:",
-      {
+    if (!completed) {
+      console.warn("Produkt-Webhook: Abschlussversuch nicht mehr aktuell.", {
         eventId,
-        error: message,
+        attempt,
+      });
+      return;
+    }
+
+    console.log("Shopify Product Webhook vollständig verarbeitet:", {
+      eventId,
+      action: result.action,
+      productMasterId:
+        "productMasterId" in result
+          ? result.productMasterId
+          : null,
+      shopifyProductId: result.shopifyProductId,
+    });
+  } catch (error: any) {
+    const message = error?.message ?? String(error);
+
+    if (attempt !== null) {
+      try {
+        const updated = await finishClaimedWebhookEvent(
+          eventId,
+          attempt,
+          "FAILED",
+          message
+        );
+
+        if (!updated) {
+          console.warn("Produkt-Webhook: Fehlerstatus nicht mehr aktuell.", {
+            eventId,
+            attempt,
+          });
+        }
+      } catch (statusError) {
+        console.error(
+          "Produkt-Webhook: Fehlerstatus konnte nicht gespeichert werden:",
+          statusError
+        );
       }
-    );
+    }
+
+    console.error("Shopify Product Webhook Verarbeitung fehlgeschlagen:", {
+      eventId,
+      error: message,
+    });
   }
 }
 

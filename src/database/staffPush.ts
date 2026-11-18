@@ -215,3 +215,52 @@ export async function markStaffPushEventFailed(
     ]
   );
 }
+
+
+// ALO_NOW_ELIGIBLE_PUSH_V1
+export async function getEligibleAloNowPushTokens(
+  shopifyOrderId: string
+) {
+  const result = await db.query(
+    `
+      SELECT DISTINCT
+        token.expo_push_token
+      FROM staff_push_tokens token
+      INNER JOIN alo_driver_profiles driver
+        ON driver.staff_user_id = token.staff_user_id
+      INNER JOIN alo_now_deliveries delivery
+        ON delivery.shopify_order_id = $1
+      WHERE
+        token.active = TRUE
+        AND driver.approved = TRUE
+        AND driver.availability_status = 'ONLINE'
+        AND driver.last_seen_at >=
+          NOW() - INTERVAL '30 minutes'
+        AND delivery.delivery_status =
+          'WAITING_FOR_DRIVER'
+        AND delivery.assigned_driver_user_id IS NULL
+        AND (
+          driver.home_workspace = 'ONLINE'
+          OR driver.home_workspace =
+            delivery.fulfillment_workspace
+        )
+        AND (
+          SELECT COUNT(*)::INTEGER
+          FROM alo_now_deliveries active_delivery
+          WHERE
+            active_delivery.assigned_driver_user_id =
+              driver.staff_user_id
+            AND active_delivery.delivery_status IN (
+              'DRIVER_ASSIGNED',
+              'READY_FOR_PICKUP',
+              'PICKED_UP',
+              'ON_THE_WAY'
+            )
+        ) < driver.max_active_deliveries
+      ORDER BY token.expo_push_token
+    `,
+    [shopifyOrderId]
+  );
+
+  return result.rows;
+}

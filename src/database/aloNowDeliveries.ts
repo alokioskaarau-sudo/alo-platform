@@ -252,6 +252,8 @@ export async function claimAloNowDelivery(
           | "OFFLINE"
           | "ONLINE";
         max_active_deliveries: number;
+        last_seen_at: Date | null;
+        heartbeat_fresh: boolean;
         home_workspace: AloNowWorkspace;
       }>(
         `
@@ -259,6 +261,9 @@ export async function claimAloNowDelivery(
             staff_user_id,
             approved,
             availability_status,
+            last_seen_at,
+            (last_seen_at >= NOW() - INTERVAL '60 seconds')
+              AS heartbeat_fresh,
             max_active_deliveries,
             home_workspace
           FROM alo_driver_profiles
@@ -348,6 +353,7 @@ export async function claimAloNowDelivery(
       !driver.approved ||
       driver.availability_status !==
         "ONLINE" ||
+      !driver.heartbeat_fresh ||
       (
         driver &&
         driver.home_workspace !== "ONLINE" &&
@@ -1378,6 +1384,8 @@ export async function listAvailableAloNowDeliveriesForDriver(
         WHERE
           driver.approved = TRUE
           AND driver.availability_status = 'ONLINE'
+          AND driver.last_seen_at >=
+            NOW() - INTERVAL '60 seconds'
           AND delivery.delivery_status =
             'WAITING_FOR_DRIVER'
           AND delivery.assigned_driver_user_id IS NULL

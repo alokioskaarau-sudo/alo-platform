@@ -1,14 +1,12 @@
 import { db } from "../../database/db.js";
 
 import {
-  processPaidShopifyOrder,
-} from "./paidOrderPipeline.service.js";
+  processPaidOrderWithAloNowV2697
+} from "../aloNow/aloNowPaidOrderRouter.v2697.js";
 
 import {
-  markWebhookProcessing,
-  markWebhookCompleted,
-  markWebhookFailed,
-  markWebhookNeedsReview,
+  claimWebhookEvent,
+  finishClaimedWebhookEvent,
 } from "../../database/shopifyWebhookEvents.js";
 
 
@@ -46,67 +44,76 @@ function isPermanentWebhookFailure(
 // EINEN EVENT VERARBEITEN
 // ============================================================
 
+// ALO_SAFE_WEBHOOK_RECOVERY_V1
 async function recoverEvent(
   event: RecoverableWebhookEvent
 ) {
+  let attempt: number | null = null;
+
   try {
-    console.log(
-      "Webhook Recovery gestartet:",
-      {
+    const claim = await claimWebhookEvent(event.id, true);
+
+    if (!claim.claimed || claim.attempt === null) {
+      console.log("Webhook Recovery übersprungen:", {
         eventId: event.id,
-        orderId:
-          event.shopify_order_id,
-        previousStatus:
-          event.status,
-        previousAttempts:
-          event.attempts,
-      }
+        reason: "Event bereits übernommen oder nicht verfügbar",
+      });
+      return;
+    }
+
+    attempt = claim.attempt;
+
+    console.log("Webhook Recovery gestartet:", {
+      eventId: event.id,
+      orderId: event.shopify_order_id,
+      attempt,
+    });
+
+    const result = await processPaidOrderWithAloNowV2697(
+      event.shopify_order_id
     );
 
-    await markWebhookProcessing(
-      event.id
+    const completed = await finishClaimedWebhookEvent(
+      event.id,
+      attempt,
+      "COMPLETED"
     );
 
-    const result =
-      await processPaidShopifyOrder(
-        event.shopify_order_id
-      );
-
-    await markWebhookCompleted(
-      event.id
-    );
-
-    console.log(
-      "Webhook Recovery erfolgreich:",
-      {
+    if (!completed) {
+      console.warn("Webhook Recovery: Abschluss nicht mehr aktuell.", {
         eventId: event.id,
-        orderId:
-          event.shopify_order_id,
-        orderName:
-          result?.orderName ??
-          null,
-      }
-    );
+        attempt,
+      });
+      return;
+    }
+
+    console.log("Webhook Recovery erfolgreich:", {
+      eventId: event.id,
+      orderId: event.shopify_order_id,
+      orderName: result?.orderName ?? null,
+    });
   } catch (error: any) {
-    const message =
-      error?.message ??
-      String(error);
+    const message = error?.message ?? String(error);
+    const permanent = isPermanentWebhookFailure(message);
 
-    const permanent =
-      isPermanentWebhookFailure(
-        message
-      );
+    if (attempt !== null) {
+      try {
+        const updated = await finishClaimedWebhookEvent(
+          event.id,
+          attempt,
+          permanent ? "NEEDS_REVIEW" : "FAILED",
+          message
+        );
 
-    if (permanent) {
-      await markWebhookNeedsReview(
-        event.id,
-        message
-      );
-    } else {
-      await markWebhookFailed(
-        event.id,
-        message
-      );
+        if (!updated) {
+          console.warn("Webhook Recovery: Fehlerstatus nicht mehr aktuell.", {
+            eventId: event.id,
+            attempt,
+          });
+        }
+      } catch (statusError) {
+        console.error("Webhook Recovery: Fehlerstatus konnte nicht gespeichert werden:", statusError);
+      }
     }
 
     console.error(
@@ -115,12 +122,7 @@ async function recoverEvent(
         : "Webhook Recovery fehlgeschlagen:",
       {
         eventId: event.id,
-        orderId:
-          event.shopify_order_id,
-        status:
-          permanent
-            ? "NEEDS_REVIEW"
-            : "FAILED",
+        orderId: event.shopify_order_id,
         error: message,
       }
     );
@@ -153,7 +155,7 @@ export async function recoverPendingShopifyWebhooks() {
             OR (
               status = 'PROCESSING'
               AND processing_started_at <
-                NOW() - INTERVAL '5 minutes'
+                NOW() - INTERVAL '30 minutes'
             )
 
             OR (
