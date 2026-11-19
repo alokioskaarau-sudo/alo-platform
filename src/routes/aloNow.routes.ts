@@ -663,3 +663,361 @@ aloNowRouter.post(
 
 
 export default aloNowRouter;
+
+// ALO_NOW_V2896_ADMIN_ONLY_RELEASE
+// ALO_NOW_ADMIN_REQUEST_LIST_V2816
+// Authenticated and role-restricted merchant inbox.
+// Read-only: no driver assignment, payment or delivery acceptance.
+aloNowRouter.get(
+  "/admin/order-requests",
+  requireStaffAuth,
+  async (_req, res) => {
+    const staffUser = getStaffUser(res);
+    const role = String(
+      (staffUser as unknown as {role?: string}).role ?? ""
+    ).toUpperCase();
+
+    if (role !== "ADMIN" && role !== "MANAGER") {
+      return res.status(403).json({
+        ok: false,
+        error: "FORBIDDEN"
+      });
+    }
+
+    // ALO_NOW_ADMIN_WORKSPACE_SCOPE_V2818
+    const allowedWorkspaces = role === "ADMIN"
+      ? ["AARAU", "OLTEN"]
+      : (staffUser.allowedWorkspaces ?? []).filter(
+          workspace => workspace === "AARAU" || workspace === "OLTEN"
+        );
+
+    if (allowedWorkspaces.length === 0) {
+      return res.status(403).json({
+        ok: false,
+        error: "NO_WORKSPACE_ACCESS"
+      });
+    }
+
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+      return res.status(503).json({
+        ok: false,
+        error: "ALO_NOW_REQUESTS_NOT_ENABLED"
+      });
+    }
+
+    try {
+      const {db} = await import("../database/db.js");
+
+      const result = await db.query(`
+        SELECT
+          id,
+          workspace,
+          status,
+          delivery_address,
+          quote_status,
+          road_distance_km,
+          quoted_delivery_fee_chf,
+          verified_subtotal_chf,
+            offer.manual_offer_status,
+            offer.manual_offer_expires_at,
+            offer.manual_offer_version,
+          created_at
+        FROM alo_now_order_requests r
+          LEFT JOIN LATERAL (
+            SELECT
+              o.status AS manual_offer_status,
+              o.expires_at AS manual_offer_expires_at,
+              o.version AS manual_offer_version
+            FROM alo_now_manual_offers o
+            WHERE o.request_id = r.id
+            ORDER BY o.version DESC
+            LIMIT 1
+          ) offer ON TRUE
+          -- ALO_NOW_V2862_ADMIN_OFFER_STATUS
+        WHERE status IN (
+          'PENDING_REVIEW',
+          'CONTACTED'
+        )
+        AND workspace = ANY($1::text[])
+        ORDER BY created_at DESC
+        LIMIT 100
+      `, [allowedWorkspaces]);
+
+      // V2890: Display actual capacity only after the new schema has been applied.
+      const capacityByRequest = new Map<string, {
+        fulfillment_method:string;
+        capacity_confirmed_until:Date;
+        merchant_capacity_active:boolean;
+      }>();
+      const capacityTable = await db.query<{present:boolean}>(
+        "SELECT to_regclass('public.alo_now_merchant_acceptances') IS NOT NULL AS present"
+      );
+      if (capacityTable.rows[0]?.present === true && result.rows.length > 0) {
+        const ids = result.rows.map(row => String(row.id));
+        const capacities = await db.query<{
+          request_id:string;
+          fulfillment_method:string;
+          capacity_confirmed_until:Date;
+          merchant_capacity_active:boolean;
+        }>(`SELECT request_id::text AS request_id,fulfillment_method,
+                    capacity_confirmed_until,
+                    (capacity_confirmed_at <= clock_timestamp() AND
+                     capacity_confirmed_until > clock_timestamp()) AS merchant_capacity_active
+             FROM alo_now_merchant_acceptances
+             WHERE request_id=ANY($1::uuid[])`, [ids]);
+        for (const capacity of capacities.rows) {
+          capacityByRequest.set(capacity.request_id, capacity);
+        }
+      }
+      return res.json({
+        ok: true,
+        requests: result.rows.map(row => {
+          const capacity = capacityByRequest.get(String(row.id));
+          return {
+            ...row,
+            fulfillment_method: capacity?.fulfillment_method ?? null,
+            capacity_confirmed_until: capacity?.capacity_confirmed_until ?? null,
+            merchant_capacity_active: capacity?.merchant_capacity_active ?? false
+          };
+        })
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW ADMIN REQUEST LIST FAILED",
+        error
+      );
+
+      return res.status(503).json({
+        ok: false,
+        error: "ADMIN_REQUEST_LIST_UNAVAILABLE"
+      });
+    }
+  }
+);
+
+// ALO_NOW_V2890_INTERNAL_DELIVERY_CAPACITY_ROUTE
+// Merchant capacity reservation only. Never dispatches, charges, or creates orders.
+aloNowRouter.patch(
+  "/admin/order-requests/:id/accept-delivery",
+  requireStaffAuth,
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const staff = getStaffUser(res);
+    const role = String((staff as { role?: string }).role ?? "").toUpperCase();
+    if (role !== "ADMIN" && role !== "MANAGER") {
+      return res.status(403).json({ok:false,error:"FORBIDDEN"});
+    }
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true" ||
+        process.env.ALO_NOW_INTERNAL_CAPACITY_ENABLED !== "true") {
+      return res.status(503).json({ok:false,error:"CAPACITY_NOT_ENABLED"});
+    }
+    const requestId = String(req.params.id ?? "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ||
+        req.body?.method !== "INTERNAL_DELIVERY" ||
+        req.body?.capacityMinutes !== 15) {
+      return res.status(400).json({ok:false,error:"INVALID_CAPACITY_REQUEST"});
+    }
+    const identity = staff as {id:string|number;allowedWorkspaces?:string[]};
+    const workspaces = role === "ADMIN" ? ["AARAU", "OLTEN"] :
+      (identity.allowedWorkspaces ?? []).filter(w => w === "AARAU" || w === "OLTEN");
+    if (workspaces.length === 0) {
+      return res.status(403).json({ok:false,error:"NO_WORKSPACE_ACCESS"});
+    }
+    const {db} = await import("../database/db.js");
+    const client = await db.connect();
+    let transaction = false;
+    try {
+      await client.query("BEGIN");
+      transaction = true;
+      const table = await client.query<{present:boolean}>(
+        "SELECT to_regclass('public.alo_now_merchant_acceptances') IS NOT NULL AS present"
+      );
+      if (table.rows[0]?.present !== true) {
+        await client.query("ROLLBACK"); transaction = false;
+        return res.status(503).json({ok:false,error:"CAPACITY_SCHEMA_NOT_READY"});
+      }
+      const request = await client.query<{
+        id:string; status:string; quote_status:string; driver_user_id:string|null;
+        reservation_expires_at:Date|null;
+      }>(`SELECT id,status,quote_status,driver_user_id,reservation_expires_at
+          FROM alo_now_order_requests WHERE id=$1 AND workspace=ANY($2::text[])
+          FOR UPDATE`, [requestId, workspaces]);
+      const item = request.rows[0];
+      if (!item) {
+        await client.query("ROLLBACK"); transaction = false;
+        return res.status(404).json({ok:false,error:"REQUEST_NOT_FOUND"});
+      }
+      if (!["PENDING_REVIEW","CONTACTED"].includes(item.status) ||
+          item.quote_status !== "MANUAL_APPROVAL" ||
+          item.driver_user_id !== null) {
+        await client.query("ROLLBACK"); transaction = false;
+        return res.status(409).json({ok:false,error:"REQUEST_NOT_ELIGIBLE"});
+      }
+      const previous = await client.query<{assigned_driver_id:string|null}>(
+        "SELECT assigned_driver_id FROM alo_now_merchant_acceptances WHERE request_id=$1 FOR UPDATE",
+        [requestId]
+      );
+      if (previous.rows[0]?.assigned_driver_id != null) {
+        await client.query("ROLLBACK"); transaction = false;
+        return res.status(409).json({ok:false,error:"DRIVER_ALREADY_ASSIGNED"});
+      }
+      const result = await client.query<{capacity_confirmed_until:Date}>(`
+        INSERT INTO alo_now_merchant_acceptances
+          (request_id, fulfillment_method, assigned_driver_id, accepted_by,
+           capacity_confirmed_at, capacity_confirmed_until)
+        VALUES ($1,'INTERNAL_DELIVERY',NULL,$2,clock_timestamp(),
+                clock_timestamp()+INTERVAL '15 minutes')
+        ON CONFLICT (request_id) DO UPDATE
+          SET fulfillment_method='INTERNAL_DELIVERY',assigned_driver_id=NULL,
+              accepted_by=EXCLUDED.accepted_by,
+              capacity_confirmed_at=EXCLUDED.capacity_confirmed_at,
+              capacity_confirmed_until=EXCLUDED.capacity_confirmed_until
+        WHERE alo_now_merchant_acceptances.assigned_driver_id IS NULL
+        RETURNING capacity_confirmed_until`, [requestId,String(identity.id)]);
+      if (result.rowCount !== 1) {
+        await client.query("ROLLBACK"); transaction = false;
+        return res.status(409).json({ok:false,error:"CAPACITY_CONFLICT"});
+      }
+      await client.query("COMMIT"); transaction = false;
+      return res.json({ok:true,action:"INTERNAL_CAPACITY_CONFIRMED",
+        capacityConfirmedUntil:result.rows[0].capacity_confirmed_until});
+    } catch (_error) {
+      if (transaction) await client.query("ROLLBACK").catch(() => undefined);
+      console.error("ALO NOW V2890 CAPACITY RESERVATION FAILED");
+      return res.status(503).json({ok:false,error:"CAPACITY_UNAVAILABLE"});
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ALO_NOW_V2849_ADMIN_MANUAL_OFFER_ROUTE
+// Disabled by default. No payment or Shopify order creation.
+aloNowRouter.post(
+  "/admin/order-requests/:id/manual-offer",
+  requireStaffAuth,
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    const user = getStaffUser(res);
+    const role = String(
+      (user as { role?: string }).role ?? ""
+    ).toUpperCase();
+
+    if (role !== "ADMIN" && role !== "MANAGER") {
+      return res.status(403).json({
+        ok: false,
+        error: "ADMIN_REQUIRED"
+      });
+    }
+
+    if (
+      process.env.ALO_NOW_REQUESTS_ENABLED !== "true" ||
+      process.env.ALO_NOW_MANUAL_OFFERS_ENABLED !== "true"
+    ) {
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_OFFERS_NOT_ENABLED"
+      });
+    }
+
+    const body = req.body ?? {};
+
+    if (
+      typeof body.deliveryFeeCHF !== "string" ||
+      typeof body.extraFeeCHF !== "string" ||
+      (body.extraReason != null &&
+       typeof body.extraReason !== "string")
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_OFFER_INPUT"
+      });
+    }
+
+    const identity = user as {
+      id: string | number;
+      defaultWorkspace?: string | null;
+      allowedWorkspaces?: string[];
+    };
+
+    // ALO_NOW_V2862_SCOPE_MATCH_ADMIN_INBOX
+    const allowedWorkspaces = role === "ADMIN"
+      ? ["AARAU", "OLTEN"]
+      : (identity.allowedWorkspaces ?? []).filter(
+          workspace =>
+            workspace === "AARAU" || workspace === "OLTEN"
+        );
+
+    try {
+      const { createAloNowManualOfferV2848 } =
+        await import(
+          "../modules/aloNow/aloNowManualOfferService.v2848.js"
+        );
+
+      const result = await createAloNowManualOfferV2848({
+        requestId: String(req.params.id ?? ""),
+        staffUserId: String(identity.id),
+        allowedWorkspaces,
+        deliveryFeeCHF: body.deliveryFeeCHF,
+        extraFeeCHF: body.extraFeeCHF,
+        extraReason: body.extraReason ?? null
+      });
+
+      return res.status(201).json(result);
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : "UNKNOWN";
+
+      const badInput = new Set([
+        "INVALID_OFFER_IDENTITY",
+        "INVALID_CHF_AMOUNT",
+        "INVALID_CHF_TOTAL",
+        "SUBTOTAL_OUT_OF_RANGE",
+        "FEE_OUT_OF_RANGE",
+          "DELIVERY_FEE_BELOW_MINIMUM",
+          "INVALID_VERIFIED_SUBTOTAL",
+        "EXTRA_REASON_TOO_LONG",
+        "EXTRA_REASON_REQUIRED",
+        "TOTAL_OVERFLOW"
+      ]);
+
+      if (badInput.has(reason)) {
+        return res.status(400).json({
+          ok: false,
+          error: reason
+        });
+      }
+
+      if (
+        reason === "REQUEST_NOT_ELIGIBLE" ||
+        reason === "ACTIVE_OFFER_ALREADY_EXISTS"
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error: reason
+        });
+      }
+
+      if (
+        reason === "REQUEST_NOT_FOUND" ||
+        reason === "WORKSPACE_NOT_ALLOWED"
+      ) {
+        return res.status(404).json({
+          ok: false,
+          error: "REQUEST_NOT_FOUND"
+        });
+      }
+
+      console.error(
+        "ALO NOW MANUAL OFFER FAILURE",
+        reason === "UNKNOWN" ? "UNKNOWN" : "SERVER_ERROR"
+      );
+
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_OFFER_UNAVAILABLE"
+      });
+    }
+  }
+);
