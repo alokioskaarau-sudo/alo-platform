@@ -86,7 +86,7 @@ export async function createAloNowManualOfferV2848(input: {
       SET status = 'EXPIRED'
       WHERE request_id = $1
         AND status = 'OFFERED'
-        AND expires_at <= NOW()
+        AND expires_at <= clock_timestamp()
     `, [input.requestId]);
 
     const existing = await client.query<{ id: string }>(`
