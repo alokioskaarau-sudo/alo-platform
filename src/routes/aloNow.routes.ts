@@ -1021,3 +1021,314 @@ aloNowRouter.post(
     }
   }
 );
+
+// ALO_NOW_V2912_ISOLATED_CUSTOMER_API
+// ALO_NOW_V2851_CUSTOMER_MANUAL_DECISION
+// Stores customer decision only. Does not release checkout.
+aloNowRouter.post(
+  "/order-requests/:id/manual-offer/:offerId/decision",
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    if (
+      process.env.ALO_NOW_REQUESTS_ENABLED !== "true" ||
+      process.env.ALO_NOW_MANUAL_OFFERS_ENABLED !== "true"
+    ) {
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_OFFERS_NOT_ENABLED",
+        checkoutAllowed: false
+      });
+    }
+
+    const uuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    const requestId = String(req.params.id ?? "");
+    const offerId = String(req.params.offerId ?? "");
+    const token = req.body?.statusToken;
+    const decision = req.body?.decision;
+    const version = req.body?.version;
+
+    if (
+      !uuid.test(requestId) ||
+      !uuid.test(offerId) ||
+      typeof token !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(token) ||
+      !["ACCEPT", "DECLINE"].includes(decision) ||
+      !Number.isSafeInteger(version) ||
+      version < 1
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_MANUAL_DECISION",
+        checkoutAllowed: false
+      });
+    }
+
+    const { createHash } = await import("node:crypto");
+    const { db } = await import("../database/db.js");
+
+    const digest = createHash("sha256")
+      .update(token)
+      .digest("hex");
+
+    const client = await db.connect();
+    let inTransaction = false;
+
+    try {
+      await client.query("BEGIN");
+      inTransaction = true;
+      await client.query(
+        "SET LOCAL lock_timeout = '3s'"
+      );
+      await client.query(
+        "SET LOCAL statement_timeout = '12s'"
+      );
+
+      const request = await client.query<{
+        status: string;
+        quote_status: string;
+      }>(`
+        SELECT status, quote_status
+        FROM alo_now_order_requests
+        WHERE id = $1
+          AND customer_status_token_hash = $2
+        FOR UPDATE
+      `, [requestId, digest]);
+
+      const row = request.rows[0];
+
+      if (!row) {
+        await client.query("ROLLBACK");
+        inTransaction = false;
+        return res.status(404).json({
+          ok: false,
+          error: "REQUEST_NOT_FOUND",
+          checkoutAllowed: false
+        });
+      }
+
+      if (
+        row.quote_status !== "MANUAL_APPROVAL" ||
+        !["PENDING_REVIEW", "CONTACTED"]
+          .includes(row.status)
+      ) {
+        await client.query("ROLLBACK");
+        inTransaction = false;
+        return res.status(409).json({
+          ok: false,
+          error: "REQUEST_NOT_ELIGIBLE",
+          checkoutAllowed: false
+        });
+      }
+
+      const result = await client.query<{
+        status: string;
+        still_valid: boolean;
+      }>(`
+        SELECT status,
+               (expires_at > clock_timestamp()) AS still_valid
+        FROM alo_now_manual_offers
+        WHERE id = $1
+          AND request_id = $2
+          AND version = $3
+        FOR UPDATE
+      `, [offerId, requestId, version]);
+
+      const offer = result.rows[0];
+
+      if (!offer ||
+          offer.status !== "OFFERED" ||
+          offer.still_valid !== true) {
+        await client.query("ROLLBACK");
+        inTransaction = false;
+        return res.status(409).json({
+          ok: false,
+          error: "OFFER_NOT_ACTIVE",
+          checkoutAllowed: false
+        });
+      }
+
+      const nextStatus =
+        decision === "ACCEPT"
+          ? "ACCEPTED"
+          : "DECLINED";
+
+      await client.query(`
+        UPDATE alo_now_manual_offers
+        SET status = $4,
+            accepted_at = CASE
+              WHEN $4 = 'ACCEPTED' THEN NOW()
+              ELSE NULL
+            END
+        WHERE id = $1
+          AND request_id = $2
+          AND version = $3
+          AND status = 'OFFERED'
+      `, [offerId, requestId, version, nextStatus]);
+
+      await client.query("COMMIT");
+      inTransaction = false;
+
+      return res.status(200).json({
+        ok: true,
+        requestId,
+        offerId,
+        version,
+        status: nextStatus,
+        checkoutAllowed: false,
+        paymentCreated: false
+      });
+    } catch (error) {
+      if (inTransaction) {
+        await client.query("ROLLBACK");
+      }
+
+      console.error(
+        "ALO NOW MANUAL DECISION FAILURE",
+        error instanceof Error ? error.name : "UNKNOWN"
+      );
+
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_DECISION_UNAVAILABLE",
+        checkoutAllowed: false
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ALO_V2702_CUSTOMER_REQUEST_STATUS
+// Exact opaque customer token, no customer address or items in response.
+aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  if (process.env.ALO_NOW_REQUESTS_ENABLED !== 'true') {
+    return res.status(503).json({ ok: false, error: 'ALO_NOW_REQUESTS_NOT_ENABLED' });
+  }
+  const id = String(req.params.id ?? '');
+  const token = req.body?.statusToken;
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ||
+    typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)
+  ) {
+    return res.status(400).json({ ok: false, error: 'INVALID_STATUS_REQUEST' });
+  }
+  try {
+    const { createHash } = await import('node:crypto');
+    const { db } = await import('../database/db.js');
+    const digest = createHash('sha256').update(token).digest('hex');
+    const result = await db.query<{
+      status: string;
+      reservation_expires_at: Date | null;
+      payment_phase: string | null;
+    }>(`
+      SELECT r.status, r.reservation_expires_at,
+             p.phase AS payment_phase
+      FROM alo_now_order_requests r
+      LEFT JOIN alo_now_payment_states p ON p.request_id = r.id
+      WHERE r.id = $1 AND r.customer_status_token_hash = $2
+      LIMIT 1
+    `, [id, digest]);
+    const row = result.rows[0];
+    if (!row) return res.status(404).json({ ok: false, error: 'REQUEST_NOT_FOUND' });
+    const currentStatus = String(row.status);
+    const expiryMs = row.reservation_expires_at ? new Date(row.reservation_expires_at).getTime() : null;
+    const expiredHold = currentStatus === 'DRIVER_ACCEPTED' &&
+      expiryMs !== null && expiryMs <= Date.now() &&
+      !['PAYMENT_CONFIRMED','CASH_CONFIRMED'].includes(String(row.payment_phase ?? ''));
+    const status = expiredHold ? 'EXPIRED' : currentStatus;
+    // ALO_NOW_V2850_CUSTOMER_MANUAL_OFFER
+    // Only available after V2848 database migration.
+    // No checkout or payment authorization.
+    let manualOffer: null | {
+      id: string;
+      version: number;
+      status: string;
+      currency: "CHF";
+      subtotalCHF: string;
+      deliveryFeeCHF: string;
+      extraFeeCHF: string;
+      extraReason: string | null;
+      totalCHF: string;
+      expiresAt: string;
+      canAccept: boolean;
+    } = null;
+
+    if (process.env.ALO_NOW_MANUAL_OFFERS_ENABLED === "true") {
+      const offerResult = await db.query<{
+        id: string;
+        version: number;
+        status: string;
+        subtotal_chf: string;
+        delivery_fee_chf: string;
+        extra_fee_chf: string;
+        extra_reason: string | null;
+        total_chf: string;
+        expires_at: Date;
+      }>(`
+        SELECT o.id::text, o.version, o.status,
+               o.subtotal_chf::text,
+               o.delivery_fee_chf::text,
+               o.extra_fee_chf::text,
+               o.extra_reason,
+               o.total_chf::text,
+               o.expires_at
+        FROM alo_now_manual_offers o
+        INNER JOIN alo_now_order_requests r
+          ON r.id = o.request_id
+        WHERE o.request_id = $1
+          AND r.customer_status_token_hash = $2
+          AND o.status IN ('OFFERED', 'ACCEPTED')
+        ORDER BY o.version DESC
+        LIMIT 1
+      `, [id, digest]);
+
+      const offer = offerResult.rows[0];
+
+      if (offer) {
+        const expiresAt = new Date(offer.expires_at);
+        const stillValid = expiresAt.getTime() > Date.now();
+
+        manualOffer = {
+          id: offer.id,
+          version: Number(offer.version),
+          status:
+            offer.status === "OFFERED" && !stillValid
+              ? "EXPIRED"
+              : offer.status,
+          currency: "CHF",
+          subtotalCHF: Number(offer.subtotal_chf).toFixed(2),
+          deliveryFeeCHF: Number(offer.delivery_fee_chf).toFixed(2),
+          extraFeeCHF: Number(offer.extra_fee_chf).toFixed(2),
+          extraReason: offer.extra_reason,
+          totalCHF: Number(offer.total_chf).toFixed(2),
+          expiresAt: expiresAt.toISOString(),
+          canAccept:
+            offer.status === "OFFERED" &&
+            stillValid &&
+            status !== "REJECTED"
+        };
+      }
+    }
+
+    const message = status === 'DRIVER_OFFERED' ? 'Wir suchen einen verfügbaren Fahrer.' :
+      status === 'DRIVER_ACCEPTED' ? 'Ein Fahrer hat deine Anfrage vorläufig angenommen. Noch keine Bestellung oder Zahlung.' :
+      status === 'EXPIRED' ? 'Die Fahrerreservierung ist abgelaufen. Bitte beim Team nachfragen.' :
+      status === 'PENDING_REVIEW' ? 'Die Lieferanfrage wird geprüft.' :
+      status === 'REJECTED' ? 'Diese Lieferanfrage wurde abgelehnt.' :
+      'Der Status deiner Lieferanfrage wurde aktualisiert.';
+    return res.status(200).json({
+      ok: true, requestId: id, status,
+      manualOffer,
+      message, checkoutAllowed: false,
+      reservationExpiresAt: expiryMs === null ? null : new Date(expiryMs).toISOString()
+    });
+  } catch (error) {
+    console.error('ALO NOW CUSTOMER STATUS FAILED', error instanceof Error ? error.name : 'UNKNOWN');
+    return res.status(503).json({ ok: false, error: 'REQUEST_STATUS_UNAVAILABLE' });
+  }
+});
