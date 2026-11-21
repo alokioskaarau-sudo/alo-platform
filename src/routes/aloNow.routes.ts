@@ -1,3 +1,4 @@
+import { getVerifiedAloNowQuote } from "../modules/aloNow/aloNowVerifiedRouting.service.js";
 import {
   Router,
 } from "express";
@@ -662,6 +663,87 @@ aloNowRouter.post(
 );
 
 
+aloNowRouter.post("/order-requests", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  // ALO_NOW_V2948W_PUBLIC_INTAKE_KILL_SWITCH
+  // Independent from existing staff and offer workflows.
+  if (process.env.ALO_NOW_PUBLIC_INTAKE_ENABLED !== "true") {
+    return res.status(503).json({
+      ok: false,
+      error: "ALO_NOW_PUBLIC_INTAKE_DISABLED"
+    });
+  }
+  if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+    return res.status(503).json({ ok: false, error: "ALO_NOW_REQUESTS_NOT_ENABLED" });
+  }
+  const { randomUUID, randomBytes, createHash } = await import("node:crypto");
+  // ALO_NOW_CUSTOMER_STATUS_V5: independent random customer token, never log it.
+  const customerStatusToken = randomBytes(32).toString("base64url");
+  const customerStatusTokenHash = createHash("sha256").update(customerStatusToken).digest("hex");
+  const { db } = await import("../database/db.js");
+  const body = req.body ?? {};
+  const workspace = typeof body.workspace === "string" ? body.workspace.trim().toUpperCase() : "";
+  const address = typeof body.address === "string" ? body.address.trim() : "";
+  const clientRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId.trim() : "";
+  const items = body.items;
+  if (!(["AARAU", "OLTEN"].includes(workspace)) || address.length < 8 || address.length > 180 ||
+      !/^[A-Za-z0-9_-]{16,100}$/.test(clientRequestId) ||
+      !Array.isArray(items) || items.length < 1 || items.length > 15 ||
+      !items.every((x: unknown) => {
+        if (!x || typeof x !== "object") return false;
+        const item = x as Record<string, unknown>;
+        return typeof item.variantId === "string" &&
+          /^gid:\/\/shopify\/ProductVariant\/[0-9]+$/.test(item.variantId) &&
+          Number.isInteger(item.quantity) && Number(item.quantity) >= 1 && Number(item.quantity) <= 30 &&
+          Object.keys(item).every(k => k === "variantId" || k === "quantity");
+      })) {
+    return res.status(400).json({ ok: false, error: "INVALID_ORDER_REQUEST" });
+  }
+  // A customer can request a review, not a final checkout or price commitment.
+  // Until trusted Shopify variant price and age checks exist, admin cannot "accept".
+  try {
+    const quote = await getVerifiedAloNowQuote(address, workspace as "AARAU" | "OLTEN");
+    if (!quote.ok || (quote.status !== "STANDARD" && quote.status !== "MANUAL_APPROVAL") ||
+        typeof quote.roadDistanceKm !== "number" || !Number.isFinite(quote.roadDistanceKm)) {
+      return res.status(422).json({ ok: false, error: "DELIVERY_ROUTE_UNVERIFIED" });
+    }
+    // ALO_NOW_SHOPIFY_CART_GUARD_V1: trust server-fetched price, not browser values.
+    // AGE_16/18 and unreviewed products are blocked (pilot NONE only).
+    const { verifyAloNowShopifyCart, AloNowCartError } =
+      await import("../modules/aloNow/aloNowShopifyCartGuard.service.js");
+    let verifiedCart;
+    try {
+      verifiedCart = await verifyAloNowShopifyCart(items);
+    } catch (error) {
+      if (error instanceof AloNowCartError) {
+        return res.status(422).json({ ok: false, error: error.code });
+      }
+      console.error("ALO NOW SHOPIFY CART LOOKUP FAILED", error);
+      return res.status(503).json({ ok: false, error: "SHOPIFY_VALIDATION_UNAVAILABLE" });
+    }
+    const result = await db.query<{id: string; status: string; created_at: Date}>(`
+      INSERT INTO alo_now_order_requests
+        (id, client_request_id, workspace, delivery_address, items,
+         quote_status, road_distance_km, quoted_delivery_fee_chf, verified_subtotal_chf, verified_at, customer_status_token_hash)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,NOW(),$10)
+      ON CONFLICT (client_request_id) DO NOTHING
+      RETURNING id, status, created_at
+    `, [randomUUID(), clientRequestId, workspace, address,
+        JSON.stringify(verifiedCart.items), quote.status, quote.roadDistanceKm,
+        quote.deliveryFeeCHF, verifiedCart.subtotalCHF, customerStatusTokenHash]);
+    if (!result.rows[0]) {
+      return res.status(409).json({ ok: false, error: "REQUEST_ID_ALREADY_USED" });
+    }
+    return res.status(202).json({ ok: true, requestId: result.rows[0].id,
+      status: "PENDING_REVIEW", checkoutAllowed: false, customerStatusToken,
+      verifiedSubtotalCHF: verifiedCart.subtotalCHF, currency: "CHF",
+      message: "Unverbindliche Lieferanfrage gespeichert. Keine Bestellung oder Zahlung erfolgt." });
+  } catch (error) {
+    console.error("ALO NOW REQUEST INTAKE FAILED", error);
+    return res.status(503).json({ ok: false, error: "ORDER_REQUEST_UNAVAILABLE" });
+  }
+});
+
 export default aloNowRouter;
 
 // ALO_NOW_V2896_ADMIN_ONLY_RELEASE
@@ -710,18 +792,19 @@ aloNowRouter.get(
 
       const result = await db.query(`
         SELECT
-          id,
-          workspace,
-          status,
-          delivery_address,
-          quote_status,
-          road_distance_km,
-          quoted_delivery_fee_chf,
-          verified_subtotal_chf,
+          r.id,
+          r.workspace,
+          r.status,
+          r.delivery_address,
+            r.items,
+          r.quote_status,
+          r.road_distance_km,
+          r.quoted_delivery_fee_chf,
+          r.verified_subtotal_chf,
             offer.manual_offer_status,
             offer.manual_offer_expires_at,
             offer.manual_offer_version,
-          created_at
+          r.created_at
         FROM alo_now_order_requests r
           LEFT JOIN LATERAL (
             SELECT
@@ -734,12 +817,12 @@ aloNowRouter.get(
             LIMIT 1
           ) offer ON TRUE
           -- ALO_NOW_V2862_ADMIN_OFFER_STATUS
-        WHERE status IN (
+        WHERE r.status IN (
           'PENDING_REVIEW',
           'CONTACTED'
         )
-        AND workspace = ANY($1::text[])
-        ORDER BY created_at DESC
+        AND r.workspace = ANY($1::text[])
+        ORDER BY r.created_at DESC
         LIMIT 100
       `, [allowedWorkspaces]);
 
