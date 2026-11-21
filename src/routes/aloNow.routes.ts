@@ -665,6 +665,14 @@ aloNowRouter.post(
 
 aloNowRouter.post("/order-requests", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+  // ALO_NOW_V2948W_PUBLIC_INTAKE_KILL_SWITCH
+  // Independent from existing staff and offer workflows.
+  if (process.env.ALO_NOW_PUBLIC_INTAKE_ENABLED !== "true") {
+    return res.status(503).json({
+      ok: false,
+      error: "ALO_NOW_PUBLIC_INTAKE_DISABLED"
+    });
+  }
   if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
     return res.status(503).json({ ok: false, error: "ALO_NOW_REQUESTS_NOT_ENABLED" });
   }
