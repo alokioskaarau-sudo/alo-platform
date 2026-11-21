@@ -1223,10 +1223,11 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
     const digest = createHash('sha256').update(token).digest('hex');
     const result = await db.query<{
       status: string;
-      reservation_expires_at: Date | null;
+      quote_status: string;
+        reservation_expires_at: Date | null;
       payment_phase: string | null;
     }>(`
-      SELECT r.status, r.reservation_expires_at,
+      SELECT r.status, r.quote_status, r.reservation_expires_at,
              p.phase AS payment_phase
       FROM alo_now_order_requests r
       LEFT JOIN alo_now_payment_states p ON p.request_id = r.id
@@ -1282,7 +1283,7 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
           ON r.id = o.request_id
         WHERE o.request_id = $1
           AND r.customer_status_token_hash = $2
-          AND o.status IN ('OFFERED', 'ACCEPTED')
+          AND o.status IN ('OFFERED', 'ACCEPTED', 'DECLINED')
         ORDER BY o.version DESC
         LIMIT 1
       `, [id, digest]);
@@ -1310,7 +1311,8 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
           canAccept:
             offer.status === "OFFERED" &&
             stillValid &&
-            status !== "REJECTED"
+            ["PENDING_REVIEW", "CONTACTED"].includes(status) &&
+              row.quote_status === "MANUAL_APPROVAL"
         };
       }
     }
