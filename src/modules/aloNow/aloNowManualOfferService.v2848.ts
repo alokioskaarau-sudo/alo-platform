@@ -17,7 +17,7 @@ const UUID =
 // Normalize as text; never round verified prices via float.
 function exactVerifiedSubtotalV2860(value: string): string {
   const match =
-    /^(0|[1-9][0-9]{0,7})(?:\\.([0-9]{1,2}))?$/.exec(value);
+    /^(0|[1-9][0-9]{0,7})(?:\.([0-9]{1,2}))?$/.exec(value);
 
   if (!match) {
     throw new Error("INVALID_VERIFIED_SUBTOTAL");
