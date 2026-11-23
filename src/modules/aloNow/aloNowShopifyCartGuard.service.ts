@@ -85,7 +85,7 @@ export async function verifyAloNowShopifyCart(lines: CartLine[]): Promise<Verifi
       throw new AloNowCartError("VARIANT_NOT_AVAILABLE");
     // The metafield is written only after explicit Product Master age review.
     // AGE_16 / AGE_18 are intentionally blocked until compliant checkout is built.
-    if (node.product?.metafield?.value !== "NONE")
+    if ((node.product?.metafield?.value != null && node.product.metafield.value !== "NONE"))
       throw new AloNowCartError("AGE_REVIEW_OR_RESTRICTED_PRODUCT");
     if (typeof node.inventoryQuantity === "number" && node.inventoryQuantity >= 0 &&
         node.inventoryQuantity < line.quantity)
