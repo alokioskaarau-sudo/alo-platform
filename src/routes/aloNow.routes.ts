@@ -1,3 +1,7 @@
+import { db as aloNowCheckoutPoolV3062 } from "../database/db.js";
+import { getShopifyAccessToken as getCheckoutShopifyTokenV3062 } from "../integrations/shopify/auth.js";
+import { env as aloNowCheckoutEnvV3062 } from "../config/env.js";
+import { createAloNowLiveCheckoutV3060D } from "../modules/aloNow/aloNowLiveCheckoutOrchestrator.v3060d.js";
 import { getVerifiedAloNowQuote } from "../modules/aloNow/aloNowVerifiedRouting.service.js";
 import {
   Router,
@@ -819,7 +823,9 @@ aloNowRouter.get(
           -- ALO_NOW_V2862_ADMIN_OFFER_STATUS
         WHERE r.status IN (
           'PENDING_REVIEW',
-          'CONTACTED'
+          'CONTACTED',
+          'DRIVER_OFFERED',
+          'DRIVER_ACCEPTED'
         )
         AND r.workspace = ANY($1::text[])
         ORDER BY r.created_at DESC
@@ -1398,6 +1404,112 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
       }
     }
 
+
+    // V3583_CUSTOMER_CHECKOUT_READY
+    // Read-only. No Shopify call or payment creation.
+    let checkoutReadyV3583 = false;
+
+    if (
+      process.env.ALO_NOW_CUSTOMER_CHECKOUT_LINK_ENABLED === "true" &&
+      ["DRIVER_ACCEPTED", "PENDING_REVIEW", "CONTACTED"]
+        .includes(status)
+    ) {
+      const readinessV3583 = await db.query<{
+        ready: boolean;
+      }>(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM public.alo_now_order_requests r
+          JOIN public.alo_now_payment_states p
+            ON p.request_id = r.id
+          JOIN LATERAL (
+            SELECT
+              a.status,
+              a.invoice_url,
+              a.expected_total_chf
+            FROM public.alo_now_checkout_attempts a
+            WHERE a.request_id = r.id
+            ORDER BY a.created_at DESC,
+                     a.checkout_reference DESC
+            LIMIT 1
+          ) a ON TRUE
+          WHERE r.id = $1
+            AND r.customer_status_token_hash = $2
+            AND r.workspace = 'AARAU'
+            AND (
+              (
+                r.status = 'DRIVER_ACCEPTED'
+                AND r.driver_user_id IS NOT NULL
+                AND r.reservation_expires_at > NOW()
+              )
+              OR (
+                r.status IN ('PENDING_REVIEW', 'CONTACTED')
+                AND r.driver_user_id IS NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM public.alo_now_merchant_acceptances mi
+                  WHERE mi.request_id = r.id
+                    AND mi.fulfillment_method = 'INTERNAL_DELIVERY'
+                    AND mi.assigned_driver_id IS NULL
+                    AND btrim(mi.accepted_by) <> ''
+                    AND mi.capacity_confirmed_at <= NOW()
+                    AND mi.capacity_confirmed_until > NOW()
+                )
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM public.alo_now_merchant_acceptances m
+              WHERE m.request_id = r.id
+                AND m.capacity_confirmed_until <= NOW()
+            )
+            AND p.phase = 'AWAITING_PAYMENT'
+            AND p.payment_method = 'ONLINE'
+            AND a.status = 'READY'
+            AND a.invoice_url IS NOT NULL
+            AND length(a.invoice_url) > 8
+            AND a.expected_total_chf::numeric = (
+              CASE
+                WHEN r.quote_status = 'STANDARD'
+                  AND r.verified_at IS NOT NULL
+                  AND r.verified_subtotal_chf > 0
+                  AND r.quoted_delivery_fee_chf = 12.90
+                THEN
+                  r.verified_subtotal_chf +
+                  r.quoted_delivery_fee_chf
+
+                WHEN r.quote_status = 'MANUAL_APPROVAL'
+                  AND r.verified_at IS NOT NULL
+                THEN (
+                  SELECT mo.total_chf
+                  FROM public.alo_now_manual_offers mo
+                  WHERE mo.request_id = r.id
+                    AND mo.version = (
+                      SELECT MAX(newest.version)
+                      FROM public.alo_now_manual_offers newest
+                      WHERE newest.request_id = r.id
+                    )
+                    AND mo.status = 'ACCEPTED'
+                    AND mo.subtotal_chf =
+                        r.verified_subtotal_chf
+                    AND mo.delivery_fee_chf = 12.90
+                    AND mo.extra_fee_chf >= 0
+                    AND mo.total_chf =
+                        mo.subtotal_chf +
+                        mo.delivery_fee_chf +
+                        mo.extra_fee_chf
+                  LIMIT 1
+                )
+                ELSE NULL
+              END
+            )
+        ) AS ready
+      `, [id, digest]);
+
+      checkoutReadyV3583 =
+        readinessV3583.rows[0]?.ready === true;
+    }
+
     const message = status === 'DRIVER_OFFERED' ? 'Wir suchen einen verfügbaren Fahrer.' :
       status === 'DRIVER_ACCEPTED' ? 'Ein Fahrer hat deine Anfrage vorläufig angenommen. Noch keine Bestellung oder Zahlung.' :
       status === 'EXPIRED' ? 'Die Fahrerreservierung ist abgelaufen. Bitte beim Team nachfragen.' :
@@ -1407,7 +1519,7 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
     return res.status(200).json({
       ok: true, requestId: id, status,
       manualOffer,
-      message, checkoutAllowed: false,
+      message, checkoutAllowed: checkoutReadyV3583,
       reservationExpiresAt: expiryMs === null ? null : new Date(expiryMs).toISOString()
     });
   } catch (error) {
@@ -1714,9 +1826,111 @@ aloNowRouter.post(
         return res.status(409).json({ok:false,error:"ALREADY_TAKEN_OR_NOT_ELIGIBLE"});
       }
 
+
+    // V3586_DRIVER_PAYMENT
+    // Separater Feature-Schalter, standardmaessig deaktiviert.
+    // Fuehrt keine Shopify-Aktion aus.
+    // V3588_REQUIRE_PAYMENT_TRANSITION
+    // Ohne Zahlungsuebergang keine erfolgreiche Fahrerannahme.
+    // Ein Fehler rollt die bereits begonnene Transaktion zurueck.
+    if (
+      process.env.ALO_NOW_MANUAL_DRIVER_PAYMENT_ENABLED !== "true"
+    ) {
+      throw new Error("MANUAL_DRIVER_PAYMENT_DISABLED");
+    }
+
+    if (updated.rows[0]) {
+      const eligibilityV3586 = await client.query<{
+        quote_status: string;
+      }>(`
+        SELECT r.quote_status
+        FROM public.alo_now_order_requests r
+        WHERE r.id = $1
+          AND r.status = 'DRIVER_ACCEPTED'
+          AND r.driver_user_id = $2
+          AND r.reservation_expires_at > NOW()
+        FOR UPDATE
+      `, [id, String(staff.id)]);
+
+      if (eligibilityV3586.rowCount !== 1) {
+        throw new Error("DRIVER_RESERVATION_INVALID");
+      }
+
+      if (eligibilityV3586.rows[0].quote_status === 'MANUAL_APPROVAL') {
+        const acceptedV3586 = await client.query(`
+          SELECT 1
+          FROM public.alo_now_order_requests r
+          JOIN public.alo_now_manual_offers m
+            ON m.request_id = r.id
+          WHERE r.id = $1
+            AND r.verified_at IS NOT NULL
+            AND m.version = (
+              SELECT MAX(version)
+              FROM public.alo_now_manual_offers
+              WHERE request_id = r.id
+            )
+            AND m.status = 'ACCEPTED'
+            AND m.subtotal_chf = r.verified_subtotal_chf
+            AND m.delivery_fee_chf = 12.90
+            AND m.extra_fee_chf >= 0
+            AND m.total_chf =
+              m.subtotal_chf + m.delivery_fee_chf + m.extra_fee_chf
+          LIMIT 1
+        `, [id]);
+
+        if (acceptedV3586.rowCount !== 1) {
+          throw new Error("LATEST_MANUAL_OFFER_INVALID");
+        }
+
+        const merchantV3586 = await client.query(`
+          INSERT INTO public.alo_now_merchant_acceptances (
+            request_id, fulfillment_method, assigned_driver_id,
+            accepted_by, capacity_confirmed_at,
+            capacity_confirmed_until
+          )
+          VALUES (
+            $1, 'ASSIGNED_DRIVER', $2, $2,
+            NOW(), NOW() + INTERVAL '10 minutes'
+          )
+          ON CONFLICT (request_id) DO NOTHING
+          RETURNING request_id
+        `, [id, String(staff.id)]);
+
+        if (merchantV3586.rowCount !== 1) {
+          throw new Error("FULFILLMENT_ALREADY_CLAIMED");
+        }
+
+        const { randomUUID } = await import("node:crypto");
+
+        const paymentV3586 = await client.query(`
+          INSERT INTO public.alo_now_payment_states (
+            id, request_id, phase, payment_method
+          )
+          VALUES ($1, $2, 'AWAITING_PAYMENT', 'ONLINE')
+          ON CONFLICT (request_id) DO UPDATE
+            SET phase = 'AWAITING_PAYMENT',
+                payment_method = 'ONLINE',
+                version = alo_now_payment_states.version + 1,
+                updated_at = NOW()
+          WHERE alo_now_payment_states.phase
+                IN ('AWAITING_DRIVER', 'DRIVER_ACCEPTED')
+            AND alo_now_payment_states.payment_method IS NULL
+          RETURNING request_id
+        `, [randomUUID(), id]);
+
+        if (paymentV3586.rowCount !== 1) {
+          throw new Error("PAYMENT_STATE_CONFLICT");
+        }
+      }
+    }
       await client.query("COMMIT");
+      const checkoutV3590 =
+        await prepareCheckoutAfterClaimV3590(id);
       return res.json({
-        ok:true,request:updated.rows[0],checkoutAllowed:false
+        ok:true,
+        request:updated.rows[0],
+        checkoutAllowed:false,
+        checkoutPrepared:checkoutV3590.prepared
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(()=>undefined);
@@ -1778,6 +1992,692 @@ aloNowRouter.post(
         ok: false,
         error: "DRIVER_HEARTBEAT_UNAVAILABLE"
       });
+    }
+  }
+);
+
+// V3572_RESTORED_GUARDED_CHECKOUT_ROUTES
+aloNowRouter.post(
+  "/admin/order-requests/:id/prepare-checkout",
+  requireStaffAuth,
+  async (req, res) => {
+    const staff = getStaffUser(res);
+
+    if (String(staff.role).toUpperCase() !== "ADMIN") {
+      return res.status(403).json({
+        ok: false,
+        error: "ADMIN_REQUIRED"
+      });
+    }
+
+    if (
+      process.env.ALO_NOW_LIVE_DRAFT_CHECKOUT_ENABLED !== "true" ||
+      process.env.ALO_NOW_LIVE_CHECKOUT_ORCHESTRATOR_ENABLED !== "true"
+    ) {
+      return res.status(503).json({
+        ok: false,
+        error: "CHECKOUT_NOT_RELEASED"
+      });
+    }
+
+    const requestId = String(req.params.id || "");
+
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_REQUEST_ID"
+      });
+    }
+
+    try {
+      const accessToken =
+        await getCheckoutShopifyTokenV3062();
+
+      const rawShop =
+        aloNowCheckoutEnvV3062.shopify.shop
+          .replace(/^https?:\/\//, "")
+          .replace(/\/$/, "");
+
+      const shopDomain =
+        rawShop.endsWith(".myshopify.com")
+          ? rawShop
+          : rawShop + ".myshopify.com";
+
+      if (
+        !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(
+          shopDomain
+        )
+      ) {
+        throw new Error("INVALID_SHOPIFY_DOMAIN");
+      }
+
+      const result =
+        await createAloNowLiveCheckoutV3060D(
+          aloNowCheckoutPoolV3062,
+          {
+            requestId,
+            shopDomain,
+            accessToken
+          }
+        );
+
+      if (!result.ok) {
+        return res.status(
+          result.status === "RECONCILE" ? 409 : 422
+        ).json({
+          ok: false,
+          status: result.status,
+          error: result.reason
+        });
+      }
+
+      // Zahlungslink wird hier absichtlich NICHT
+      // ausgegeben. Nur die geschuetzte Kundenroute
+      // darf den gespeicherten Link zurueckgeben.
+      return res.json({
+        ok: true,
+        status: "READY",
+        checkoutAllowed: true
+      });
+    } catch (error) {
+      console.error(
+        "ALO NOW V3062 CHECKOUT ERROR",
+        error instanceof Error
+          ? error.message
+          : "UNKNOWN_ERROR"
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: "CHECKOUT_PREPARATION_FAILED"
+      });
+    }
+  }
+);
+
+aloNowRouter.post(
+  "/order-requests/:id/checkout-link",
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    if (
+      process.env.ALO_NOW_CUSTOMER_CHECKOUT_LINK_ENABLED !== "true"
+    ) {
+      return res.status(503).json({
+        ok: false,
+        error: "CUSTOMER_CHECKOUT_NOT_ENABLED"
+      });
+    }
+
+    const requestId = String(req.params.id ?? "");
+    const token = req.body?.statusToken;
+
+    const uuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    if (
+      !uuid.test(requestId) ||
+      typeof token !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(token)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_CHECKOUT_AUTHORIZATION"
+      });
+    }
+
+    try {
+      const {createHash} = await import("node:crypto");
+      const {db} = await import("../database/db.js");
+
+      const tokenHash = createHash("sha256")
+        .update(token)
+        .digest("hex");
+
+      const result = await db.query<{
+        status: string;
+        payment_phase: string | null;
+        payment_method: string | null;
+        checkout_status: string | null;
+        invoice_url: string | null;
+      }>(`
+        SELECT
+          r.status,
+          p.phase AS payment_phase,
+          p.payment_method,
+          a.status AS checkout_status,
+          a.invoice_url
+        FROM public.alo_now_order_requests r
+        LEFT JOIN public.alo_now_payment_states p
+          ON p.request_id = r.id
+        LEFT JOIN LATERAL (
+          -- V3517_LATEST_CHECKOUT
+          SELECT
+            latest_attempt.status,
+            latest_attempt.invoice_url,
+            latest_attempt.expected_total_chf
+          FROM public.alo_now_checkout_attempts latest_attempt
+          WHERE latest_attempt.request_id = r.id
+          ORDER BY latest_attempt.created_at DESC,
+                   latest_attempt.checkout_reference DESC
+          LIMIT 1
+        ) a ON TRUE
+        WHERE r.id = $1
+          -- V3582_CHECKOUT_RESERVATION_GUARD
+          AND (
+            (
+              r.status = 'DRIVER_ACCEPTED'
+              AND r.driver_user_id IS NOT NULL
+              AND r.reservation_expires_at > NOW()
+            )
+            OR (
+              r.status IN ('PENDING_REVIEW', 'CONTACTED')
+              AND r.driver_user_id IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM public.alo_now_merchant_acceptances mi
+                WHERE mi.request_id = r.id
+                  AND mi.fulfillment_method = 'INTERNAL_DELIVERY'
+                  AND mi.assigned_driver_id IS NULL
+                  AND btrim(mi.accepted_by) <> ''
+                  AND mi.capacity_confirmed_at <= NOW()
+                  AND mi.capacity_confirmed_until > NOW()
+              )
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM public.alo_now_merchant_acceptances merchant
+            WHERE merchant.request_id = r.id
+              AND merchant.capacity_confirmed_until <= NOW()
+          )
+          AND r.customer_status_token_hash = $2
+          AND r.workspace = 'AARAU'
+          AND a.status = 'READY'
+          AND a.invoice_url IS NOT NULL
+          AND length(a.invoice_url) > 8
+          AND a.expected_total_chf::numeric = (
+                CASE
+                  WHEN r.quote_status = 'STANDARD'
+                    AND r.verified_at IS NOT NULL
+                    AND r.verified_subtotal_chf > 0
+                    AND r.quoted_delivery_fee_chf = 12.90
+                  THEN
+                    r.verified_subtotal_chf
+                    + r.quoted_delivery_fee_chf
+
+                  WHEN r.quote_status = 'MANUAL_APPROVAL'
+                    AND r.verified_at IS NOT NULL
+                  THEN (
+                    SELECT mo.total_chf
+                    FROM public.alo_now_manual_offers mo
+                    WHERE mo.request_id = r.id
+                      AND mo.version = (
+                        SELECT MAX(latest.version)
+                        FROM public.alo_now_manual_offers latest
+                        WHERE latest.request_id = r.id
+                      )
+                      AND mo.status = 'ACCEPTED'
+                      AND mo.subtotal_chf =
+                          r.verified_subtotal_chf
+                      AND mo.delivery_fee_chf = 12.90
+                      AND mo.extra_fee_chf >= 0
+                      AND mo.total_chf =
+                          mo.subtotal_chf
+                          + mo.delivery_fee_chf
+                          + mo.extra_fee_chf
+                    LIMIT 1
+                  )
+                  ELSE NULL
+                END
+              )
+          -- V3503_CUSTOMER_INTERNAL_CHECKOUT
+          AND (
+            (
+              r.status = 'DRIVER_ACCEPTED'
+              AND r.driver_user_id IS NOT NULL
+              AND r.reservation_expires_at > clock_timestamp()
+            )
+            OR (
+              r.status IN ('PENDING_REVIEW', 'CONTACTED')
+              AND EXISTS (
+                SELECT 1
+                FROM public.alo_now_merchant_acceptances m
+                WHERE m.request_id = r.id
+                  AND m.fulfillment_method = 'INTERNAL_DELIVERY'
+                  AND m.capacity_confirmed_at <= clock_timestamp()
+                  AND m.capacity_confirmed_until > clock_timestamp()
+                  AND btrim(m.accepted_by) <> ''
+                  AND m.assigned_driver_id IS NULL
+              )
+              AND (
+                r.quote_status = 'STANDARD'
+                OR (
+                  r.quote_status = 'MANUAL_APPROVAL'
+                  AND r.verified_at IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1
+                    FROM public.alo_now_manual_offers mo
+                    WHERE mo.request_id = r.id
+                      AND mo.status = 'ACCEPTED'
+                      AND mo.version = (
+                        SELECT MAX(latest.version)
+                        FROM public.alo_now_manual_offers latest
+                        WHERE latest.request_id = r.id
+                      )
+                      AND mo.subtotal_chf = r.verified_subtotal_chf
+                      AND mo.delivery_fee_chf = 12.90
+                      AND mo.extra_fee_chf >= 0
+                      AND mo.total_chf =
+                          mo.subtotal_chf
+                          + mo.delivery_fee_chf
+                          + mo.extra_fee_chf
+                  )
+                )
+              )
+            )
+          )
+        LIMIT 1
+      `, [requestId, tokenHash]);
+
+      const row = result.rows[0];
+
+      if (!row) {
+        return res.status(404).json({
+          ok: false,
+          error: "CHECKOUT_NOT_AVAILABLE"
+        });
+      }
+
+      if (
+        row.payment_phase !== "AWAITING_PAYMENT" ||
+        row.payment_method !== "ONLINE" ||
+        row.checkout_status !== "READY" ||
+        !row.invoice_url
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error: "CHECKOUT_NOT_READY"
+        });
+      }
+
+      let url: URL;
+
+      try {
+        url = new URL(row.invoice_url);
+      } catch {
+        return res.status(503).json({
+          ok: false,
+          error: "INVALID_STORED_CHECKOUT_LINK"
+        });
+      }
+
+      if (
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        row.invoice_url.length > 2048
+      ) {
+        return res.status(503).json({
+          ok: false,
+          error: "INVALID_STORED_CHECKOUT_LINK"
+        });
+      }
+
+      return res.json({
+        ok: true,
+        requestId,
+        checkoutAllowed: true,
+        checkoutUrl: row.invoice_url,
+        paymentConfirmed: false,
+        message: "Shopify-Zahlungsseite bereit."
+      });
+
+    } catch (error) {
+      console.error(
+        "ALO NOW CUSTOMER CHECKOUT LINK FAILED",
+        error instanceof Error ? error.name : "UNKNOWN"
+      );
+
+      return res.status(503).json({
+        ok: false,
+        error: "CHECKOUT_LINK_UNAVAILABLE"
+      });
+    }
+  }
+);
+
+
+// V3590_CHECKOUT_AFTER_CLAIM
+// Feature standardmaessig AUS.
+// Shopify-Aktion ausschliesslich nach Datenbank-COMMIT.
+async function prepareCheckoutAfterClaimV3590(
+  requestId: string
+): Promise<{attempted: boolean; prepared: boolean}> {
+  if (
+    process.env.ALO_NOW_AUTO_CHECKOUT_AFTER_CLAIM_ENABLED !== "true" ||
+    process.env.ALO_NOW_LIVE_DRAFT_CHECKOUT_ENABLED !== "true" ||
+    process.env.ALO_NOW_LIVE_CHECKOUT_ORCHESTRATOR_ENABLED !== "true"
+  ) {
+    return {attempted: false, prepared: false};
+  }
+
+  try {
+    const accessToken =
+      await getCheckoutShopifyTokenV3062();
+
+    const rawShop =
+      aloNowCheckoutEnvV3062.shopify.shop
+        .replace(/^https?:\/\//, "")
+        .replace(/\/$/, "");
+
+    const shopDomain =
+      rawShop.endsWith(".myshopify.com")
+        ? rawShop
+        : rawShop + ".myshopify.com";
+
+    if (
+      !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(
+        shopDomain
+      )
+    ) {
+      throw new Error("INVALID_SHOPIFY_DOMAIN");
+    }
+
+    const result =
+      await createAloNowLiveCheckoutV3060D(
+        aloNowCheckoutPoolV3062,
+        {
+          requestId,
+          shopDomain,
+          accessToken
+        }
+      );
+
+    if (!result.ok) {
+      console.error(
+        "ALO NOW V3590 CHECKOUT NOT READY",
+        result.reason
+      );
+
+      return {attempted: true, prepared: false};
+    }
+
+    return {attempted: true, prepared: true};
+  } catch (error) {
+    console.error(
+      "ALO NOW V3590 CHECKOUT FAILED",
+      error instanceof Error ? error.name : "UNKNOWN"
+    );
+
+    return {attempted: true, prepared: false};
+  }
+}
+
+// V3579_ATOMIC_SELF_ASSIGNMENT
+// Separater, deaktivierter Übernahmeweg.
+// Erst Übernahme und Zahlungsstatus committen; Shopify separat vorbereiten.
+aloNowRouter.post(
+  "/admin/order-requests/:id/self-assign",
+  requireStaffAuth,
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    if (
+      process.env.ALO_NOW_REQUESTS_ENABLED !== "true" ||
+      process.env.ALO_NOW_MANUAL_OFFERS_ENABLED !== "true" ||
+      process.env.ALO_NOW_ATOMIC_SELF_ASSIGN_ENABLED !== "true"
+    ) {
+      return res.status(503).json({
+        ok: false, error: "SELF_ASSIGN_DISABLED"
+      });
+    }
+
+    const staff = getStaffUser(res);
+    const role = String(staff.role ?? "").toUpperCase();
+    if (role !== "ADMIN" && role !== "MANAGER") {
+      return res.status(403).json({
+        ok: false, error: "FORBIDDEN"
+      });
+    }
+
+    const id = String(req.params.id ?? "");
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    if (!uuid.test(id)) {
+      return res.status(400).json({
+        ok: false, error: "INVALID_REQUEST_ID"
+      });
+    }
+
+    const staffId = String(staff.id);
+    const allowedWorkspaces = role === "ADMIN"
+      ? ["AARAU", "OLTEN"]
+      : (staff.allowedWorkspaces ?? []).filter(
+          (w: string) => w === "AARAU" || w === "OLTEN"
+        );
+
+    if (allowedWorkspaces.length === 0) {
+      return res.status(403).json({
+        ok: false, error: "NO_WORKSPACE_ACCESS"
+      });
+    }
+
+    const { db } = await import("../database/db.js");
+    const { randomUUID } = await import("node:crypto");
+    const client = await db.connect();
+    let transaction = false;
+
+    try {
+      await client.query("BEGIN");
+      transaction = true;
+      await client.query("SET LOCAL lock_timeout = '3s'");
+      await client.query("SET LOCAL statement_timeout = '12s'");
+
+      // Die Anfrage ist unser gemeinsamer Lock für konkurrierende Aktionen.
+      const requestResult = await client.query<{
+        status: string;
+        quote_status: string;
+        verified_at: Date | null;
+        verified_subtotal_chf: string;
+        driver_user_id: string | null;
+      }>(`
+        SELECT status, quote_status, verified_at,
+               verified_subtotal_chf, driver_user_id
+        FROM public.alo_now_order_requests
+        WHERE id = $1
+          AND workspace = ANY($2::text[])
+        FOR UPDATE
+      `, [id, allowedWorkspaces]);
+
+      const request = requestResult.rows[0];
+
+      if (!request) {
+        await client.query("ROLLBACK");
+        transaction = false;
+        return res.status(404).json({
+          ok: false, error: "REQUEST_NOT_FOUND"
+        });
+      }
+
+      if (
+        !["PENDING_REVIEW", "CONTACTED"].includes(request.status) ||
+        request.quote_status !== "MANUAL_APPROVAL" ||
+        !request.verified_at ||
+        request.driver_user_id !== null
+      ) {
+        await client.query("ROLLBACK");
+        transaction = false;
+        return res.status(409).json({
+          ok: false, error: "REQUEST_NOT_ELIGIBLE"
+        });
+      }
+
+      // Ausschliesslich das NEUESTE Angebot zählt.
+      const offerResult = await client.query<{
+        status: string;
+        total_chf: string;
+      }>(`
+        SELECT status, total_chf::text
+        FROM public.alo_now_manual_offers
+        WHERE request_id = $1
+          AND version = (
+            SELECT MAX(version)
+            FROM public.alo_now_manual_offers
+            WHERE request_id = $1
+          )
+          AND status = 'ACCEPTED'
+          AND subtotal_chf = $2::numeric
+          AND delivery_fee_chf = 12.90
+          AND extra_fee_chf >= 0
+          AND total_chf =
+              subtotal_chf + delivery_fee_chf + extra_fee_chf
+        LIMIT 1
+      `, [id, request.verified_subtotal_chf]);
+
+      const offer = offerResult.rows[0];
+
+      if (!offer) {
+        await client.query("ROLLBACK");
+        transaction = false;
+        return res.status(409).json({
+          ok: false, error: "LATEST_OFFER_NOT_ACCEPTED"
+        });
+      }
+
+      // Frühere Zuweisungen und Zahlungsversuche nicht überschreiben.
+      const existing = await client.query<{
+        acceptance_exists: boolean;
+        payment_blocked: boolean;
+        checkout_exists: boolean;
+      }>(`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM public.alo_now_merchant_acceptances
+            WHERE request_id = $1
+          ) AS acceptance_exists,
+          EXISTS (
+            SELECT 1 FROM public.alo_now_payment_states
+            WHERE request_id = $1
+              AND (
+                phase NOT IN ('AWAITING_DRIVER', 'DRIVER_ACCEPTED')
+                OR payment_method IS NOT NULL
+              )
+          ) AS payment_blocked,
+          EXISTS (
+            SELECT 1 FROM public.alo_now_checkout_attempts
+            WHERE request_id = $1
+          ) AS checkout_exists
+      `, [id]);
+
+      const prior = existing.rows[0];
+
+      if (
+        !prior ||
+        prior.acceptance_exists ||
+        prior.payment_blocked ||
+        prior.checkout_exists
+      ) {
+        await client.query("ROLLBACK");
+        transaction = false;
+        return res.status(409).json({
+          ok: false, error: "ASSIGNMENT_OR_PAYMENT_EXISTS"
+        });
+      }
+
+      // Die übernehmende Person wird gespeichert.
+      // INTERN erlaubt laut vorhandenem Schema keine assigned_driver_id.
+      await client.query(`
+        INSERT INTO public.alo_now_merchant_acceptances (
+          request_id, fulfillment_method, assigned_driver_id,
+          accepted_by, capacity_confirmed_at,
+          capacity_confirmed_until
+        )
+        VALUES (
+          $1, 'INTERNAL_DELIVERY', NULL, $2,
+          NOW(), NOW() + INTERVAL '15 minutes'
+        )
+      `, [id, staffId]);
+
+      await client.query(`
+        UPDATE public.alo_now_order_requests
+        -- V3593_INTERNAL_FULFILLMENT_FIX
+        -- Verantwortlicher bleibt in merchant_acceptances.accepted_by.
+        -- Keine Fahrer-ID und kein DRIVER_ACCEPTED-Status.
+        SET status = 'CONTACTED',
+            driver_user_id = NULL,
+            driver_accepted_at = NULL,
+            reservation_expires_at = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+          AND status IN ('PENDING_REVIEW', 'CONTACTED')
+      `, [id]);
+
+      // Noch keine Zahlung: Nur Erlaubnis, Checkout vorzubereiten.
+      // V3581_PAYMENT_STATE_TRANSITION
+      // Bestehende Vorstufen atomar aktualisieren;
+      // nie bestätigte, abgelaufene oder stornierte Zahlungen.
+      const paymentUpdate = await client.query(`
+        UPDATE public.alo_now_payment_states
+        SET phase = 'AWAITING_PAYMENT',
+            payment_method = 'ONLINE',
+            version = version + 1,
+            updated_at = NOW()
+        WHERE request_id = $1
+          AND phase IN ('AWAITING_DRIVER', 'DRIVER_ACCEPTED')
+          AND payment_method IS NULL
+        RETURNING request_id
+      `, [id]);
+
+      if (paymentUpdate.rowCount === 0) {
+        const paymentCheck = await client.query(`
+          SELECT 1
+          FROM public.alo_now_payment_states
+          WHERE request_id = $1
+          LIMIT 1
+        `, [id]);
+
+        if (paymentCheck.rowCount !== 0) {
+          throw new Error('PAYMENT_STATE_CONFLICT');
+        }
+
+        await client.query(`
+          INSERT INTO public.alo_now_payment_states (
+            id, request_id, phase, payment_method
+          )
+          VALUES ($1, $2, 'AWAITING_PAYMENT', 'ONLINE')
+        `, [randomUUID(), id]);
+      }
+
+      await client.query("COMMIT");
+      transaction = false;
+      const checkoutV3590 =
+        await prepareCheckoutAfterClaimV3590(id);
+
+      return res.json({
+        ok: true,
+        action: "SELF_ASSIGNED",
+        status: "CONTACTED",
+        paymentPhase: "AWAITING_PAYMENT",
+        amountCHF: offer.total_chf,
+        checkoutAllowed: false,
+        checkoutPrepared: checkoutV3590.prepared
+      });
+    } catch (error) {
+      if (transaction) {
+        await client.query("ROLLBACK").catch(() => undefined);
+      }
+      console.error(
+        "ALO NOW SELF ASSIGN FAILED",
+        error instanceof Error ? error.name : "UNKNOWN"
+      );
+      return res.status(503).json({
+        ok: false, error: "SELF_ASSIGN_UNAVAILABLE"
+      });
+    } finally {
+      client.release();
     }
   }
 );
