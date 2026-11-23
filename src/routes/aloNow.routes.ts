@@ -1415,3 +1415,369 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
     return res.status(503).json({ ok: false, error: 'REQUEST_STATUS_UNAVAILABLE' });
   }
 });
+
+
+// V3557_MANUAL_DRIVER_PREACCEPT
+// Manual offer must already be accepted and price-verified.
+// Driver acceptance is temporary; no Shopify order or charge.
+
+aloNowRouter.patch(
+  "/admin/order-requests/:id/offer-drivers",
+  requireStaffAuth,
+  async (req, res) => {
+
+    // V3563_GUARDED_DRIVER_RELEASE
+    if (process.env.ALO_NOW_MANUAL_DRIVER_DISPATCH_ENABLED !== "true") {
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_DRIVER_DISPATCH_NOT_ENABLED"
+      });
+    }
+
+    const staff = getStaffUser(res);
+    if (!["ADMIN", "MANAGER"].includes(String(staff.role))) {
+      return res.status(403).json({ok:false,error:"FORBIDDEN"});
+    }
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+      return res.status(503).json({ok:false,error:"REQUESTS_DISABLED"});
+    }
+    const id = String(req.params.id ?? "");
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ok:false,error:"INVALID_REQUEST_ID"});
+    }
+
+    const {db} = await import("../database/db.js");
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const rows = await client.query<{
+        id:string; workspace:string; status:string;
+        quote_status:string; verified_at:Date|null;
+        verified_subtotal_chf:string; driver_user_id:string|null;
+      }>(`
+        SELECT id,workspace,status,quote_status,verified_at,
+               verified_subtotal_chf,driver_user_id
+        FROM alo_now_order_requests WHERE id=$1 FOR UPDATE
+      `,[id]);
+
+      const request = rows.rows[0];
+      if (!request) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ok:false,error:"REQUEST_NOT_FOUND"});
+      }
+
+      const identity = staff as typeof staff & {
+        allowedWorkspaces?:string[];
+      };
+      if (String(staff.role) !== "ADMIN" &&
+          !identity.allowedWorkspaces?.includes(request.workspace)) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ok:false,error:"WORKSPACE_FORBIDDEN"});
+      }
+
+      if (!["PENDING_REVIEW","CONTACTED"].includes(request.status) ||
+          request.quote_status !== "MANUAL_APPROVAL" ||
+          !request.verified_at || request.driver_user_id !== null) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ok:false,error:"REQUEST_NOT_ELIGIBLE"});
+      }
+
+      const offer = await client.query<{id:string}>(`
+        SELECT o.id FROM alo_now_manual_offers o
+        WHERE o.request_id=$1
+          AND o.version=(
+            SELECT MAX(v.version) FROM alo_now_manual_offers v
+            WHERE v.request_id=$1
+          )
+          AND o.status='ACCEPTED'
+          AND o.subtotal_chf=$2::numeric
+          AND o.delivery_fee_chf>=12.90
+          AND o.extra_fee_chf>=0
+          AND o.total_chf=o.subtotal_chf+
+              o.delivery_fee_chf+o.extra_fee_chf
+        LIMIT 1
+      `,[id,request.verified_subtotal_chf]);
+
+      if (!offer.rows[0]) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ok:false,error:"NO_VERIFIED_ACCEPTED_OFFER"});
+      }
+
+      const conflict = await client.query<{n:boolean}>(`
+        SELECT EXISTS (
+          SELECT 1 FROM alo_now_merchant_acceptances
+          WHERE request_id=$1
+            AND fulfillment_method='INTERNAL_DELIVERY'
+            AND capacity_confirmed_until>NOW()
+        ) AS n
+      `,[id]);
+
+      if (conflict.rows[0]?.n) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ok:false,error:"INTERNAL_DELIVERY_ACTIVE"});
+      }
+
+      const updated = await client.query(`
+        UPDATE alo_now_order_requests
+        SET status='DRIVER_OFFERED',
+            offered_at=NOW(),updated_at=NOW()
+        WHERE id=$1 AND status IN ('PENDING_REVIEW','CONTACTED')
+        RETURNING id,status,workspace,offered_at
+      `,[id]);
+
+      await client.query("COMMIT");
+      // V3562_DRIVER_PUSH
+      // The DB transition is committed before external push delivery.
+      // Push errors never roll back an already released request.
+      try {
+        const {sendAloNowDriverOfferPushV3562} =
+          await import(
+            "../modules/aloNow/aloNowDriverOfferPush.v3562.js"
+          );
+        const push = await sendAloNowDriverOfferPushV3562(
+          id,
+          request.workspace
+        );
+        console.info("ALO_NOW_DRIVER_PUSH_RESULT", {
+          recipients: push.recipients,
+          accepted: push.accepted,
+          errors: push.errors
+        });
+      } catch (_pushError) {
+        console.error("ALO_NOW_DRIVER_PUSH_FAILED");
+      }
+
+      return res.json({
+        ok:true,request:updated.rows[0],checkoutAllowed:false
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      console.error("V3557 DRIVER RELEASE FAILED");
+      return res.status(503).json({ok:false,error:"DRIVER_RELEASE_UNAVAILABLE"});
+    } finally {
+      client.release();
+    }
+  }
+);
+
+aloNowRouter.get(
+  "/driver/order-request-offers",
+  requireStaffAuth,
+  async (_req,res) => {
+
+    // V3563_GUARDED_DRIVER_RELEASE
+    if (process.env.ALO_NOW_MANUAL_DRIVER_DISPATCH_ENABLED !== "true") {
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_DRIVER_DISPATCH_NOT_ENABLED"
+      });
+    }
+
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+      return res.status(503).json({ok:false,error:"REQUESTS_DISABLED"});
+    }
+    const staff=getStaffUser(res);
+    try {
+      const {db}=await import("../database/db.js");
+      const result=await db.query(`
+        SELECT r.id,r.workspace,r.road_distance_km,
+               r.created_at,
+               jsonb_array_length(r.items) AS line_count
+        FROM alo_now_order_requests r
+        JOIN alo_driver_profiles d ON d.staff_user_id=$1
+        WHERE r.status='DRIVER_OFFERED'
+          AND r.quote_status='MANUAL_APPROVAL'
+          AND d.approved=TRUE
+          AND d.availability_status='ONLINE'
+          AND d.last_seen_at>NOW()-INTERVAL '3 minutes'
+          AND (d.home_workspace='ONLINE' OR d.home_workspace=r.workspace)
+          AND r.verified_at IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM alo_now_manual_offers o
+            WHERE o.request_id=r.id
+              AND o.version=(
+                SELECT MAX(v.version) FROM alo_now_manual_offers v
+                WHERE v.request_id=r.id
+              )
+              AND o.status='ACCEPTED'
+              AND o.subtotal_chf=r.verified_subtotal_chf
+              AND o.delivery_fee_chf>=12.90
+              AND o.extra_fee_chf>=0
+              AND o.total_chf=o.subtotal_chf+
+                  o.delivery_fee_chf+o.extra_fee_chf
+          )
+        ORDER BY r.created_at ASC LIMIT 30
+      `,[staff.id]);
+      res.setHeader("Cache-Control","no-store");
+      return res.json({ok:true,offers:result.rows,checkoutAllowed:false});
+    } catch (error) {
+      console.error("V3557 DRIVER LIST FAILED");
+      return res.status(503).json({ok:false,error:"OFFERS_UNAVAILABLE"});
+    }
+  }
+);
+
+aloNowRouter.post(
+  "/driver/order-request-offers/:id/accept",
+  requireStaffAuth,
+  async (req,res) => {
+
+    // V3563_GUARDED_DRIVER_RELEASE
+    if (process.env.ALO_NOW_MANUAL_DRIVER_DISPATCH_ENABLED !== "true") {
+      return res.status(503).json({
+        ok: false,
+        error: "MANUAL_DRIVER_DISPATCH_NOT_ENABLED"
+      });
+    }
+
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+      return res.status(503).json({ok:false,error:"REQUESTS_DISABLED"});
+    }
+    const id=String(req.params.id??"");
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+      return res.status(400).json({ok:false,error:"INVALID_REQUEST_ID"});
+    }
+    const staff=getStaffUser(res);
+    const {db}=await import("../database/db.js");
+    const client=await db.connect();
+    try {
+      await client.query("BEGIN");
+      const driver=await client.query<{
+        home_workspace:string;
+        max_active_deliveries:number;
+        transport_type:string;
+      }>(`
+        SELECT home_workspace,max_active_deliveries,transport_type
+        FROM alo_driver_profiles
+        WHERE staff_user_id=$1 AND approved=TRUE
+          AND availability_status='ONLINE'
+          AND last_seen_at>NOW()-INTERVAL '3 minutes'
+        FOR UPDATE
+      `,[staff.id]);
+
+      const d=driver.rows[0];
+      if (!d) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ok:false,error:"DRIVER_NOT_AVAILABLE"});
+      }
+
+      const vehicle=String(d.transport_type).toUpperCase();
+      const limit=vehicle==="SCOOTER"?2:vehicle==="CAR"?4:0;
+      const slots=Math.min(limit,Number(d.max_active_deliveries)||0);
+
+      const capacity=await client.query<{n:number}>(`
+        SELECT (
+          (SELECT COUNT(*) FROM alo_now_order_requests
+           WHERE driver_user_id=$1 AND status='DRIVER_ACCEPTED'
+             AND reservation_expires_at>NOW())
+          +
+          (SELECT COUNT(*) FROM alo_now_deliveries
+           WHERE assigned_driver_user_id=$1
+             AND delivery_status IN
+               ('DRIVER_ASSIGNED','READY_FOR_PICKUP','PICKED_UP','ON_THE_WAY'))
+        )::integer AS n
+      `,[staff.id]);
+
+      if (slots<1 || Number(capacity.rows[0]?.n??0)>=slots) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ok:false,error:"DRIVER_CAPACITY_UNAVAILABLE"});
+      }
+
+      const updated=await client.query(`
+        UPDATE alo_now_order_requests r
+        SET status='DRIVER_ACCEPTED',driver_user_id=$2,
+            driver_accepted_at=NOW(),
+            reservation_expires_at=NOW()+INTERVAL '10 minutes',
+            updated_at=NOW()
+        WHERE r.id=$1 AND r.status='DRIVER_OFFERED'
+          AND r.quote_status='MANUAL_APPROVAL'
+          AND (r.workspace=$3 OR $3='ONLINE')
+          AND EXISTS (
+            SELECT 1 FROM alo_now_manual_offers o
+            WHERE o.request_id=r.id
+              AND o.version=(
+                SELECT MAX(v.version) FROM alo_now_manual_offers v
+                WHERE v.request_id=r.id
+              )
+              AND o.status='ACCEPTED'
+              AND o.subtotal_chf=r.verified_subtotal_chf
+              AND o.delivery_fee_chf>=12.90
+              AND o.extra_fee_chf>=0
+              AND o.total_chf=o.subtotal_chf+
+                  o.delivery_fee_chf+o.extra_fee_chf
+          )
+        RETURNING id,status,workspace,reservation_expires_at
+      `,[id,staff.id,d.home_workspace]);
+
+      if (!updated.rows[0]) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ok:false,error:"ALREADY_TAKEN_OR_NOT_ELIGIBLE"});
+      }
+
+      await client.query("COMMIT");
+      return res.json({
+        ok:true,request:updated.rows[0],checkoutAllowed:false
+      });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(()=>undefined);
+      console.error("V3557 DRIVER ACCEPT FAILED");
+      return res.status(503).json({ok:false,error:"DRIVER_ACCEPT_UNAVAILABLE"});
+    } finally {
+      client.release();
+    }
+  }
+);
+
+
+// V3558_APPROVED_DRIVER_HEARTBEAT
+// Only refresh an already approved and online driver.
+// Never changes availability, approval, payment or assignment.
+aloNowRouter.post(
+  "/driver/heartbeat",
+  requireStaffAuth,
+  async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+      return res.status(503).json({
+        ok: false,
+        error: "ALO_NOW_REQUESTS_NOT_ENABLED"
+      });
+    }
+
+    const staff = getStaffUser(res);
+
+    try {
+      const { db } = await import("../database/db.js");
+
+      const result = await db.query<{last_seen_at: Date}>(`
+        UPDATE alo_driver_profiles
+        SET last_seen_at = NOW()
+        WHERE staff_user_id = $1
+          AND approved = TRUE
+          AND availability_status = 'ONLINE'
+        RETURNING last_seen_at
+      `, [staff.id]);
+
+      const row = result.rows[0];
+
+      if (!row) {
+        return res.status(409).json({
+          ok: false,
+          error: "ALO_DRIVER_NOT_APPROVED_OR_OFFLINE"
+        });
+      }
+
+      return res.json({
+        ok: true,
+        lastSeenAt: row.last_seen_at
+      });
+    } catch (_error) {
+      console.error("V3558 DRIVER HEARTBEAT FAILED");
+      return res.status(503).json({
+        ok: false,
+        error: "DRIVER_HEARTBEAT_UNAVAILABLE"
+      });
+    }
+  }
+);
