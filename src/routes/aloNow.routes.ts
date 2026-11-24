@@ -1672,6 +1672,93 @@ aloNowRouter.patch(
   }
 );
 
+
+// V3644B_ACCEPTED_TOUR
+// Read-only list of internally accepted requests.
+// Never confirms payment or creates a Shopify order.
+aloNowRouter.get(
+  "/driver/accepted-tour-requests",
+  requireStaffAuth,
+  async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+
+    if (process.env.ALO_NOW_REQUESTS_ENABLED !== "true") {
+      return res.status(503).json({
+        ok: false, error: "REQUESTS_DISABLED"
+      });
+    }
+
+    const staff = getStaffUser(res);
+
+    try {
+      const {db} = await import("../database/db.js");
+
+      const result = await db.query(`
+        SELECT
+          r.id,
+          r.workspace,
+          r.status,
+          r.quote_status,
+          r.road_distance_km,
+          r.delivery_address,
+          r.items,
+          r.created_at,
+          jsonb_array_length(r.items) AS line_count,
+          r.verified_subtotal_chf,
+          r.quoted_delivery_fee_chf,
+          p.phase AS payment_phase,
+          c.status AS checkout_status,
+          c.expected_total_chf,
+          o.total_chf AS agreed_total_chf,
+          NULL::text AS shopify_order_id,
+          FALSE AS verified_paid,
+          (m.capacity_confirmed_until > NOW())
+            AS reservation_active
+        FROM public.alo_now_order_requests r
+        JOIN public.alo_now_merchant_acceptances m
+          ON m.request_id = r.id
+        LEFT JOIN public.alo_now_payment_states p
+          ON p.request_id = r.id
+        LEFT JOIN LATERAL (
+          SELECT status, expected_total_chf
+          FROM public.alo_now_checkout_attempts ca
+          WHERE ca.request_id = r.id
+          ORDER BY ca.created_at DESC
+          LIMIT 1
+        ) c ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT total_chf
+          FROM public.alo_now_manual_offers mo
+          WHERE mo.request_id = r.id
+          ORDER BY mo.version DESC
+          LIMIT 1
+        ) o ON TRUE
+        WHERE r.workspace = 'AARAU'
+          AND r.status = 'CONTACTED'
+          AND m.fulfillment_method = 'INTERNAL_DELIVERY'
+          AND m.accepted_by = $1
+          AND p.phase = 'AWAITING_PAYMENT'
+        ORDER BY r.created_at DESC
+        LIMIT 30
+      `, [String(staff.id)]);
+
+      return res.json({
+        ok: true,
+        offers: result.rows
+      });
+    } catch (error) {
+      console.error(
+        "V3644B ACCEPTED TOUR READ FAILED",
+        error instanceof Error ? error.name : "UNKNOWN"
+      );
+      return res.status(503).json({
+        ok: false,
+        error: "ACCEPTED_TOUR_UNAVAILABLE"
+      });
+    }
+  }
+);
+
 aloNowRouter.get(
   "/driver/order-request-offers",
   requireStaffAuth,
