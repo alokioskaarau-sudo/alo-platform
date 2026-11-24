@@ -26,28 +26,92 @@ async function getJson(url: string, init: RequestInit): Promise<unknown> {
   return await response.json();
 }
 
-async function resolveSwissStreetAddress(address: string): Promise<Coordinates | null> {
-  // Minimum hygiene: require a house number and Swiss postal code. Never "guess" a fuzzy street.
-  const zip = address.match(/\b[1-9][0-9]{3}\b/)?.[0];
-  if (!zip || !/\b\d+[a-zA-Z]?\b/.test(address)) return null;
+// V3630: Require one exact Swiss street-address match.
+// Similar house numbers must never be treated as equal.
+async function resolveSwissStreetAddress(
+  address: string
+): Promise<Coordinates | null> {
+  const match = address.trim().match(
+    /^(.+?)\s*,\s*([1-9][0-9]{3})\s+(.+)$/
+  );
+
+  if (!match) return null;
+
+  const streetAddress = match[1].trim();
+  const zip = match[2];
+  const town = match[3].trim();
+
+  if (
+    !/^.+\s+[0-9]+[a-z]?(?:\.[0-9]+)?$/i.test(streetAddress)
+    || !town
+  ) return null;
+
+  const normalize = (value: string) =>
+    value
+      .normalize("NFKC")
+      .toLocaleLowerCase("de-CH")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const expected = normalize(
+    `${streetAddress} ${zip} ${town}`
+  );
+
   const url = new URL(GEOCODE_URL);
   url.searchParams.set("type", "locations");
   url.searchParams.set("origins", "address");
-  url.searchParams.set("searchText", address.replace(/\s*,\s*/g, " ").slice(0, 160));
-  url.searchParams.set("limit", "5");
+  url.searchParams.set("searchText", address.slice(0, 160));
+  url.searchParams.set("limit", "10");
   url.searchParams.set("sr", "4326");
-  const payload = await getJson(url.toString(), { method: "GET", headers: { Accept: "application/json" } }) as {
-    results?: Array<{ attrs?: { lon?: number; lat?: number; detail?: string; origin?: string } }>;
+
+  const payload = await getJson(url.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" }
+  }) as {
+    results?: Array<{
+      attrs?: {
+        lon?: number;
+        lat?: number;
+        label?: string;
+        origin?: string;
+      };
+    }>;
   };
-  // Fail closed on ambiguity, absent coordinates or zip mismatch.
-  const candidates = (payload.results ?? []).filter(x =>
-    x.attrs?.origin === "address" &&
-    typeof x.attrs.lon === "number" && Number.isFinite(x.attrs.lon) &&
-    typeof x.attrs.lat === "number" && Number.isFinite(x.attrs.lat) &&
-    new RegExp(`\\b${zip}\\b`).test(String(x.attrs.detail ?? ""))
-  );
+
+  const candidates = (payload.results ?? []).filter(item => {
+    const a = item.attrs;
+
+    if (
+      a?.origin !== "address" ||
+      typeof a.lon !== "number" ||
+      !Number.isFinite(a.lon) ||
+      typeof a.lat !== "number" ||
+      !Number.isFinite(a.lat)
+    ) return false;
+
+    const label = normalize(String(a.label ?? ""));
+
+    // Allow only an optional two-letter canton suffix.
+    const exact =
+      label === expected ||
+      (
+        label.startsWith(expected + " ") &&
+        /^[a-z]{2}$/.test(
+          label.slice(expected.length + 1)
+        )
+      );
+
+    return exact;
+  });
+
+  // Ambiguous or missing addresses remain blocked.
   if (candidates.length !== 1) return null;
-  return [candidates[0].attrs!.lon!, candidates[0].attrs!.lat!];
+
+  return [
+    candidates[0].attrs!.lon!,
+    candidates[0].attrs!.lat!
+  ];
 }
 
 async function getDrivingKm(origin: Coordinates, target: Coordinates, apiKey: string): Promise<number | null> {
