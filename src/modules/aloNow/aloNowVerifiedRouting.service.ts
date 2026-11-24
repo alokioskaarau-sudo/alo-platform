@@ -8,7 +8,7 @@ import { calculateAloNowDeliveryQuote } from "./aloNowDeliveryQuote.service.js";
 type Workspace = "AARAU" | "OLTEN";
 type Coordinates = [number, number]; // [longitude, latitude]
 const GEOCODE_URL = "https://api3.geo.admin.ch/rest/services/ech/SearchServer";
-const ROUTE_URL = "https://api.openrouteservice.org/v2/directions/driving-car";
+const ROUTE_URL = "https://api.heigit.org/openrouteservice/v2/directions/driving-car";
 
 function parseOrigin(workspace: Workspace): Coordinates | null {
   const raw = process.env[`ALO_NOW_${workspace}_ORIGIN_LON_LAT`];
