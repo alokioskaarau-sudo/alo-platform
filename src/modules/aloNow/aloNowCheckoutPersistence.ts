@@ -90,7 +90,31 @@ export async function reserveAloNowCheckoutAttempt(
                    WHERE m.request_id = r.id
                      AND m.fulfillment_method = 'INTERNAL_DELIVERY'
                      AND m.capacity_confirmed_at <= clock_timestamp()
-                     AND m.capacity_confirmed_until > clock_timestamp()
+                     AND (m.capacity_confirmed_until > clock_timestamp() OR (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+))
                      AND btrim(m.accepted_by) <> ''
                      AND m.assigned_driver_id IS NULL
                  )
@@ -230,7 +254,31 @@ export async function markAloNowCheckoutReady(
                        WHERE m.request_id = r.id
                          AND m.fulfillment_method = 'INTERNAL_DELIVERY'
                          AND m.capacity_confirmed_at <= clock_timestamp()
-                         AND m.capacity_confirmed_until > clock_timestamp()
+                         AND (m.capacity_confirmed_until > clock_timestamp() OR (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+))
                          AND btrim(m.accepted_by) <> ''
                          AND m.assigned_driver_id IS NULL
                      )

@@ -1453,7 +1453,31 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
                     AND mi.assigned_driver_id IS NULL
                     AND btrim(mi.accepted_by) <> ''
                     AND mi.capacity_confirmed_at <= NOW()
-                    AND mi.capacity_confirmed_until > NOW()
+                    AND (mi.capacity_confirmed_until > NOW() OR (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+))
                 )
               )
             )
@@ -1462,6 +1486,31 @@ aloNowRouter.post('/order-requests/:id/status', async (req, res) => {
               FROM public.alo_now_merchant_acceptances m
               WHERE m.request_id = r.id
                 AND m.capacity_confirmed_until <= NOW()
+AND NOT (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+)
             )
             AND p.phase = 'AWAITING_PAYMENT'
             AND p.payment_method = 'ONLINE'
@@ -2270,7 +2319,31 @@ aloNowRouter.post(
                   AND mi.assigned_driver_id IS NULL
                   AND btrim(mi.accepted_by) <> ''
                   AND mi.capacity_confirmed_at <= NOW()
-                  AND mi.capacity_confirmed_until > NOW()
+                  AND (mi.capacity_confirmed_until > NOW() OR (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+))
               )
             )
           )
@@ -2279,6 +2352,31 @@ aloNowRouter.post(
             FROM public.alo_now_merchant_acceptances merchant
             WHERE merchant.request_id = r.id
               AND merchant.capacity_confirmed_until <= NOW()
+AND NOT (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+)
           )
           AND r.customer_status_token_hash = $2
           AND r.workspace = 'AARAU'
@@ -2335,7 +2433,31 @@ aloNowRouter.post(
                 WHERE m.request_id = r.id
                   AND m.fulfillment_method = 'INTERNAL_DELIVERY'
                   AND m.capacity_confirmed_at <= clock_timestamp()
-                  AND m.capacity_confirmed_until > clock_timestamp()
+                  AND (m.capacity_confirmed_until > clock_timestamp() OR (
+  r.status = 'CONTACTED'
+  AND r.quote_status = 'MANUAL_APPROVAL'
+  AND r.driver_user_id IS NULL
+  AND r.verified_at IS NOT NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.alo_now_manual_offers recovery_offer
+    WHERE recovery_offer.request_id = r.id
+      AND recovery_offer.status = 'ACCEPTED'
+      AND recovery_offer.version = (
+        SELECT MAX(recovery_latest.version)
+        FROM public.alo_now_manual_offers recovery_latest
+        WHERE recovery_latest.request_id = r.id
+      )
+      AND recovery_offer.subtotal_chf =
+          r.verified_subtotal_chf
+      AND recovery_offer.delivery_fee_chf = 12.90
+      AND recovery_offer.extra_fee_chf >= 0
+      AND recovery_offer.total_chf =
+          recovery_offer.subtotal_chf
+          + recovery_offer.delivery_fee_chf
+          + recovery_offer.extra_fee_chf
+  )
+))
                   AND btrim(m.accepted_by) <> ''
                   AND m.assigned_driver_id IS NULL
               )
