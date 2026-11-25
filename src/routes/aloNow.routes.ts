@@ -876,6 +876,15 @@ aloNowRouter.get(
   "/admin/order-requests",
   requireStaffAuth,
   async (_req, res) => {
+    // V3663B_ADMIN_ARCHIVE
+    const viewV3663B = String(_req.query.view ?? "active");
+    if (viewV3663B !== "active" && viewV3663B !== "archive") {
+      return res.status(400).json({
+        ok: false, error: "INVALID_REQUEST_VIEW"
+      });
+    }
+    const archiveViewV3663B = viewV3663B === "archive";
+
     const staffUser = getStaffUser(res);
     const role = String(
       (staffUser as unknown as {role?: string}).role ?? ""
@@ -939,16 +948,97 @@ aloNowRouter.get(
             LIMIT 1
           ) offer ON TRUE
           -- ALO_NOW_V2862_ADMIN_OFFER_STATUS
-        WHERE r.status IN (
-          'PENDING_REVIEW',
-          'CONTACTED',
-          'DRIVER_OFFERED',
-          'DRIVER_ACCEPTED'
+        WHERE r.workspace = ANY($1::text[])
+AND (
+  ($2::boolean AND
+(
+  r.status IN (
+    'EXPIRED', 'REJECTED', 'CANCELLED',
+    'DELIVERED', 'COMPLETED'
+  )
+  OR (
+    r.status IN (
+      'PENDING_REVIEW', 'CONTACTED',
+      'DRIVER_OFFERED', 'DRIVER_ACCEPTED'
+    )
+    AND r.created_at < NOW() - INTERVAL '24 hours'
+    AND r.delivery_contact IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_checkout_attempts ca
+      WHERE ca.request_id = r.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_merchant_acceptances ma
+      WHERE ma.request_id = r.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_manual_offers mo
+      WHERE mo.request_id = r.id
+        AND (
+          mo.status = 'ACCEPTED'
+          OR (
+            mo.status = 'OFFERED'
+            AND mo.expires_at > NOW()
+          )
         )
-        AND r.workspace = ANY($1::text[])
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_payment_states ps
+      WHERE ps.request_id = r.id
+        AND ps.phase IN (
+          'PAYMENT_CONFIRMED', 'CASH_CONFIRMED'
+        )
+    )
+  )
+)
+)
+  OR
+  (NOT $2::boolean AND NOT
+(
+  r.status IN (
+    'EXPIRED', 'REJECTED', 'CANCELLED',
+    'DELIVERED', 'COMPLETED'
+  )
+  OR (
+    r.status IN (
+      'PENDING_REVIEW', 'CONTACTED',
+      'DRIVER_OFFERED', 'DRIVER_ACCEPTED'
+    )
+    AND r.created_at < NOW() - INTERVAL '24 hours'
+    AND r.delivery_contact IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_checkout_attempts ca
+      WHERE ca.request_id = r.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_merchant_acceptances ma
+      WHERE ma.request_id = r.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_manual_offers mo
+      WHERE mo.request_id = r.id
+        AND (
+          mo.status = 'ACCEPTED'
+          OR (
+            mo.status = 'OFFERED'
+            AND mo.expires_at > NOW()
+          )
+        )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM alo_now_payment_states ps
+      WHERE ps.request_id = r.id
+        AND ps.phase IN (
+          'PAYMENT_CONFIRMED', 'CASH_CONFIRMED'
+        )
+    )
+  )
+)
+)
+)
         ORDER BY r.created_at DESC
         LIMIT 100
-      `, [allowedWorkspaces]);
+      `, [allowedWorkspaces, archiveViewV3663B]);
 
       // V2890: Display actual capacity only after the new schema has been applied.
       const capacityByRequest = new Map<string, {
