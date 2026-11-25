@@ -690,6 +690,31 @@ aloNowRouter.post("/order-requests", async (req, res) => {
   const address = typeof body.address === "string" ? body.address.trim() : "";
   const clientRequestId = typeof body.clientRequestId === "string" ? body.clientRequestId.trim() : "";
   const items = body.items;
+
+  // V3658_NEW_CONTACT
+  const {validateAloNowDeliveryContact,
+    formatAloNowDeliveryAddress} =
+    await import("../modules/aloNow/aloNowDeliveryContact.js");
+
+  let validatedContactV3658:
+    ReturnType<typeof validateAloNowDeliveryContact> | null = null;
+
+  if (body.deliveryContact !== undefined) {
+    try {
+      validatedContactV3658 =
+        validateAloNowDeliveryContact(body.deliveryContact);
+      if (formatAloNowDeliveryAddress(validatedContactV3658)
+          !== address) {
+        return res.status(422).json({
+          ok:false,error:"DELIVERY_ADDRESS_MISMATCH"
+        });
+      }
+    } catch {
+      return res.status(422).json({
+        ok:false,error:"INVALID_DELIVERY_CONTACT"
+      });
+    }
+  }
   if (!(["AARAU", "OLTEN"].includes(workspace)) || address.length < 8 || address.length > 180 ||
       !/^[A-Za-z0-9_-]{16,100}$/.test(clientRequestId) ||
       !Array.isArray(items) || items.length < 1 || items.length > 15 ||
@@ -728,13 +753,17 @@ aloNowRouter.post("/order-requests", async (req, res) => {
     const result = await db.query<{id: string; status: string; created_at: Date}>(`
       INSERT INTO alo_now_order_requests
         (id, client_request_id, workspace, delivery_address, items,
-         quote_status, road_distance_km, quoted_delivery_fee_chf, verified_subtotal_chf, verified_at, customer_status_token_hash)
-      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,NOW(),$10)
+         quote_status, road_distance_km, quoted_delivery_fee_chf, verified_subtotal_chf, verified_at, customer_status_token_hash, delivery_contact)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,NOW(),$10,$11::jsonb)
       ON CONFLICT (client_request_id) DO NOTHING
       RETURNING id, status, created_at
     `, [randomUUID(), clientRequestId, workspace, address,
         JSON.stringify(verifiedCart.items), quote.status, quote.roadDistanceKm,
-        quote.deliveryFeeCHF, verifiedCart.subtotalCHF, customerStatusTokenHash]);
+        quote.deliveryFeeCHF, verifiedCart.subtotalCHF,
+        customerStatusTokenHash,
+        validatedContactV3658
+          ? JSON.stringify(validatedContactV3658)
+          : null]);
     if (!result.rows[0]) {
       return res.status(409).json({ ok: false, error: "REQUEST_ID_ALREADY_USED" });
     }
@@ -747,6 +776,95 @@ aloNowRouter.post("/order-requests", async (req, res) => {
     return res.status(503).json({ ok: false, error: "ORDER_REQUEST_UNAVAILABLE" });
   }
 });
+
+
+// V3658_CUSTOMER_CONTACT_RECOVERY
+aloNowRouter.post(
+  "/order-requests/:id/delivery-contact",
+  async (req,res) => {
+    res.setHeader("Cache-Control","no-store");
+
+    const requestId=String(req.params.id ?? "");
+    const token=req.body?.statusToken;
+
+    if (
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(requestId) ||
+      typeof token !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(token)
+    ) {
+      return res.status(400).json({
+        ok:false,error:"INVALID_CONTACT_AUTHORIZATION"
+      });
+    }
+
+    try {
+      const {createHash}=await import("node:crypto");
+      const {db}=await import("../database/db.js");
+      const {
+        validateAloNowDeliveryContact,
+        formatAloNowDeliveryAddress
+      }=await import("../modules/aloNow/aloNowDeliveryContact.js");
+
+      let contact;
+      try {
+        contact=validateAloNowDeliveryContact(
+          req.body?.deliveryContact
+        );
+      } catch {
+        return res.status(422).json({
+          ok:false,error:"INVALID_DELIVERY_CONTACT"
+        });
+      }
+
+      const tokenHash=createHash("sha256")
+        .update(token).digest("hex");
+
+      const address=formatAloNowDeliveryAddress(contact);
+
+      const result=await db.query(`
+        UPDATE public.alo_now_order_requests r
+        SET delivery_contact=$3::jsonb,
+            updated_at=NOW()
+        WHERE r.id=$1
+          AND r.customer_status_token_hash=$2
+          AND r.workspace='AARAU'
+          AND r.delivery_address=$4
+          AND r.delivery_contact IS NULL
+          AND r.status IN ('PENDING_REVIEW','CONTACTED')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM public.alo_now_checkout_attempts a
+            WHERE a.request_id=r.id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM public.alo_now_payment_states p
+            WHERE p.request_id=r.id
+              AND p.phase NOT IN ('AWAITING_PAYMENT')
+          )
+        RETURNING r.id
+      `,[requestId,tokenHash,JSON.stringify(contact),address]);
+
+      if (result.rowCount !== 1) {
+        return res.status(409).json({
+          ok:false,error:"CONTACT_UPDATE_NOT_ALLOWED"
+        });
+      }
+
+      return res.json({
+        ok:true,contactSaved:true,checkoutAllowed:false
+      });
+    } catch (error) {
+      console.error(
+        "V3658 CONTACT RECOVERY FAILED",
+        error instanceof Error ? error.name : "UNKNOWN"
+      );
+      return res.status(503).json({
+        ok:false,error:"CONTACT_UPDATE_UNAVAILABLE"
+      });
+    }
+  }
+);
 
 export default aloNowRouter;
 

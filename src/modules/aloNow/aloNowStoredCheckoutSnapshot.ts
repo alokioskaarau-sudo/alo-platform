@@ -182,7 +182,13 @@ export function validateAloNowStoredCheckoutRow(
       !== address
   ) reject("STORED_DELIVERY_ADDRESS_MISMATCH");
 
-  const fee = moneyCents(row.delivery_fee_chf);
+  // V3658_MANUAL_FEE_FROM_ACCEPTED_OFFER
+  const manualFeeRow = row as typeof row & {
+    manual_delivery_fee_chf?: string | null;
+  };
+  const fee = row.quote_status === "MANUAL_APPROVAL"
+    ? moneyCents(manualFeeRow.manual_delivery_fee_chf)
+    : moneyCents(row.delivery_fee_chf);
   if (fee !== 1290n)
     reject("INVALID_DELIVERY_FEE");
 
